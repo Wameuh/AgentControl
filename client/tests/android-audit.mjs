@@ -831,6 +831,15 @@ await step("a24-settings", async () => {
   await sleep(500);
   await shot("a24-settings");
   await collect("a24-settings");
+  // Y4 : la vue s'ouvre en liste de sections fermées (lignes 56 px) —
+  // référentiel visuel de la spec.
+  await shot("a13-settings-list");
+  await collect("a13-settings-list");
+  // Tap sur la section « Mises à jour » → sous-écran : les autres
+  // sections disparaissent, le titre monte dans l'en-tête.
+  await tap("#s-sec-update > summary", 500);
+  await shot("a13b-settings-section");
+  await collect("a13b-settings-section");
   await tap("#s-checkupdate", 800);
   await shot("a24b-settings-update");
   await collect("a24b-settings-update");

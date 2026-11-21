@@ -27,4 +27,7 @@ kotlin {
 
 dependencies {
     implementation(project(":tauri-android"))
+    // WindowCompat.getInsetsController (barres système, Y4) — même
+    // version que le plugin notification officiel.
+    implementation("androidx.core:core-ktx:1.9.0")
 }

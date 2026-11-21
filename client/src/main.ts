@@ -71,6 +71,8 @@ import { initGestures } from "./mobile/gestures";
 import { initMapGestures } from "./mobile/map-gestures";
 import { initPermDock } from "./mobile/perm-dock";
 import { initComposerMobile } from "./mobile/composer-mobile";
+import { initSettingsMobile } from "./mobile/settings-mobile";
+import { tick } from "./mobile/haptics";
 import { initToolRuns } from "./mobile/tool-runs";
 import { initTermKeys } from "./mobile/term-keys";
 import { appMenuItems } from "./mobile/app-menu";
@@ -239,7 +241,12 @@ renderer.bind({
 });
 // Canaux d'alerte branchés sur le diff partagé (state-diff) — sons et
 // notifications OS restent indépendants mais voient les mêmes transitions.
+// Question entrante au premier plan → vibration courte (Y4, Android
+// seul — en arrière-plan c'est la notif OS qui porte le signal).
 stateDiff.onTransition((kind) => sounds.alert(kind));
+stateDiff.onTransition((kind) => {
+  if (kind === "question" && document.hasFocus()) tick("alert");
+});
 stateDiff.onTransition((kind, s) => notifications.alert(kind, s));
 // Annulation des notifs OS quand leur condition se résout (#184) :
 // sortie de waiting_input → la « question » n'a plus lieu d'être ;
@@ -551,6 +558,8 @@ initMapGestures();
 // Dock de permission (S3) + composer pilule (C1) — no-ops hors Android.
 initPermDock((seq) => chat.jumpToSeq(seq));
 initComposerMobile(composer);
+// Paramètres en liste → sous-écrans (Y4) — no-op hors Android.
+initSettingsMobile();
 // Suites d'outils compactées (S4) + rangée de touches du terminal (S5).
 initToolRuns();
 initTermKeys(term);

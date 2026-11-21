@@ -18,6 +18,7 @@ import { sendPref } from "./settings";
 import { Attachments } from "./attachments";
 import { SttMic } from "./stt-mic";
 import { syncSendMic } from "../mobile/composer-mobile";
+import { tick } from "../mobile/haptics";
 import {
   probeFitInput,
   probeInputHandler,
@@ -1230,6 +1231,8 @@ export class Composer {
         force: mode === "force",
         steer: mode === "steer",
       });
+      // Confirmation haptique de l'envoi (Y4) — no-op hors Android.
+      tick("send");
       this.attach.sent(sid);
     } catch (e) {
       this.chat.dropEcho(sid, echoId);

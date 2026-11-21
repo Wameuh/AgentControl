@@ -181,6 +181,9 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
     case "app_signing":
       // Pas d'APK en web — verdict neutre, jamais bloquant.
       return { platform: "web", update_in_place: "unknown" } as T;
+    case "plugin:ac-device|set_system_bars":
+      // Barres système = chrome natif de l'APK — rien à régler en web.
+      return undefined as T;
     default:
       // check_update / update_client / ensure_daemon / write_download :
       // absents du monde navigateur — la surface UI qui les invoque est

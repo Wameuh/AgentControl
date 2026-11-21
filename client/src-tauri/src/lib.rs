@@ -197,8 +197,12 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_ac_keystore::init())
         // Verdict « update in-place possible » (signature de l'APK
-        // installé vs certificat release) — garde-fou uninstall Android.
-        .plugin(tauri_plugin_ac_device::init());
+        // installé vs certificat release) — garde-fou uninstall Android
+        // (+ barres système lisibles dans les deux thèmes, Y4).
+        .plugin(tauri_plugin_ac_device::init())
+        // Retour haptique : envoi, réponse à une demande, question au
+        // premier plan — coupé avec les sons côté webview.
+        .plugin(tauri_plugin_haptics::init());
     builder
         .run(context)
         .expect("error while running tauri application");
