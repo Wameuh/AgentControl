@@ -37,6 +37,9 @@ export function renderSessionBar() {
   if (!isAndroid()) return;
   const s = app.current;
   document.body.classList.toggle("m-in-session", !!s);
+  // Appelé même sans session : refreshSessionSheet referme la feuille
+  // si la session affichée vient de disparaître.
+  refreshSessionSheet();
   if (!s) return;
   const st = s.state ?? "dead";
   const cls = dotCls(st, s.last_error);
@@ -69,5 +72,4 @@ export function renderSessionBar() {
   const html = `<span class="m-sub-t">${esc(sub.join(" · "))}</span>${icon("chev-down")}`;
   if (subEl.innerHTML !== html) subEl.innerHTML = html;
   $("m-sbar-stop").hidden = ($("btn-cancel") as HTMLElement).hidden;
-  refreshSessionSheet();
 }

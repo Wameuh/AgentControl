@@ -639,6 +639,11 @@ export const en = {
   ss_actions: "Actions", ss_app: "Application",
   ss_apply: "Apply", ss_fusion: "Configure fusion",
   ss_kill_confirm: "confirm stop?",
+  perm_dock_count: "{i}/{n}",
+  perm_dock_offscreen: "A request is waiting further up",
+  perm_dock_show: "Show",
+  send_steer_now: "Inject now",
+  send_queue: "Add to queue",
 } as const;
 
 export type Key = keyof typeof en;

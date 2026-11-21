@@ -64,6 +64,8 @@ import { notifications } from "./features/notifications";
 import { initFirstPost } from "./features/first-post";
 import { initSessionBar, renderSessionBar } from "./mobile/session-bar";
 import { initSessionSheet, openSessionSheet } from "./mobile/session-sheet";
+import { initPermDock } from "./mobile/perm-dock";
+import { initComposerMobile } from "./mobile/composer-mobile";
 import { appMenuItems } from "./mobile/app-menu";
 import { Pins } from "./features/pins";
 import { Steps, type SessionStep } from "./features/steps";
@@ -515,6 +517,9 @@ initSessionSheet({
   refreshSidebar: () => void sidebar.refresh(),
 });
 initSessionBar(openSessionSheet);
+// Dock de permission (S3) + composer pilule (C1) — no-ops hors Android.
+initPermDock((seq) => chat.jumpToSeq(seq));
+initComposerMobile(composer);
 initModelBar(openFusion, () => chat.updateHeader());
 initFusionDialog();
 initStatus(() => {

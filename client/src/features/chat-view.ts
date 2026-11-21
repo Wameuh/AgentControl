@@ -478,6 +478,9 @@ export class ChatView {
       this.clearConv();
       this.deps.onSessionChanged();
       this.updateEmptyState();
+      // La barre de session mobile lit app.current via afterHeader —
+      // sans ce hook, m-in-session resterait posé sur une vue vide.
+      this.deps.afterHeader();
     }
   }
 

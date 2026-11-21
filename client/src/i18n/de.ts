@@ -642,4 +642,9 @@ export const de: Record<Key, string> = {
   ss_actions: "Aktionen", ss_app: "App",
   ss_apply: "Anwenden", ss_fusion: "Fusion konfigurieren",
   ss_kill_confirm: "Stopp bestätigen?",
+  perm_dock_count: "{i}/{n}",
+  perm_dock_offscreen: "Eine Anfrage wartet weiter oben",
+  perm_dock_show: "Anzeigen",
+  send_steer_now: "Jetzt einfügen",
+  send_queue: "In die Warteschlange",
 };

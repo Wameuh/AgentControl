@@ -17,6 +17,7 @@ import { cmdDesc, cmdHint, cmdName } from "./modelbar";
 import { sendPref } from "./settings";
 import { Attachments } from "./attachments";
 import { SttMic } from "./stt-mic";
+import { syncSendMic } from "../mobile/composer-mobile";
 import {
   probeFitInput,
   probeInputHandler,
@@ -422,6 +423,9 @@ export class Composer {
   }
 
   fitInput(force = false) {
+    // En tête : m-input-empty dépend de la valeur courante, pas de la
+    // mesure — tous les early-returns doivent le rafraîchir (C1 mobile).
+    syncSendMic();
     // Sonde télémétrie (#297) : la mesure propre (scrollHeight = reflow
     // forcé) est le suspect n°1 des lag de frappe — chronométrée seulement
     // quand la collecte est active, skip précoce non compté (coût ~0).
@@ -1251,6 +1255,13 @@ export class Composer {
       this.chat.sysline(t("cmd_sent_hint", { cmd: bm[1] }));
     }
     void this.refreshQueue();
+  }
+
+  /** Envoie dans un mode explicite — voie publique pour les actions
+   *  mobiles (appui long Envoyer → steer/file, C1) qui ne passent pas
+   *  par le bouton principal ni le bouton alternatif. */
+  sendWith(mode: SendMode) {
+    void this.sendInput(mode);
   }
 
   // ---- Autocomplete des slash-commands ----
