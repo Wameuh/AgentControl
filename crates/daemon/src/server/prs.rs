@@ -245,9 +245,10 @@ impl PrVerifier {
         let verdict = tokio::task::spawn_blocking(move || check(&t)).await;
         match verdict {
             Ok(forgesync::Verify::Exists) => self.apply(&p),
-            // PR de release (next_release → main) : existe mais reste
-            // hors registre — cache négatif comme un « inexistant »
-            // pour ne pas revérifier à chaque occurrence.
+            // PR de release (paire integration_branch → release_branch
+            // configurée) : existe mais reste hors registre — cache
+            // négatif comme un « inexistant » pour ne pas revérifier à
+            // chaque occurrence.
             Ok(forgesync::Verify::Release) => {
                 self.negative_add(key);
                 self.emit(

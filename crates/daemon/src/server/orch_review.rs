@@ -6,7 +6,9 @@
 //! indépendante d'agentbacklog et du cycle — un agentbacklog absent ou
 //! un cycle en erreur ne coupe pas les reviews) :
 //!
-//! - PR ouvertes à base `next_release` (`gh pr list` ∪ registre PR) :
+//! - PR ouvertes à base `integration_branch` (`gh pr list` ∪ registre
+//!   PR — la base allowlistée est le param orchestrateur, défaut
+//!   `next_release`) :
 //!   un commentaire nu `pr_review_trigger` (corps exact après trim,
 //!   auteur OWNER/MEMBER/COLLABORATOR) plus récent que le dernier
 //!   traité lance une review — sauf si une review est déjà en cours
@@ -54,9 +56,6 @@ pub(crate) const PR_REVIEW_ORIGIN: &str = "feature:pr-review";
 /// Préfixe de titre des sessions reviewer PR — `Backlog-PR` rejeté :
 /// `Backlog-P` est le préfixe planificateur du pipeline.
 pub(crate) const PR_REVIEW_PREFIX: &str = "PRReview-";
-/// Base autorisée — allowlist : jamais de review vers `main` ni toute
-/// autre base (la release PR `next_release → main` est à l'utilisateur).
-const ALLOWED_BASE: &str = "next_release";
 /// Fenêtre de journal relue pour le bloc verdict (scan borné — même
 /// borne que le pipeline).
 const REVIEW_JOURNAL_SCAN: usize = 150;
@@ -1515,15 +1514,16 @@ impl Daemon {
         if let Some(sid) = &session {
             self.get_session(sid).await?;
         }
-        // PR cible : ouverte + base allowlistée — les mêmes gardes
-        // que le chemin commentaire (jamais `main`).
+        // PR cible : ouverte + base allowlistée (branche d'intégration
+        // configurée) — les mêmes gardes que le chemin commentaire.
         let Some((state, base, _head)) = self.gh_pr_info(&repo, pr, &cfg).await else {
             anyhow::bail!("PR {repo}#{pr} not found");
         };
         anyhow::ensure!(state == "OPEN", "PR {repo}#{pr} closed ({state})");
         anyhow::ensure!(
-            base == ALLOWED_BASE,
-            "PR {repo}#{pr}: base «{base}» ≠ {ALLOWED_BASE} — review refused"
+            base == cfg.pr_base(),
+            "PR {repo}#{pr}: base «{base}» ≠ {} — review refused",
+            cfg.pr_base()
         );
         let key = format!("{repo}#{pr}");
         let by = session.unwrap_or_default();
@@ -1633,9 +1633,9 @@ impl Daemon {
         }
     }
 
-    /// PR ouvertes à reviewer : `gh pr list --base next_release` par
-    /// repo routé (registre ∪ origin du workspace), chaque numéro une
-    /// seule fois — la liste forge fait foi pour le statut.
+    /// PR ouvertes à reviewer : `gh pr list --base <integration_branch>`
+    /// par repo routé (registre ∪ origin du workspace), chaque numéro
+    /// une seule fois — la liste forge fait foi pour le statut.
     async fn pr_review_candidates(&self, cfg: &cfg::OrchCfg) -> Vec<(String, u64, String)> {
         let mut repos: HashSet<String> = self
             .prs
@@ -1676,7 +1676,7 @@ impl Daemon {
                     "--state",
                     "open",
                     "--base",
-                    ALLOWED_BASE,
+                    cfg.pr_base(),
                     "--json",
                     "number,headRefOid",
                 ],
@@ -1866,7 +1866,7 @@ impl Daemon {
                 ("PR", pr_n.to_string()),
                 ("REPO", repo.to_string()),
                 ("SHA", sha.to_string()),
-                ("BASE", ALLOWED_BASE.to_string()),
+                ("BASE", cfg.pr_base().to_string()),
                 ("WS", ws.to_string()),
                 ("TITLE", title.to_string()),
                 ("BODY", clip(body, 8000)),
@@ -2179,6 +2179,28 @@ mod tests {
             String::from_utf8(base64_decode("aGVsbG8gd29ybGQ=")).unwrap(),
             "hello world"
         );
+    }
+
+    /// La garde de base review (`base == cfg.pr_base()`) suit le param
+    /// `integration_branch` — critère de l'item : une PR base `develop`
+    /// passe quand la branche d'intégration est `develop`.
+    #[test]
+    fn garde_base_suit_integration_branch() {
+        let c = cfg::OrchCfg::default();
+        assert!(["next_release"].contains(&c.pr_base()));
+        let dev = cfg::OrchCfg {
+            integration_branch: "develop".into(),
+            ..Default::default()
+        };
+        assert_eq!(dev.pr_base(), "develop");
+        // Même expression que la garde de h_pr_review_request.
+        let accepted = |cfg: &cfg::OrchCfg, base: &str| base == cfg.pr_base();
+        assert!(accepted(&c, "next_release"));
+        assert!(!accepted(&c, "develop"));
+        assert!(!accepted(&c, "main"));
+        assert!(accepted(&dev, "develop"));
+        assert!(!accepted(&dev, "next_release"));
+        assert!(!accepted(&dev, "main"));
     }
 
     // ---- fetch_pr_head : fallback SHA quand pull/N/head est absente.

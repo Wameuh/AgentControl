@@ -196,8 +196,9 @@ fn tools_list() -> Value {
                 (worktree at head, `## Verdict:` posted on the PR). \
                 Your session is notified of the verdict via \
                 agentcontrol_send_message (« accepted » ack then result) — \
-                no GitHub polling needed. Reserved for PRs based on \
-                `next_release`.",
+                no GitHub polling needed. Reserved for PRs based on the \
+                configured integration branch (`integration_branch` \
+                orchestrator param).",
             "inputSchema": {
                 "type": "object",
                 "properties": {

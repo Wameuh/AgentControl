@@ -384,9 +384,23 @@ impl Daemon {
         // compte sans restart (forges_cfg.rs).
         let forges = Arc::new(std::sync::RwLock::new(ForgeLive::new(forge_cfgs)));
         let forge_live = Arc::clone(&forges);
+        // Paire (head, base) de la release PR pour l'exclusion
+        // `Verify::Release` — relue à chaque vérif : un set
+        // `integration_branch`/`release_branch` à chaud est pris en
+        // compte sans restart ; `release_branch` vide (workflow
+        // « none ») → None → jamais Verify::Release.
+        let orch_live = Arc::clone(&orch);
         let pr_verify = Arc::new(prs::PrVerifier::new(Arc::clone(&prs), move |t| {
             let set = forge_live.read().unwrap().set.list_json();
-            forgesync::verify_ref(set.as_array().map(Vec::as_slice).unwrap_or(&[]), t)
+            let rel = {
+                let c = orch_live.cfg.read().unwrap();
+                c.release_pair().map(|(h, b)| (h.to_string(), b.to_string()))
+            };
+            forgesync::verify_ref(
+                set.as_array().map(Vec::as_slice).unwrap_or(&[]),
+                t,
+                rel.as_ref().map(|(h, b)| (h.as_str(), b.as_str())),
+            )
         }));
         // Profils partagés avec Components (params du composant interne
         // `agents` + dropdowns `*_agent` de l'orchestrateur — lus à

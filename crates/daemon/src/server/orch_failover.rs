@@ -175,7 +175,7 @@ Commence par lire {WS}/AGENTS.md — le workflow PR/CI qu'il decrit est obligato
 {PRS}
 
 ## MISSION
-1. Pour chaque item ci-dessus : verifie son etat (`agentbacklog --list --json`), retrouve ou cree le worktree dedie (`git worktree add ~/worktrees/ac-<feat> -b <branch> origin/next_release` — JAMAIS dans le checkout principal), continue le travail et mene la PR selon le cycle complet de AGENTS.md.
+1. Pour chaque item ci-dessus : verifie son etat (`agentbacklog --list --json`), retrouve ou cree le worktree dedie (`git worktree add ~/worktrees/ac-<feat> -b <branch> origin/{BASE}` — JAMAIS dans le checkout principal), continue le travail et mene la PR selon le cycle complet de AGENTS.md.
 2. Continue jusqu'a ce que tes items soient `--done` et tes PRs soldees (mergees ou cloturees), puis ARRETE-toi purement et simplement. Tu NE LANCES JAMAIS `agentbacklog --pop` toi-meme : l'orchestrateur dispatche le travail suivant (un worker = un item ; un pop contournerait la revue de plan en mode plan_review et l'invariant « contexte frais par item »).
 3. `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` selon le done_when de chaque item (`agentbacklog --list --json` : 'pr_merged' = ta PR de l'item MERGED, 'deliverable' = ses criteres propres remplis, jamais d'attente de merge) ; blocage insurmontable : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison, puis arrete.
 
@@ -378,6 +378,7 @@ impl Daemon {
                 ("WS", fo_ws.clone()),
                 ("ITEMS", items_txt),
                 ("PRS", prs_txt),
+                ("BASE", cfg.pr_base().to_string()),
             ],
         );
         // plan_review : les workers implémentent → implement_mode ;
@@ -539,6 +540,7 @@ impl Daemon {
                         ),
                     ),
                     ("DOD", task_dod(t).replace("<ID>", &key)),
+                    ("BASE", cfg.pr_base().to_string()),
                 ],
             );
             // Brouillon de plan déjà déposé par l'ancienne session :

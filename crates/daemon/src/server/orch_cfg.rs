@@ -39,6 +39,8 @@ const KEYS: &[&str] = &[
     "watch_prs",
     "auto_patchnotes",
     "spawn_managers",
+    "integration_branch",
+    "release_branch",
     "metrics",
     "max_workers",
     "max_working",
@@ -298,6 +300,24 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             Some("true"),
         ),
         ps(
+            "integration_branch",
+            "Integration branch",
+            "feature-PR base: PR-review guard and `gh pr list --base` \
+             scan, {BASE} prompt placeholder, release-PR head \
+             (with release_branch as base); empty = default",
+            ParamKind::String,
+            Some("next_release"),
+        ),
+        ps(
+            "release_branch",
+            "Release branch",
+            "release-PR base (head = integration_branch) — EMPTY = \
+             « none » workflow: no release PR is looked up and no \
+             head is excluded",
+            ParamKind::String,
+            Some("main"),
+        ),
+        ps(
             "metrics",
             "Metrics (sampling)",
             "each tick appends a {ts, pending, wip, workers} sample \
@@ -450,16 +470,16 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             "Worker prompt",
             "custom worker prompt — empty = built-in prompt; \
              item dispatch (agentbacklog ≥ 0.7) substitutes \
-             {WS} {REPO} {ID} {ITEM} and pre-assigns the item (no \
-             --pop)",
+             {WS} {REPO} {ID} {ITEM} {BASE} and pre-assigns the item \
+             (no --pop)",
             ParamKind::String,
             None,
         ),
         ps(
             "manager_prompt",
             "Manager prompt",
-            "Manager template — placeholders {REPO}/{WS}; empty = \
-             built-in template",
+            "Manager template — placeholders {REPO}/{WS}/{BASE}; \
+             empty = built-in template",
             ParamKind::String,
             None,
         ),
@@ -693,6 +713,8 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert("watch_prs".into(), cfg.watch_prs.to_string());
     m.insert("auto_patchnotes".into(), cfg.auto_patchnotes.to_string());
     m.insert("spawn_managers".into(), cfg.spawn_managers.to_string());
+    m.insert("integration_branch".into(), cfg.integration_branch.clone());
+    m.insert("release_branch".into(), cfg.release_branch.clone());
     m.insert("metrics".into(), cfg.metrics.to_string());
     m.insert("max_workers".into(), cfg.max_workers.to_string());
     m.insert("max_working".into(), cfg.max_working.to_string());
@@ -1003,6 +1025,19 @@ pub(crate) fn apply_patch(
                     val_string(v)?
                 }
             }
+            // Vide → défaut : une base de review vide refuserait toute
+            // PR (champ cassant) — trim : un nom de branche ne contient
+            // jamais d'espace.
+            "integration_branch" => {
+                cfg.integration_branch = if is_empty(v) {
+                    OrchCfg::default().integration_branch
+                } else {
+                    val_string(v)?.trim().to_string()
+                }
+            }
+            // Vide = sémantique « none » : aucune release PR cherchée,
+            // aucun head exclu (le formulaire vide le champ pour ça).
+            "release_branch" => cfg.release_branch = val_string(v)?.trim().to_string(),
             // Vide = héritage du profil `agent` (sémantique du champ,
             // pas retour à un défaut fixe).
             "worker_agent" => cfg.worker_agent = val_string(v)?,
@@ -1459,6 +1494,47 @@ mod tests {
         assert!(back.enabled && back.max_workers == 9);
         assert_eq!(back.repo_workspaces, c.repo_workspaces);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn patch_branches_workflow() {
+        let mut c = super::super::cfg::OrchCfg::default();
+        // Défauts : convention next_release → main, exposés au schéma.
+        assert_eq!(c.integration_branch, "next_release");
+        assert_eq!(c.release_branch, "main");
+        assert_eq!(c.pr_base(), "next_release");
+        assert_eq!(c.release_pair(), Some(("next_release", "main")));
+        let schema = params_schema(&DynChoices::default(), &[]);
+        for (key, want) in [("integration_branch", "next_release"), ("release_branch", "main")] {
+            let p = schema.iter().find(|p| p.key == key).unwrap();
+            assert_eq!(p.default.as_deref(), Some(want), "{key} default");
+        }
+        let vals = params_values(&c);
+        assert_eq!(vals["integration_branch"], "next_release");
+        assert_eq!(vals["release_branch"], "main");
+
+        // Hot-set : la garde review et la paire release suivent.
+        apply_patch(
+            &mut c,
+            &patch(&[
+                ("integration_branch", json!("develop")),
+                ("release_branch", json!("stable")),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(c.pr_base(), "develop");
+        assert_eq!(c.release_pair(), Some(("develop", "stable")));
+
+        // Critère de l'item : release_branch vide = workflow « none ».
+        apply_patch(&mut c, &patch(&[("release_branch", json!(""))])).unwrap();
+        assert!(c.release_branch.is_empty());
+        assert_eq!(c.pr_base(), "develop");
+        assert!(c.release_pair().is_none());
+
+        // Cassant : integration_branch vidé → retour au défaut
+        // (une base vide refuserait toute review).
+        apply_patch(&mut c, &patch(&[("integration_branch", json!(""))])).unwrap();
+        assert_eq!(c.integration_branch, "next_release");
     }
 
     #[test]
