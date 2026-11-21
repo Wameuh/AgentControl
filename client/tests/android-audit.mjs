@@ -236,8 +236,12 @@ const closeDialogs = async () => {
 };
 const drawerOpen = () =>
   ev(() => document.getElementById("sidebar")?.classList.contains("open"));
+// En session la titlebar est masquée (m-in-session) — le ☰ vit dans la
+// barre session (#m-sbar-nav) ; hors session il reste #tb-menu.
+const menuBtn = async () =>
+  (await visible("#m-sbar-nav")) ? "#m-sbar-nav" : "#tb-menu";
 const openDrawer = async () => {
-  if (!(await drawerOpen())) await tap("#tb-menu", 450);
+  if (!(await drawerOpen())) await tap(await menuBtn(), 450);
 };
 const closeDrawer = async () => {
   // Clic sur le scrim = chemin de fermeture utilisateur réel (nav-aware :
@@ -441,15 +445,23 @@ await step("a08b-queue-sheet", async () => {
   await sleep(300);
 });
 
-// ── Sheet ⋮ du chat ──────────────────────────────────────────────────────────
+// ── Feuille Session (tap sur le titre de la barre) ───────────────────────────
 await dismissToasts();
-await tap("#chat-more", 400);
-await shot("a09-chat-sheet");
-await collect("a09-chat-sheet");
+await tap("#m-sbar-title", 400);
+await shot("a09-session-sheet");
+await collect("a09-session-sheet");
+// Section modèle : liste radio des variantes annoncées.
+await step("a09b-model", async () => {
+  await ev(() => document.querySelector("#dlg-session .ss-radios")
+    ?.scrollIntoView({ block: "center" }));
+  await sleep(250);
+  await shot("a09b-session-model-list");
+  await collect("a09b-session-model-list");
+});
 
-// ── Recherche dans l'historique (via le sheet) ───────────────────────────────
+// ── Recherche dans l'historique (via la feuille Session) ─────────────────────
 await step("a10-search", async () => {
-  await ev(() => [...document.querySelectorAll("#omenu .om-item")]
+  await ev(() => [...document.querySelectorAll("#dlg-session .ss-act")]
     .find((b) => /recherche|search/i.test(b.textContent))?.click());
   await sleep(400);
   await shot("a10-search");
@@ -496,10 +508,10 @@ if (nEvAfter <= nEvBefore) V("a13-live-append", "live-append", `events ${nEvBefo
 await shot("a13-live");
 await collect("a13-live");
 
-// ── Explorateur de fichiers (entrée du menu ⋮) ───────────────────────────────
+// ── Explorateur de fichiers (entrée de la feuille Session) ──────────────────
 await dismissToasts();
-await tap("#chat-more", 350);
-await ev(() => [...document.querySelectorAll("#omenu .om-item")]
+await tap("#m-sbar-title", 350);
+await ev(() => [...document.querySelectorAll("#dlg-session .ss-act")]
   .find((b) => /fichier|files|workspace/i.test(b.textContent))?.click());
 await sleep(600);
 await shot("a14-files");
@@ -646,8 +658,8 @@ await step("a23-resume", async () => {
 await step("a24-settings", async () => {
   await closeDialogs();
   await dismissToasts();
-  await tap("#tb-more", 400);
-  await ev(() => [...document.querySelectorAll("#omenu .om-item")]
+  await tap("#m-sbar-title", 400);
+  await ev(() => [...document.querySelectorAll("#dlg-session .ss-approw")]
     .find((b) => /param|settings/i.test(b.textContent))?.click());
   await sleep(450);
   await shot("a24-settings");
@@ -662,8 +674,8 @@ await step("a24-settings", async () => {
 await step("a25-about", async () => {
   await closeDialogs();
   await dismissToasts();
-  await tap("#tb-more", 400);
-  await ev(() => [...document.querySelectorAll("#omenu .om-item")]
+  await tap("#m-sbar-title", 400);
+  await ev(() => [...document.querySelectorAll("#dlg-session .ss-approw")]
     .find((b) => /about|propos/i.test(b.textContent))?.click());
   await sleep(400);
   await shot("a25-about");
@@ -690,8 +702,8 @@ await step("a26-outdated", async () => {
 await step("a27-term", async () => {
   await closeDialogs();
   await dismissToasts();
-  await tap("#chat-more", 350);
-  await ev(() => [...document.querySelectorAll("#omenu .om-item")]
+  await tap("#m-sbar-title", 350);
+  await ev(() => [...document.querySelectorAll("#dlg-session .ss-act")]
     .find((b) => /terminal/i.test(b.textContent))?.click());
   await sleep(700);
   if (!(await visible("#term-panel")))

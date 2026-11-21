@@ -1,0 +1,33 @@
+/* ── Android — vues plein écran : accueil, réglages, connexion ────────── */
+/* « Fond animé » : forcé statique sur Android (batterie) — réglage masqué. */
+body.android #s-bganim-row { display: none; }
+/* Écran d'accueil */
+body.android #empty-cta { min-height: 44px; }
+/* Panneau paramètres (#settings-view — un panneau, pas un <dialog>) :
+   lignes et contrôles à 44px ; la croix de fermeture est carrée. */
+body.android .s-row { min-height: 44px; }
+body.android .s-row select { min-height: 44px; font-size: 15px; }
+body.android #settings-view button { min-height: 44px; }
+body.android #settings-close { min-width: 44px; }
+body.android #s-snd-vol { min-height: 44px; }
+
+/* Vue connexion (#conn-view — panneau plein, pas un <dialog>) :
+   lignes de la liste et champs à 44px comme les réglages. */
+body.android #conn-view button { min-height: 44px; }
+body.android #connview-close { min-width: 44px; }
+body.android .cv-conn { min-height: 52px; }
+body.android #conn-view input, body.android #conn-view select {
+  min-height: 44px; font-size: 15px;
+}
+body.android .cv-btns button { min-width: 44px; }
+body.android #connview-body { padding: 16px; }
+/* Champs SSH natifs dans la vue connexion */
+#c-pubkey {
+  margin: 0; padding: 8px; font-size: 11px; white-space: pre-wrap;
+  word-break: break-all; user-select: all; max-height: 90px; overflow: auto;
+  background: rgba(var(--tint-rgb), .05); border-radius: 6px; color: var(--accent);
+}
+#c-pubkey-box { display: flex; flex-direction: column; gap: 6px;
+  font-size: 13px; color: var(--muted); }
+body.android #c-pubkey { font-size: 13px; max-height: 130px; }
+body.android #c-pubkey-box { font-size: 15px; }

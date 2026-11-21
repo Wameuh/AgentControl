@@ -55,12 +55,12 @@ await page.type("#c-host", "me@pi5.local");
 await tap("#c-go", 900);              await shot("04-connected");
 
 await tap(".sess", 800);              await shot("05-chat");           // ouvre s1, drawer fermé
-await tap("#chat-more", 400);         await shot("06-chat-sheet");
-await page.tap("#scrim").catch(() => {});  // ferme le sheet
+await tap("#m-sbar-title", 400);      await shot("06-session-sheet");
+await page.keyboard.press("Escape");  // ferme la feuille (dialog)
 await new Promise((r) => setTimeout(r, 300));
 
-await tap("#chat-more", 300);
-await page.evaluate(() => [...document.querySelectorAll("#omenu .om-item")].find((b) => /fichier|files/i.test(b.textContent))?.click());
+await tap("#m-sbar-title", 300);
+await page.evaluate(() => [...document.querySelectorAll("#dlg-session .ss-act")].find((b) => /fichier|files/i.test(b.textContent))?.click());
 await shot("07-files", 500);
 await tap(".fnode:not(.is-dir)", 700); await shot("08-fileview");
 await tap("#fv-back", 400);                                        // retour liste
@@ -69,7 +69,7 @@ await page.evaluate(() => { document.getElementById("fctx").hidden = true; });
 
 // Nouvelle session → bottom sheet (depuis le drawer)
 await page.evaluate(() => { document.getElementById("file-panel").hidden = true; document.getElementById("file-viewer").classList.remove("open"); });
-await tap("#tb-menu", 400);
+await tap("#m-sbar-nav", 400);
 await tap("#btn-new-session", 500);    await shot("10-new-session");
 
 await browser.close();

@@ -637,4 +637,9 @@ export const es: Record<Key, string> = {
   caps_current: "actual", caps_none: "nada anunciado", caps_never: "nunca sondeado",
   caps_reprobe: "Ressondear", caps_probing: "Sondeando…", caps_extra: "extra",
   caps_updated: "última sonda",
+  ss_open: "Ajustes y acciones de la sesión",
+  ss_mode: "Modo", ss_model: "Modelo", ss_effort: "Esfuerzo", ss_advisor: "Asesor",
+  ss_actions: "Acciones", ss_app: "Aplicación",
+  ss_apply: "Aplicar", ss_fusion: "Configurar la fusión",
+  ss_kill_confirm: "¿confirmar la detención?",
 };

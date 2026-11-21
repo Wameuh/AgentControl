@@ -51,6 +51,15 @@
           <div id="sidebar-resize" title="Drag to resize"></div>
         </aside>
         <main id="chat">
+          <header id="m-sbar">
+            <button id="m-sbar-nav" data-icon="menu" data-i18n-title="menu_title" title="Menu"></button>
+            <span id="m-sbar-gem"></span>
+            <button id="m-sbar-title" type="button">
+              <span id="m-sbar-name">—</span>
+              <span id="m-sbar-sub"></span>
+            </button>
+            <button id="m-sbar-stop" hidden data-icon="stop" data-i18n-title="stop" title="Stop"></button>
+          </header>
           <header id="chat-header">
             <span id="chat-gem" hidden></span>
             <span id="chat-title" data-i18n-title="title_dblclick">—</span>
@@ -1016,6 +1025,16 @@
       <form method="dialog">
         <h3 data-i18n="mem_h">Memory</h3>
         <div id="mem-body"></div>
+        <menu><button value="cancel" data-i18n="close">Close</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-session">
+      <form method="dialog">
+        <div id="ss-head"></div>
+        <div id="ss-opts"></div>
+        <div id="ss-acts"></div>
+        <div id="ss-app"></div>
         <menu><button value="cancel" data-i18n="close">Close</button></menu>
       </form>
     </dialog>

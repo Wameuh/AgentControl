@@ -30,7 +30,7 @@ import {
   initExternalLinks,
   shellOpen,
 } from "./core/chrome";
-import { nav, type SheetItem } from "./ui/nav";
+import { nav } from "./ui/nav";
 import { hydrateIcons } from "./ui/icons";
 import { initStatus, type HostStats } from "./features/status";
 import { initMemDialog } from "./features/meminfo";
@@ -62,6 +62,9 @@ import { stateDiff } from "./features/state-diff";
 import { sounds } from "./features/sounds";
 import { notifications } from "./features/notifications";
 import { initFirstPost } from "./features/first-post";
+import { initSessionBar, renderSessionBar } from "./mobile/session-bar";
+import { initSessionSheet, openSessionSheet } from "./mobile/session-sheet";
+import { appMenuItems } from "./mobile/app-menu";
 import { Pins } from "./features/pins";
 import { Steps, type SessionStep } from "./features/steps";
 import { initTelemetry } from "./features/telemetry";
@@ -205,6 +208,7 @@ chat.bind(renderer, {
   stepsCapable: (c) => conns.cap(c)?.steps === true,
   capsCapable: (c) => conns.cap(c)?.agent_caps === true,
   pinsMark: (el) => pins.markNode(el),
+  afterHeader: () => renderSessionBar(),
 });
 search.bind({ jumpToSeq: (seq) => chat.jumpToSeq(seq) });
 pins.bind({
@@ -459,45 +463,10 @@ $("tb-about").onclick = () => {
   $("about-engine").textContent = engineReport();
   openAbout(() => conns.knownConns()[0] ?? null);
 };
-// Menus ⋮ (Android) : l'app-level ouvre Settings/About, celui du chat les
-// actions de session (cachées du header sur mobile).
-$("tb-more").onclick = () => {
-  const items: SheetItem[] = [
-    { icon: "map", label: t("map_title"), fn: () => $("tb-map").click() },
-    { icon: "scroll", label: t("logs"), fn: () => $("tb-logs").click() },
-  ];
-  // Composants : même gate capability que le bouton titlebar masqué
-  // sur mobile — pas d'entrée vers un panneau inutilisable.
-  if (comps.capable())
-    items.push({ icon: "tool", label: t("comp_h"), fn: () => $("tb-components").click() });
-  items.push(
-    { icon: "settings", label: t("settings_title"), fn: () => $("tb-settings").click() },
-    { icon: "info", label: t("about_title"), fn: () => $("tb-about").click() },
-  );
-  nav.sheet(items);
-};
-$("chat-more").onclick = () => {
-  const items: SheetItem[] = [];
-  if (app.current) items.push({ icon: "search", label: t("search_title"), fn: () => search.open() });
-  if (app.current && conns.cap(app.current.conn ?? "default")?.first_post === true)
-    items.push({ icon: "top", label: t("first_post"), fn: () => $("btn-first").click() });
-  if (app.current && conns.cap(app.current.conn ?? "default")?.pinned === true)
-    items.push({ icon: "pin", label: t("pins_title"), fn: () => $("btn-pins").click() });
-  if (app.current && conns.cap(app.current.conn ?? "default")?.steps === true)
-    items.push({ icon: "steps", label: t("steps_title"), fn: () => $("btn-steps").click() });
-  if (app.current && term.supported())
-    items.push({ icon: "terminal", label: t("term_title"), fn: () => $("btn-term").click() });
-  if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
-  if (app.current) items.push({ icon: "search", label: t("qo_open_path"), fn: () => quick.open("path") });
-  if (app.current && !app.alive && app.current.state !== "starting")
-    items.push({ icon: "play", label: t("resume"), fn: () => $("btn-resume").click() });
-  if (app.current && app.current.state === "starting" && app.current.native_session_id)
-    items.push({ icon: "refresh", label: t("fresh_ctx"), fn: () => $("btn-fresh").click() });
-  if (app.current && app.alive)
-    items.push({ icon: "sleep", label: t("ctx_sleep"), fn: () => $("btn-sleep").click() });
-  items.push({ icon: "refresh", label: t("refresh_title"), fn: () => $("btn-refresh").click() });
-  nav.sheet(items);
-};
+// Menus ⋮ (Android) : l'app-level ouvre Settings/About ; en session le
+// ⋮ du header ouvre la feuille Session (S2 — réglages + actions).
+$("tb-more").onclick = () => nav.sheet(appMenuItems(() => comps.capable()));
+$("chat-more").onclick = () => openSessionSheet();
 $("about-gh").addEventListener("click", (e) => {
   e.preventDefault();
   shellOpen("https://github.com/Wameuh/AgentControl");
@@ -532,6 +501,20 @@ initModelCosts({ capable: (c) => conns.cap(c)?.model_costs === true });
 initModelCatalog({ capable: (c) => conns.cap(c)?.model_catalog === true });
 pins.init();
 steps.init();
+// Barre + feuille Session mobiles (S1/S2) : câblage des conditions —
+// mêmes gates capability que l'ancien menu ⋮ du header.
+initSessionSheet({
+  openSearch: () => search.open(),
+  openPath: () => quick.open("path"),
+  termSupported: () => term.supported(),
+  firstPostCapable: (c) => conns.cap(c)?.first_post === true,
+  pinCapable: (c) => conns.cap(c)?.pinned === true,
+  stepsCapable: (c) => conns.cap(c)?.steps === true,
+  compsCapable: () => comps.capable(),
+  onRenamed: () => { chat.setChatTitle(); void sidebar.refresh(); },
+  refreshSidebar: () => void sidebar.refresh(),
+});
+initSessionBar(openSessionSheet);
 initModelBar(openFusion, () => chat.updateHeader());
 initFusionDialog();
 initStatus(() => {

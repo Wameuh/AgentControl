@@ -20,8 +20,14 @@ export interface SheetItem {
 }
 
 export class OverlayNav {
-  private stack: string[] = [];
-  private suppressPops = 0; // back() déclenchés par close → autant de popstate à ignorer
+  /** Pile par jetons : chaque entrée history porte un n unique → popstate
+   *  compare les positions au lieu de dépiler à l'aveugle. Les entrées
+   *  « mortes » (overlay refermé sans back) restent dans l'historique
+   *  comme waypoints transparents : atterrir dessus ferme les overlays
+   *  plus récents — aucun back() programmatique, aucune suppression à
+   *  faire fuiter (Chrome fusionne les back() rapprochés). */
+  private stack: { id: string; n: number }[] = [];
+  private seq = 0;
   private scrimOwner: ScrimOwner | null = null;
   private scrim: HTMLElement;
   private omenu: HTMLElement;
@@ -59,17 +65,20 @@ export class OverlayNav {
 
     window.addEventListener("popstate", () => {
       if (!isAndroid()) return;
-      if (this.suppressPops > 0) { this.suppressPops--; return; }
-      const top = this.stack[this.stack.length - 1];
-      if (!top) return;
-      // Véto : l'overlay refuse la fermeture (ex. éditeur avec buffer sale)
-      // → on ré-empile l'état pour annuler le back sans toucher à la vue.
-      if (this.backGuard && !this.backGuard(top)) {
-        try { history.pushState({ ac: top }, ""); } catch { /* noop */ }
-        return;
+      const n = (history.state as { n?: number } | null)?.n;
+      // Ferme tous les overlays plus récents que l'entrée atteinte (nul =
+      // entrée racine hors nav → tout ferme). Idempotent : un waypoint
+      // mort laisse la pile alignée quelles que soient les séquences.
+      while (true) {
+        const top = this.stack[this.stack.length - 1];
+        if (!top || (n != null && top.n <= n)) break;
+        if (this.backGuard && !this.backGuard(top.id)) {
+          try { history.pushState({ ac: top.id, n: top.n }, ""); } catch { /* noop */ }
+          return;
+        }
+        this.stack.pop();
+        this.rawCloseOverlay(top.id);
       }
-      this.stack.pop();
-      this.rawCloseOverlay(top);
     });
     // Dialogs trackés automatiquement dans la pile (Cancel = back propre).
     if (isAndroid()) {
@@ -89,18 +98,18 @@ export class OverlayNav {
 
   push(id: string) {
     if (!isAndroid()) return;
-    this.stack.push(id);
-    try { history.pushState({ ac: id }, ""); } catch { /* noop */ }
+    const n = ++this.seq;
+    this.stack.push({ id, n });
+    try { history.pushState({ ac: id, n }, ""); } catch { /* noop */ }
   }
 
+  /** Retire l'overlay de la pile — l'entrée history devient un waypoint
+   *  mort (le popstate qui l'atteindra fermera ce qu'il y a au-dessus).
+   *  Pas de back() : la fermeture visuelle est déjà faite par l'appelant. */
   close(id: string) {
     if (!isAndroid()) return;
-    const i = this.stack.lastIndexOf(id);
-    if (i < 0) return;
-    this.stack.splice(i, 1);
-    if ((history.state as { ac?: string } | null)?.ac === id) {
-      this.suppressPops++;
-      history.back();
+    for (let i = this.stack.length - 1; i >= 0; i--) {
+      if (this.stack[i].id === id) { this.stack.splice(i, 1); return; }
     }
   }
 

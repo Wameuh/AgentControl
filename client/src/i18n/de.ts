@@ -637,4 +637,9 @@ export const de: Record<Key, string> = {
   caps_current: "aktuell", caps_none: "nichts gemeldet", caps_never: "nie sondiert",
   caps_reprobe: "Neu sondieren", caps_probing: "Sondiere…", caps_extra: "extra",
   caps_updated: "letzte Sonde",
+  ss_open: "Sitzungseinstellungen und Aktionen",
+  ss_mode: "Modus", ss_model: "Modell", ss_effort: "Effort", ss_advisor: "Advisor",
+  ss_actions: "Aktionen", ss_app: "App",
+  ss_apply: "Anwenden", ss_fusion: "Fusion konfigurieren",
+  ss_kill_confirm: "Stopp bestätigen?",
 };
