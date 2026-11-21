@@ -735,20 +735,6 @@ await step("a29-backstack", async () => {
   await shot("a29b-after-backs");
 });
 
-// ── Landscape ────────────────────────────────────────────────────────────────
-await page.setViewport({ ...PORTRAIT, width: 915, height: 412 });
-await sleep(450);
-await shot("a30-landscape");
-await collect("a30-landscape");
-await openDrawer();
-await shot("a30b-landscape-drawer");
-await collect("a30b-landscape-drawer");
-// Le drawer recouvre la titlebar → ne pas retaper #tb-menu (tomberait sur
-// #btn-connect) : fermer via goBack (pile nav).
-await closeDrawer();
-await page.setViewport(PORTRAIT);
-await sleep(450);
-
 // ── Grande liste de sessions (40) — perf + overflow ─────────────────────────
 await setRpc("list_sessions", () => {
   const agents = ["devin", "mock", "claude"];

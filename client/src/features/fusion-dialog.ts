@@ -104,8 +104,8 @@ export function initFusionDialog() {
     applyModelValue(v);
   });
 
-  // Annulation du dialogue : si le select affichait "✨ Fusion…" alors que le
-  // modèle courant n'est pas une fusion, restaurer sa valeur réelle.
+  // Annulation du dialogue : si le select affichait l'entrée Fusion alors que
+  // le modèle courant n'est pas une fusion, restaurer sa valeur réelle.
   ($("dlg-fusion") as HTMLDialogElement).addEventListener("close", () => {
     const md = $("model-select") as HTMLSelectElement;
     const curVal = app.current?.model ?? "";

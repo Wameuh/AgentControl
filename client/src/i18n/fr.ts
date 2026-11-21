@@ -206,7 +206,7 @@ export const fr: Record<Key, string> = {
   cost_label: "Coût",
   catalog_badge: "catalogue",
   advisor_title: "Modèle advisor (crédits d'usage — changer relance l'agent)", advisor_default: "Conseiller : défaut", advisor_off: "Conseiller : off",
-  fusion_entry: "✨ Fusion (2 modèles)…", cmd_placeholder: "⌘ commandes…",
+  fusion_entry: "Fusion (2 modèles)…", fusion_cur: "Fusion · {label}", cmd_placeholder: "⌘ commandes…",
   effort_default: "défaut", subscribe_err: "subscribe : ",
   settings_title: "Paramètres", about_title: "À propos d'AgentControl",
   map_title: "Diagramme", map_daemon: "démon",

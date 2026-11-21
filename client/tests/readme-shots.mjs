@@ -161,13 +161,6 @@ async function openSession(p, frag = "Refactor") {
   await sleep(700);
   await shot("android-files");
 
-  // Paysage : retour au chat, puis rotation (non référencé, gardé à jour).
-  await p.evaluate(() => document.getElementById("file-close")?.click());
-  await sleep(500);
-  await p.setViewport({ width: 915, height: 412, deviceScaleFactor: 2.625,
-                      isMobile: true, hasTouch: true });
-  await sleep(700);
-  await shot("android-landscape", 500);
   await p.close();
 }
 

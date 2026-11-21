@@ -952,7 +952,7 @@ export class ChatView {
         o.value = b;
         const fe = firstEff.get(b);
         const cost = costFor(fe ? joinModel(b, fe) : b);
-        o.textContent = "🧠 " + label + (cost ? ` · ${cost.label}` : "");
+        o.textContent = label + (cost ? ` · ${cost.label}` : "");
         if (cost?.detail) o.title = cost.detail;
         md.appendChild(o);
       }
@@ -969,7 +969,7 @@ export class ChatView {
       const curIsFusion = curVal.startsWith("fusion-");
       if (curIsFusion) {
         const fp = rawOpts.find((o) => o.v === curVal);
-        if (fp) fo.textContent = `✨ ${fp.label}`;
+        if (fp) fo.textContent = t("fusion_cur", { label: fp.label });
       }
       const [curBase, curEff] = splitModel(curVal);
       md.value = curIsFusion ? "__fusion" : curBase;
