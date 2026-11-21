@@ -249,6 +249,67 @@ fn ws_of<'a>(cfg: &'a cfg::OrchCfg, repo: &str) -> &'a str {
         .unwrap_or(&cfg.workspace)
 }
 
+/// Échec DÉFINITIF du fetch de tête de PR : `refs/pull/<N>/head` est
+/// absente sur origin (anomalie GitHub — seule `/merge` est
+/// matérialisée) ET le fetch par SHA a échoué aussi. Un retry
+/// buterait pareil — downcasté par les appelants pour un fail-fast
+/// plutôt que le retry borné des erreurs transitoires.
+#[derive(Debug)]
+pub(super) struct RefMissingError(pub(super) String);
+
+impl std::fmt::Display for RefMissingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for RefMissingError {}
+
+/// Fetch de la tête de PR dans `ws` : `pull/<N>/head` d'abord, puis
+/// fallback sur le SHA direct (`headRefOid` — sha-in-want, accepté
+/// par GitHub) quand la ref n'est pas matérialisée. Le worktree se
+/// détache ensuite au même SHA : le fetch ne sert qu'à rendre
+/// l'objet disponible localement. `RefMissingError` uniquement
+/// quand l'absence de ref est explicite (« couldn't find remote
+/// ref ») ET le SHA échoue — une erreur réseau reste transitoire.
+async fn fetch_pr_head(ws: &Path, pr_n: u64, sha: &str, key: &str) -> Result<()> {
+    let ws_s = ws.to_str().context("workspace path non utf8")?;
+    let (rc, _o, e) = run_out(
+        &[
+            "git",
+            "-C",
+            ws_s,
+            "fetch",
+            "origin",
+            &format!("pull/{pr_n}/head"),
+        ],
+        ws,
+    )
+    .await
+    .unwrap_or((-1, String::new(), "spawn".into()));
+    if rc == 0 {
+        return Ok(());
+    }
+    let ref_missing = e.contains("couldn't find remote ref");
+    warn!(
+        "orchestrator: review {key}: git fetch pull/{pr_n}/head KO (rc={rc}) — \
+         fallback fetch sha {sha} direct : {e}"
+    );
+    let (rc2, _o2, e2) = run_out(&["git", "-C", ws_s, "fetch", "origin", sha], ws)
+        .await
+        .unwrap_or((-1, String::new(), "spawn".into()));
+    if rc2 == 0 {
+        return Ok(());
+    }
+    if ref_missing {
+        return Err(RefMissingError(format!(
+            "pull/{pr_n}/head absente sur origin et fetch {sha} impossible : {e2} — \
+             pousser un nouveau commit sur la branche recrée la ref"
+        ))
+        .into());
+    }
+    anyhow::bail!("git fetch pull/{pr_n}/head: {e} ; fetch {sha}: {e2}")
+}
+
 const REVIEW_PROMPT: &str = r#"[Session creee automatiquement par l'orchestrateur AgentControl — review de PR native.]
 
 Tu es le REVIEWER de la PR #{PR} du repo {REPO} (session $AGENTCONTROL_SESSION). Ton cwd est un worktree detache au head exact {SHA} de la PR (base : {BASE}).
@@ -828,20 +889,8 @@ impl Daemon {
                 }
                 Err(e) => {
                     warn!("orchestrator: retry launch review {key}: {e:#}");
-                    remove_review_worktree(
-                        Path::new(ws_of(&cfg, repo)),
-                        &pr_review_dir(pr_n, &sha),
-                    );
-                    self.pr_review_transient_fail(
-                        &key,
-                        "spawn failed",
-                        repo,
-                        pr_n,
-                        &mut st,
-                        &wt,
-                        &cfg,
-                    )
-                    .await;
+                    self.pr_review_launch_fail(&key, &e, repo, pr_n, &mut st, &wt, &cfg)
+                        .await;
                 }
             }
             self.orch_save(&st);
@@ -994,13 +1043,9 @@ impl Daemon {
                 }
                 Err(e) => {
                     warn!("orchestrator: launch review {key} (internal request): {e:#}");
-                    remove_review_worktree(
-                        Path::new(ws_of(&cfg, &repo)),
-                        &pr_review_dir(pr_n, &head_sha),
-                    );
-                    self.pr_review_transient_fail(
+                    self.pr_review_launch_fail(
                         &key,
-                        "spawn failed",
+                        &e,
                         &repo,
                         pr_n,
                         &mut st,
@@ -1103,13 +1148,9 @@ impl Daemon {
                     // Worktree éventuellement créé avant l'échec (ex.
                     // h_new_session KO) — sinon « already exists » au
                     // retry sur le même sha jusqu'au sweep.
-                    remove_review_worktree(
-                        Path::new(ws_of(&cfg, &repo)),
-                        &pr_review_dir(pr_n, &head_sha),
-                    );
-                    self.pr_review_transient_fail(
+                    self.pr_review_launch_fail(
                         &key,
-                        "spawn failed",
+                        &e,
                         &repo,
                         pr_n,
                         &mut st,
@@ -1206,6 +1247,41 @@ impl Daemon {
                 format!("[AgentControl] review {key} failed — see the failure comment on the PR")
             };
             self.pr_review_notify(&by, text).await;
+        }
+    }
+
+    /// Échec du `pr_review_launch` : worktree retiré puis — ref
+    /// `pull/N/head` absente ET fetch sha impossible (`RefMissingError`)
+    /// = cause DÉFINITIVE, fail-fast `review failed` sans retry (la
+    /// ref ne réapparaîtra pas seule — pousser un commit la recrée) ;
+    /// toute autre erreur = transitoire bornée.
+    async fn pr_review_launch_fail(
+        self: &Arc<Self>,
+        key: &str,
+        err: &anyhow::Error,
+        repo: &str,
+        pr_n: u64,
+        st: &mut OrchPersist,
+        wt: &Path,
+        cfg: &cfg::OrchCfg,
+    ) {
+        remove_review_worktree(Path::new(ws_of(cfg, repo)), wt);
+        if err.downcast_ref::<RefMissingError>().is_some() {
+            warn!("orchestrator: PR review {key} ref pull/{pr_n}/head absente → failed");
+            self.gh_comment(
+                repo,
+                pr_n,
+                &fail_comment(&format!(
+                    "pull/{pr_n}/head absente sur origin, fetch sha impossible"
+                )),
+                cfg,
+            )
+            .await;
+            self.pr_review_finish(key, EntryState::Failed, st, wt, Path::new(ws_of(cfg, repo)))
+                .await;
+        } else {
+            self.pr_review_transient_fail(key, "spawn failed", repo, pr_n, st, wt, cfg)
+                .await;
         }
     }
 
@@ -1743,23 +1819,11 @@ impl Daemon {
             rc == 0 && remote_nwo(&out).is_some_and(|nwo| nwo.eq_ignore_ascii_case(repo)),
             "workspace {ws} : remote origin ≠ {repo}"
         );
-        // Ref de la PR fetchée puis worktree détaché au SHA exact.
+        // Ref de la PR fetchée (fallback SHA si `pull/N/head` absente)
+        // puis worktree détaché au SHA exact.
         let wt = pr_review_dir(pr_n, sha);
         let _ = std::fs::create_dir_all(pr_reviews_root());
-        let (rc, _o, e) = run_out(
-            &[
-                "git",
-                "-C",
-                ws,
-                "fetch",
-                "origin",
-                &format!("pull/{pr_n}/head"),
-            ],
-            ws_path,
-        )
-        .await
-        .unwrap_or((-1, String::new(), "spawn".into()));
-        anyhow::ensure!(rc == 0, "git fetch pull/{pr_n}/head: {e}");
+        fetch_pr_head(Path::new(ws), pr_n, sha, key).await?;
         let (rc, _o, e) = run_out(
             &[
                 "git",
@@ -2115,6 +2179,141 @@ mod tests {
             String::from_utf8(base64_decode("aGVsbG8gd29ybGQ=")).unwrap(),
             "hello world"
         );
+    }
+
+    // ---- fetch_pr_head : fallback SHA quand pull/N/head est absente.
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git spawn");
+        assert!(
+            o.status.success(),
+            "git -C {} {:?} → {}\n{}",
+            dir.display(),
+            args,
+            o.status,
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// Remote bare + clone de travail avec un commit poussé —
+    /// `refs/pull/*` n'existe JAMAIS (comme l'anomalie GitHub) et
+    /// `uploadpack.allowAnySHA1InWant` reproduit le sha-in-want de
+    /// GitHub. Retourne (remote, work, sha_head).
+    fn pr_fetch_fixture(tag: &str) -> (PathBuf, PathBuf, String) {
+        let base = std::env::temp_dir().join(format!("ac-prfetch-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let remote = base.join("remote.git");
+        let work = base.join("work");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&remote)
+            .output()
+            .unwrap();
+        // sha-in-want comme GitHub.
+        git(&remote, &["config", "uploadpack.allowAnySHA1InWant", "true"]);
+        std::fs::create_dir_all(&work).unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(&work)
+            .output()
+            .unwrap();
+        git(&work, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        std::fs::write(work.join("f.txt"), "x").unwrap();
+        git(&work, &["add", "f.txt"]);
+        git(
+            &work,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+        let sha = git(&work, &["rev-parse", "HEAD"]);
+        git(&work, &["push", "origin", "HEAD:refs/heads/main"]);
+        (remote, work, sha)
+    }
+
+    #[tokio::test]
+    async fn fetch_pr_head_fallback_sha_puis_worktree() {
+        let (_remote, work, sha) = pr_fetch_fixture("ok");
+        // pull/383/head absente → fallback fetch par SHA → Ok.
+        fetch_pr_head(&work, 383, &sha, "W/R#383").await.unwrap();
+        // L'objet est local et le worktree détaché se crée — même
+        // comportement que pr_review_launch après le fetch.
+        assert_eq!(git(&work, &["cat-file", "-t", &sha]), "commit");
+        let wt = work.parent().unwrap().join("wt-detache");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                wt.to_str().unwrap(),
+                &sha,
+            ],
+        );
+        assert_eq!(
+            git(&wt, &["rev-parse", "HEAD"]),
+            sha,
+            "worktree détaché au SHA fetché"
+        );
+        let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn fetch_pr_head_ref_absente_fail_fast() {
+        let (_remote, work, _sha) = pr_fetch_fixture("ko");
+        // SHA inexistant + pull/N/head absente → RefMissingError
+        // (cause définitive, jamais retryée).
+        let bogus = "f".repeat(40);
+        let e = fetch_pr_head(&work, 383, &bogus, "W/R#383")
+            .await
+            .unwrap_err();
+        let r = e.downcast_ref::<RefMissingError>().expect("RefMissingError");
+        assert!(r.0.contains("pull/383/head absente"));
+        assert!(r.0.contains("pousser un nouveau commit"));
+        let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn fetch_pr_head_erreur_reseau_reste_transitoire() {
+        // Remote mort : ni « couldn't find remote ref » ni sha-in-want
+        // → erreur générique, PAS RefMissingError (retry borné).
+        let base = std::env::temp_dir().join(format!("ac-prfetch-dead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(&work)
+            .output()
+            .unwrap();
+        git(
+            &work,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "/nonexistent/ac-prfetch-remote",
+            ],
+        );
+        let e = fetch_pr_head(&work, 383, &"a".repeat(40), "W/R#383")
+            .await
+            .unwrap_err();
+        assert!(e.downcast_ref::<RefMissingError>().is_none());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // Mini regex maison pour les tests de format (évite une dépendance).
