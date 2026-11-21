@@ -1827,10 +1827,22 @@ impl Daemon {
         let trig = cfg.pr_review_trigger.clone();
         tokio::task::spawn_blocking(move || {
             let cs = client.list_comments(&id, None)?;
+            // `author_assoc` n'est résolu que sur les notes candidates
+            // au trigger (GitLab = 1 GET members/<id> par note — ~0-1
+            // appel par tick au lieu d'un par note du fil) ; hors de
+            // cet ensemble `pick_trigger` ne lit jamais l'assoc, "" y
+            // suffit.
             let comments: Vec<(u64, String, String)> = cs
                 .iter()
                 .filter(|c| !c.system)
-                .map(|c| (c.id, client.author_assoc(c), c.body.clone()))
+                .map(|c| {
+                    let assoc = if c.id > last_trigger && is_trigger(&c.body, &trig) {
+                        client.author_assoc(c)
+                    } else {
+                        String::new()
+                    };
+                    (c.id, assoc, c.body.clone())
+                })
                 .collect();
             let tid = pick_trigger(&comments, &trig, last_trigger)?;
             // Head courant — lu frais (la liste batch peut être pire).

@@ -27,7 +27,11 @@ fn gerrit_change(v: &Value) -> ChangeInfo {
         change_id: v["change_id"].as_str().map(String::from),
         title: v["subject"].as_str().unwrap_or("").into(),
         state: gerrit_state(v),
-        branch: v["branch"].as_str().unwrap_or("").into(),
+        // `branch` Gerrit = branche de DESTINATION (il n'y a pas de
+        // branche source : le patchset se fetch via refs/changes/*) —
+        // mappée sur `base` pour que le filtre `integration_branch`
+        // de la review s'applique ; `branch` reste vide.
+        base: v["branch"].as_str().unwrap_or("").into(),
         head_sha,
         resolved_repo: v["project"].as_str().map(String::from),
         ..Default::default()
@@ -250,6 +254,26 @@ impl ForgeClient for GerritRestClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `branch` Gerrit = destination → `base` (filtre
+    /// `integration_branch` de la review), `branch` vide — sans ça
+    /// aucun change ne passerait le filtre de base.
+    #[test]
+    fn gerrit_change_mappe_la_destination_sur_base() {
+        let c = gerrit_change(&json!({
+            "_number": 4242,
+            "change_id": "Ideadbeef",
+            "subject": "titre",
+            "status": "NEW",
+            "branch": "next_release",
+            "project": "plat/app",
+            "current_revision": "abc123"
+        }));
+        assert_eq!(c.base, "next_release");
+        assert!(c.branch.is_empty());
+        assert_eq!(c.head_sha, "abc123");
+        assert_eq!(c.resolved_repo.as_deref(), Some("plat/app"));
+    }
 
     #[test]
     fn b64_rfc4648() {

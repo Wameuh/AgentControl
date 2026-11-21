@@ -335,7 +335,7 @@ async fn detect_target(args: &[String], c: &mut Conn, from: usize) -> Result<PrT
     let remote = git_remote();
     let mut matched: Option<(String, String)> = None;
     if let Some((rh, _)) = &remote {
-        for kind in ["gitlab", "gerrit", "github"] {
+        for kind in ["gitlab", "gerrit", "github", "git"] {
             if let Some((fh, _)) = forge_hosts(&set, kind)
                 .into_iter()
                 .find(|(fh, _)| host_part(fh) == rh)
@@ -392,8 +392,8 @@ async fn detect_target(args: &[String], c: &mut Conn, from: usize) -> Result<PrT
         .context("repo introuvable — passez --repo <path> [--forge F] [--host H] (ou lancez depuis le clone)")?;
     }
     anyhow::ensure!(
-        matches!(forge.as_str(), "github" | "gitlab" | "gerrit"),
-        "--forge github|gitlab|gerrit"
+        matches!(forge.as_str(), "github" | "gitlab" | "gerrit" | "git"),
+        "--forge github|gitlab|gerrit|git"
     );
     anyhow::ensure!(!host.is_empty(), "--host requis pour la forge {forge}");
     Ok(PrTarget {

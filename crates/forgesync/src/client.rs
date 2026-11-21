@@ -291,7 +291,13 @@ pub fn spec_for(set: &[Value], kind: &str, host: &str) -> Option<ForgeSpec> {
         },
         "gitlab" => match tr.as_deref() {
             Some("glab") => "glab",
-            Some("gh") => "rest",
+            Some("gh") => {
+                // `gh` n'est pas un transport gitlab — remap tracé
+                // plutôt que rejet : rest sert la config sans casser
+                // le hot-reload.
+                tracing::warn!("forge gitlab {host}: transport «gh» invalide — rest utilisé");
+                "rest"
+            }
             Some("rest") | Some("mcp") => "rest",
             Some("auto") | None | Some(_) => {
                 if glab_auth_ok(host) {
