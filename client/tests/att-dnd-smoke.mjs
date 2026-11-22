@@ -83,8 +83,27 @@ const MOCK = `(function () {
   };
 })();`;
 
-const server = spawn("npx", ["vite", "preview", "--port", "4201", "--strictPort"], { stdio: "ignore" });
-process.on("exit", () => server.kill());
+// Spawn direct de vite.js (pas de shim npx : un npx résolu de travers
+// restait muet >60 s sur runner CI — ni stdout ni stderr ni exit).
+// Port éphémère lu sur la sortie vite — un port fixe est squatté par
+// les previews d'autres worktrees.
+const server = spawn("node", ["node_modules/vite/bin/vite.js", "preview", "--port", "0", "--strictPort"], { stdio: ["ignore", "pipe", "pipe"], detached: true });
+const BASE = await new Promise((res, rej) => {
+  let buf = "", errbuf = "";
+  const to = setTimeout(() => rej(new Error(`vite preview: URL introuvable — stderr: ${errbuf.trim() || "(vide)"}`)), 60000);
+  const scan = (d) => {
+    buf += d;
+    const m = buf.match(/https?:\/\/localhost:(\d+)/);
+    if (m) {
+      clearTimeout(to);
+      res(`http://localhost:${m[1]}`);
+    }
+  };
+  server.stdout.on("data", scan);
+  server.stderr.on("data", (d) => { errbuf += d; scan(d); });
+  server.on("exit", (code) => rej(new Error(`vite preview: exit ${code} — stderr: ${errbuf.trim() || "(vide)"}`)));
+});
+process.on("exit", () => { try { process.kill(-server.pid, "SIGKILL"); } catch {} });
 await new Promise((r) => setTimeout(r, 1800));
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: true, args: ["--no-sandbox"] });
 const p = await b.newPage();
@@ -100,7 +119,7 @@ const check = (name, ok, extra = "") => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const click = (sel) => p.evaluate((s) => document.querySelector(s)?.click(), sel);
 
-await p.goto("http://localhost:4201/", { waitUntil: "networkidle0" });
+await p.goto(BASE + "/", { waitUntil: "networkidle0" });
 await p.waitForSelector("#btn-connect", { timeout: 15000 });
 // Sans connexion, #conn-view est l'écran d'accueil déjà ouvert — NE PAS
 // cliquer #btn-connect (toggle → fermerait la vue).

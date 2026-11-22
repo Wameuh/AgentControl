@@ -6,7 +6,27 @@ import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
 
 mkdirSync("shots", { recursive: true });
-const server = spawn("npx", ["vite", "preview", "--port", "4174", "--strictPort"], { cwd: process.cwd(), stdio: "ignore" });
+// Spawn direct de vite.js (pas de shim npx : un npx résolu de travers
+// restait muet >60 s sur runner CI — ni stdout ni stderr ni exit).
+// Port éphémère lu sur la sortie vite — un port fixe est squatté par
+// les previews d'autres worktrees.
+const server = spawn("node", ["node_modules/vite/bin/vite.js", "preview", "--port", "0", "--strictPort"], { stdio: ["ignore", "pipe", "pipe"], detached: true });
+const BASE = await new Promise((res, rej) => {
+  let buf = "", errbuf = "";
+  const to = setTimeout(() => rej(new Error(`vite preview: URL introuvable — stderr: ${errbuf.trim() || "(vide)"}`)), 60000);
+  const scan = (d) => {
+    buf += d;
+    const m = buf.match(/https?:\/\/localhost:(\d+)/);
+    if (m) {
+      clearTimeout(to);
+      res(`http://localhost:${m[1]}`);
+    }
+  };
+  server.stdout.on("data", scan);
+  server.stderr.on("data", (d) => { errbuf += d; scan(d); });
+  server.on("exit", (code) => rej(new Error(`vite preview: exit ${code} — stderr: ${errbuf.trim() || "(vide)"}`)));
+});
+process.on("exit", () => { try { process.kill(-server.pid, "SIGKILL"); } catch {} });
 await new Promise((r) => setTimeout(r, 1800));
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
 const b = await puppeteer.launch({
@@ -20,7 +40,7 @@ await p.evaluateOnNewDocument(readFileSync("tests/tauri-mock.js", "utf8"));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const shot = async (n) => { await p.screenshot({ path: `shots/${n}.png` }); console.log("->", n); };
 
-await p.goto("http://localhost:4174/#desktop", { waitUntil: "networkidle0" });
+await p.goto(BASE + "/#desktop", { waitUntil: "networkidle0" });
 await sleep(400);
 // Connexion mock → ouvrir la 1re session
 await p.click("#btn-connect").catch(() => {});
