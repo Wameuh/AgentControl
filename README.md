@@ -1,5 +1,8 @@
 # AgentControl
 
+[![build](https://github.com/Wameuh/AgentControl/actions/workflows/build.yml/badge.svg)](https://github.com/Wameuh/AgentControl/actions/workflows/build.yml)
+[![test](https://github.com/Wameuh/AgentControl/actions/workflows/test.yml/badge.svg?branch=next_release)](https://github.com/Wameuh/AgentControl/actions/workflows/test.yml)
+
 **Mission control for your coding agents — they run on your server, you
 drive them from anywhere.**
 

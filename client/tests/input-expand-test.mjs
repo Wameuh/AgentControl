@@ -2,12 +2,13 @@
 // Usage : npm run build && node tests/input-expand-test.mjs
 //   (chromium via $CHROMIUM ou /usr/bin/chromium)
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 mkdirSync("shots", { recursive: true });
-const server = spawn("npx", ["vite", "preview", "--port", "4174", "--strictPort"], { cwd: process.cwd(), stdio: "ignore" });
-await new Promise((r) => setTimeout(r, 1800));
+// vite preview : port libre + poll HTTP jusqu'à réponse — la sortie
+// vite n'est pas un contrat fiable (muette >60 s sur runner GHA).
+const { server, base: BASE } = await startVitePreview();
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
 const b = await puppeteer.launch({
   executablePath: CHROMIUM,
@@ -20,7 +21,7 @@ await p.evaluateOnNewDocument(readFileSync("tests/tauri-mock.js", "utf8"));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const shot = async (n) => { await p.screenshot({ path: `shots/${n}.png` }); console.log("->", n); };
 
-await p.goto("http://localhost:4174/#desktop", { waitUntil: "networkidle0" });
+await p.goto(BASE + "/#desktop", { waitUntil: "networkidle0" });
 await sleep(400);
 // Connexion mock → ouvrir la 1re session
 await p.click("#btn-connect").catch(() => {});

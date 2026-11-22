@@ -8,7 +8,7 @@
 // texte par défaut.
 // Usage : npm run build && node tests/att-dnd-smoke.mjs
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
 
@@ -83,9 +83,9 @@ const MOCK = `(function () {
   };
 })();`;
 
-const server = spawn("npx", ["vite", "preview", "--port", "4201", "--strictPort"], { stdio: "ignore" });
-process.on("exit", () => server.kill());
-await new Promise((r) => setTimeout(r, 1800));
+// vite preview : port libre + poll HTTP jusqu'à réponse — la sortie
+// vite n'est pas un contrat fiable (muette >60 s sur runner GHA).
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: true, args: ["--no-sandbox"] });
 const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
@@ -100,7 +100,7 @@ const check = (name, ok, extra = "") => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const click = (sel) => p.evaluate((s) => document.querySelector(s)?.click(), sel);
 
-await p.goto("http://localhost:4201/", { waitUntil: "networkidle0" });
+await p.goto(BASE + "/", { waitUntil: "networkidle0" });
 await p.waitForSelector("#btn-connect", { timeout: 15000 });
 // Sans connexion, #conn-view est l'écran d'accueil déjà ouvert — NE PAS
 // cliquer #btn-connect (toggle → fermerait la vue).
