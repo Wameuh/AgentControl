@@ -409,6 +409,12 @@ fn fetch_release_asset(
     name: &str,
     pred: impl Fn(&str) -> bool,
 ) -> Result<PathBuf, String> {
+    // `tag` vient de la release GitHub (tag_name → attacker-controlled
+    // sous le modèle I1) : whitelist semver AVANT l'URL d'API et tout
+    // usage — un tag arbitraire réécrirait la requête.
+    if !proto::release_verify::valid_tag(tag) {
+        return Err(format!("tag de release invalide : {tag:?}"));
+    }
     let rel = gh_get(&format!(
         "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
     ))

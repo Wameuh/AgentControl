@@ -302,6 +302,7 @@ async fn run_script(
                         &data,
                         Some(&mut on_line),
                         opts,
+                        std::time::Duration::from_secs(timeout_secs),
                     )
                     .await
                 }
@@ -356,12 +357,19 @@ fn release_urls(tag: &str, name: &str) -> [String; 2] {
 /// Télécharge l'asset `name` de la release `tag` vers `dest` — `Err`
 /// si absent du tag ET de latest.
 fn fetch_release_file(tag: &str, name: &str, dest: &Path) -> Result<(), String> {
+    const CAP: u64 = 512 * 1024 * 1024;
     for url in release_urls(tag, name) {
         if let Some(resp) = http_asset(&url, 300)? {
             use std::io::Read;
             let mut f = std::fs::File::create(dest).map_err(|e| e.to_string())?;
-            let mut r = resp.into_reader().take(512 * 1024 * 1024);
+            // CAP+1 lu : un dépassement devient un Err explicite plutôt
+            // qu'une troncature silencieuse (le sha256 rattraperait de
+            // toute façon — la cause est juste plus claire ici).
+            let mut r = resp.into_reader().take(CAP + 1);
             std::io::copy(&mut r, &mut f).map_err(|e| e.to_string())?;
+            if f.metadata().map_err(|e| e.to_string())?.len() > CAP {
+                return Err(format!("{name} dépasse {CAP} o — artefact anormal"));
+            }
             return Ok(());
         }
     }
@@ -473,6 +481,13 @@ pub(crate) async fn ensure_daemon(
 ) -> Result<String, String> {
     let t0 = std::time::Instant::now();
     client_core::log(Level::Info, format!("ensure_daemon {host} tag={tag}"));
+    // `tag` vient de la release GitHub (rel.tag_name) → attacker-
+    // controlled sous le modèle I1 (compte/PAT compromis). Il part en
+    // interpolation shell dans PROBE_SCRIPT exécuté AVANT toute
+    // signature, et en URL — whitelist semver stricte en premier.
+    if !release_verify::valid_tag(&tag) {
+        return Err(format!("tag de release invalide : {tag:?}"));
+    }
     let native = native.unwrap_or(false) || cfg!(target_os = "android");
     let run = if native {
         let (user, h) = split_user_host(&host, user.as_deref())?;

@@ -457,9 +457,10 @@ pub async fn ssh_exec_stdin(
     stdin: &[u8],
     on_stderr: Option<&mut (dyn FnMut(&str) + Send)>,
     opts: &Opts,
+    read_timeout: Duration,
 ) -> Result<(i32, String, String)> {
     let h = connect_auth(host, port, user, password, key_path, opts).await?;
-    exec_on_io(&h, script, Some(stdin), on_stderr).await
+    exec_on_io(&h, script, Some(stdin), on_stderr, read_timeout).await
 }
 
 /// Exec sur une session déjà ouverte — factorisé entre ssh_exec et
@@ -469,16 +470,19 @@ async fn exec_on(
     script: &str,
     on_stderr: Option<&mut (dyn FnMut(&str) + Send)>,
 ) -> Result<(i32, String, String)> {
-    exec_on_io(h, script, None, on_stderr).await
+    exec_on_io(h, script, None, on_stderr, Duration::from_secs(120)).await
 }
 
 /// `exec_on` + stdin optionnel : `Some(bytes)` envoie les octets dans le
 /// canal puis ferme l'entrée (EOF côté remote) avant de lire la sortie.
+/// `read_timeout` borne la boucle de lecture post-stdin (l'envoi a son
+/// propre timeout de 300 s).
 async fn exec_on_io(
     h: &client::Handle<Handler>,
     script: &str,
     stdin: Option<&[u8]>,
     mut on_stderr: Option<&mut (dyn FnMut(&str) + Send)>,
+    read_timeout: Duration,
 ) -> Result<(i32, String, String)> {
     use russh::ChannelMsg;
     let mut ch = h.channel_open_session().await.context("channel session")?;
@@ -512,7 +516,7 @@ async fn exec_on_io(
         }
     };
     let mut code = -1i32;
-    tokio::time::timeout(Duration::from_secs(120), async {
+    tokio::time::timeout(read_timeout, async {
         while let Some(msg) = ch.wait().await {
             match msg {
                 ChannelMsg::Data { data } => out.extend_from_slice(&data),

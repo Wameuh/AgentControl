@@ -329,22 +329,9 @@ fn verify_release_asset(ver: &str, name: &str, data: &[u8]) -> Result<bool> {
 
 /// Semver strict `X.Y.Z` (+ suffixe `-pre`/`+meta` alphanumérique) —
 /// rejette `/`, `\`, `..`, `%` et tout ce qui altérerait l'URL.
+/// Source unique : proto::release_verify::valid_tag (I1).
 fn valid_version(v: &str) -> bool {
-    let mut it = v.split(['-', '+']);
-    let core: Vec<&str> = it.next().unwrap_or("").split('.').collect();
-    if core.len() != 3
-        || core
-            .iter()
-            .any(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()))
-    {
-        return false;
-    }
-    it.all(|tag| {
-        !tag.is_empty()
-            && tag
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-    })
+    proto::release_verify::valid_tag(v)
 }
 
 /// Vrai si un superviseur relancera le process à sa mort :

@@ -35,6 +35,32 @@ pub fn allow_unsigned() -> bool {
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
+/// Tag de release `vX.Y.Z` avant interpolation — semver strict `X.Y.Z`
+/// (+ suffixe `-pre`/`+meta` alphanumérique, `-rc.N` inclus) : rejette
+/// `/`, `\`, `..`, `%`, `"` et tout ce qui altérerait une URL ou un
+/// script shell. À appliquer sur TOUT tag fourni par la release —
+/// `tag_name` est attacker-controlled sous le modèle I1 (compte
+/// GitHub/PAT compromis) et finit interpolé dans le script ssh
+/// (ensure_daemon) ou l'URL d'API (update) AVANT toute vérification de
+/// signature.
+pub fn valid_tag(v: &str) -> bool {
+    let mut it = v.split(['-', '+']);
+    let core: Vec<&str> = it.next().unwrap_or("").split('.').collect();
+    if core.len() != 3
+        || core
+            .iter()
+            .any(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+    it.all(|tag| {
+        !tag.is_empty()
+            && tag
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    })
+}
+
 /// Clé publique minisign embarquée — `None` tant que le fichier est le
 /// placeholder (decode échoue) : l'erreur « clé non configurée » reste
 /// distincte d'une signature invalide.
@@ -259,5 +285,24 @@ mod tests {
             hex(&Sha256::digest(data))
         );
         assert!(expected_hash(&line, "other.tgz").is_err());
+    }
+
+    #[test]
+    fn valid_tag_whitelists_semver() {
+        for ok in ["0.10.4", "1.0.0", "0.10.4-rc.9", "0.10.4-beta.1+build"] {
+            assert!(valid_tag(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "1.0",
+            "1.0.0/../x",
+            "../etc/passwd",
+            "x\"; rm -rf /; \"",
+            "0.10.4%0Aevil",
+            "0.10.4;x",
+            "x'; y; '",
+        ] {
+            assert!(!valid_tag(bad), "{bad:?}");
+        }
     }
 }
