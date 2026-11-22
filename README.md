@@ -81,9 +81,23 @@ Same sessions, same agents — native mobile UI on Android:
   | Platform | Download |
   |---|---|
   | Windows | NSIS installer (`.exe`), `.msi`, or portable `.exe` |
-  | macOS (Apple Silicon) | `.dmg` — on first launch, right-click the app → **Open** |
+  | macOS (Apple Silicon) | `.dmg` |
   | Ubuntu / Linux | `.deb`, AppImage, or the standalone binary |
   | Android | `.apk` (arm64) — allow installs from this source |
+
+  The Windows and macOS apps are **not code-signed yet** (no Apple
+  notarization, no SmartScreen certificate) — the OS warns on first
+  launch, and that's expected. Verify the download against the signed
+  checksums below, then bypass the warning:
+
+  - **macOS 15+**: open the app once — it is refused — then go to
+    **System Settings → Privacy & Security** and click **Open Anyway**
+    next to AgentControl (right-click → *Open* no longer bypasses
+    Gatekeeper for unnotarized apps). If the app is reported as
+    *"damaged"*, remove the quarantine flag instead:
+    `xattr -dr com.apple.quarantine /Applications/AgentControl.app`.
+  - **Windows 11**: on the *"Windows protected your PC"* SmartScreen
+    prompt, click **More info → Run anyway**.
 
   Every release is signed — `SHA256SUMS` + `SHA256SUMS.minisig`
   (minisign/Ed25519) plus GitHub build-provenance attestations. The
