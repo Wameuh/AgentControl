@@ -256,12 +256,4 @@ jobs:
       - name: Cleanup des RC du cycle
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION=$(grep -oE '"version": "[^"]+"' client/package.json | head -1 | cut -d'"' -f4)
-          git fetch --tags -q
-          for t in $(git tag -l "v$VERSION-rc.*"); do
-            echo "cleanup $t"
-            gh release delete "$t" --yes --cleanup-tag 2>/dev/null \
-              || gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$t" 2>/dev/null \
-              || git push origin ":refs/tags/$t" || true
-          done
+        run: bash client/tools/cleanup_rc.sh
