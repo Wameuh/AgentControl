@@ -1,108 +1,108 @@
 ---
 name: ac-wait
-description: Déléguer une attente à un waiter d'arrière-plan qui poll à bas bruit et ping la session via acctl send quand la condition tombe — l'agent rend la main au lieu de boucler
+description: Delegate a wait to a background waiter that polls at low noise and pings the session via acctl send when the condition lands — the agent yields the turn instead of looping
 argument-hint: "[opts] -- <cmd...> | --until-pid|--until-file|--until-port|--until-pid-file | --list|--cancel|--log"
 allowed-tools:
   - exec
 ---
 
-# ac-wait — waiters délégués
+# ac-wait — delegated waiters
 
-`ac-wait` spawn un poller détaché (setsid+nohup) qui surveille une condition
-et envoie le résultat à ta session via `acctl send` — le message arrive comme
-un message normal (la session est réveillée si elle dort). Tu rends la main
-immédiatement après le spawn au lieu de brûler des tours à boucler.
+`ac-wait` spawns a detached poller (setsid+nohup) that watches a condition
+and sends the result to your session via `acctl send` — the message arrives
+as a normal message (the session is woken if asleep). You yield immediately
+after the spawn instead of burning turns looping.
 
-Script : `tools/ac-wait` dans le repo AgentControl, installé
-`~/.local/bin/ac-wait` (symlink). Deps : bash + `acctl` uniquement
-(`AGENTCONTROL_TCP` respecté → marche aussi depuis un hôte distant).
+Script: `tools/ac-wait` in the AgentControl repo, installed at
+`~/.local/bin/ac-wait` (symlink). Deps: bash + `acctl` only
+(`AGENTCONTROL_TCP` honored → works from a remote host too).
 
-## QUAND l'utiliser
+## WHEN to use it
 
-Règle d'or : **si tu comptes lancer `X --watch` ou une boucle
-`while ! cond; sleep` dans un tool call → ac-wait à la place.**
+Golden rule: **if you're about to run `X --watch` or a
+`while ! cond; sleep` loop in a tool call → ac-wait instead.**
 
-- attendre les checks CI d'une PR (`gh pr checks <N>` en boucle)
-- attendre le merge d'une PR (`gh pr view <N> --json state`)
-- attendre qu'un lock/flock se libère, qu'un item backlog passe done
-- attendre un build long, la mort d'un process, un port/démon qui monte
-- attendre une condition distante via ssh (`-- ssh host test ...`)
-- dormir N minutes (`-- sleep 600` → ping au réveil)
+- wait for a PR's CI checks (`gh pr checks <N>` in a loop)
+- wait for a PR to merge (`gh pr view <N> --json state`)
+- wait for a lock/flock to release, for a backlog item to go done
+- wait for a long build, a process to die, a port/daemon to come up
+- wait for a remote condition over ssh (`-- ssh host test ...`)
+- sleep N minutes (`-- sleep 600` → ping on wake)
 
-## PROTOCOLE
+## PROTOCOL
 
-1. **Spawn** — retourne immédiatement un wait-id :
+1. **Spawn** — returns a wait-id immediately:
 
    ```bash
    ac-wait --name "checks PR #123" -- gh pr checks 123 --required
    # → w-1730000000-12345
    ```
 
-2. **Continue** — fais autre chose ou termine ton tour
-   (« en attente du ping ac-wait »). Pour dormir vraiment :
-   `acctl sleep "$AGENTCONTROL_SESSION"` — le ping du waiter réveille la
-   session automatiquement.
+2. **Continue** — do something else or end your turn
+   ("waiting for the ac-wait ping"). To actually sleep:
+   `acctl sleep "$AGENTCONTROL_SESSION"` — the waiter's ping wakes the
+   session automatically.
 
-3. **Ping** — `[ac-wait] <name> : OK|TIMEOUT après <durée>` arrive en file +
-   les dernières lignes de sortie de la commande. Reprends là où c'était.
+3. **Ping** — `[ac-wait] <name> : OK|TIMEOUT after <duration>` arrives
+   queued + the last output lines of the command. Resume where you left
+   off.
 
-La condition est réévaluée toutes les `--interval` s (défaut 30) jusqu'à
-exit 0 ; `--timeout` (défaut 2 h) → message TIMEOUT. Le message est borné
-(~2 Ko, tail des dernières sorties).
+The condition is re-evaluated every `--interval` s (default 30) until
+exit 0; `--timeout` (default 2 h) → TIMEOUT message. The message is
+bounded (~2 KB, tail of the last outputs).
 
-## Exemples
+## Examples
 
 ```bash
 ac-wait --name "CI #123" --interval 60 -- gh pr checks 123 --required
 ac-wait --name "merge #123" -- bash -c 'gh pr view 123 --json state -q .state | grep -q MERGED'
-#  ^ astuce : la condition = « la commande exit 0 » — pipe/filtre librement
-#    MAIS dans bash -c : un `|` nu dans la ligne appelante coupe la commande
-#    (le waiter ne recevrait que le premier membre → ping immédiat).
-ac-wait --until-file /tmp/build.done --name "build fini"
-ac-wait --until-pid 4207 --name "mort du batch"          # pid déjà mort → OK direct
+#  ^ tip: the condition = "the command exits 0" — pipe/filter freely
+#    BUT inside bash -c: a bare `|` in the calling line splits the command
+#    (the waiter would only get the first member → immediate ping).
+ac-wait --until-file /tmp/build.done --name "build done"
+ac-wait --until-pid 4207 --name "batch died"              # pid already dead → instant OK
 ac-wait --until-port 127.0.0.1:8080 --name "daemon up"
-ac-wait --until-pid-file /run/mon.pid --name "mon daemon stoppé"
-ac-wait --name "deploy distant" -- ssh prod 'systemctl is-active --quiet app'
+ac-wait --until-pid-file /run/my.pid --name "my daemon stopped"
+ac-wait --name "remote deploy" -- ssh prod 'systemctl is-active --quiet app'
 ac-wait --name "pause" -- sleep 900                       # simple timer
-ac-wait --list                    # waiters vivants (id, session, âge, condition)
-ac-wait --cancel w-1730000000-12345   # tue + notifie « annulé »
-ac-wait --log w-1730000000-12345      # tail du log (polls, notif)
+ac-wait --list                    # live waiters (id, session, age, condition)
+ac-wait --cancel w-1730000000-12345   # kills + notifies "cancelled"
+ac-wait --log w-1730000000-12345      # tail of the log (polls, notif)
 ```
 
-`--session SID` cible une autre session (défaut `$AGENTCONTROL_SESSION`).
+`--session SID` targets another session (default `$AGENTCONTROL_SESSION`).
 
-## Pièges
+## Pitfalls
 
-- **Nudge orchestrateur inhibé** : tant qu'un waiter vit, l'orchestrateur
-  ne relance pas la session (garde `acwait_pending` côté démon — waiter
-  stale/pid mort/timeout dépassé → le nudge reprend son rôle de filet).
-  Ne compte donc sur le nudge que comme dernier recours : le waiter doit
-  avoir un `--timeout` raisonnable pour que la session finisse par
-  revenir.
+- **Orchestrator nudge inhibited**: while a waiter lives, the orchestrator
+  won't nudge the session (the daemon keeps an `acwait_pending` guard —
+  stale waiter/dead pid/timeout exceeded → the nudge resumes its safety-net
+  role). So count on the nudge only as a last resort: the waiter must have
+  a reasonable `--timeout` for the session to eventually come back.
 
-- **Toujours un timeout** : un waiter ≠ une surveillance infinie. Ajuste
-  `--timeout`/`--interval` au scénario (CI : 60-120 s de poll).
-- **Condition idempotente et cheap** : elle tourne en boucle — pas d'effet
-  de bord, pas de commande lourde/destructive. Un `--watch` qui ne rend
-  jamais exit 0 → timeout garanti (ex. `gh pr checks --watch` : préférer
-  `-- gh pr checks N` sans --watch, ou `--required` qui exit non-0 tant
-  que pending).
-- **Un seul waiter par condition** : ne pas enchaîner/doubler les waiters
-  sur la même cible — cancel l'ancien ou attends son ping.
-- **Delivery** : le ping part en `acctl send --steer` → il s'injecte **en
-  plein tour** (le steer est conçu pour ça : réveil réel, pas d'empilement
-  en file derrière un long tour) ; session endormie → réveil auto.
-  Le waiter n'utilise pas `--force` (tête de file = réservé aux urgences
-  utilisateur).
-- **Secrets** : le log local n'embarque que rc + tail de sortie, mais le
-  `meta` contient la commande et le message ping affiche name|cmd — passe
-  `--name` et évite les secrets en clair dans `<cmd>`.
-- Le waiter survit à la fin de ton tour (process détaché), pas à un reboot
-  de la machine.
+- **Always a timeout**: a waiter ≠ infinite watch. Tune
+  `--timeout`/`--interval` to the scenario (CI: 60-120 s poll).
+- **Idempotent, cheap condition**: it runs in a loop — no side effects,
+  no heavy/destructive command. A `--watch` that never exits 0 →
+  guaranteed timeout (e.g. `gh pr checks --watch`: prefer
+  `-- gh pr checks N` without --watch, or `--required` which exits
+  non-0 while pending).
+- **One waiter per condition**: don't chain/duplicate waiters on the
+  same target — cancel the old one or wait for its ping.
+- **Delivery**: the ping goes out via `acctl send --steer` → it injects
+  **mid-turn** (steer is built for that: real wake, not queued behind a
+  long turn); sleeping session → auto-wake.
+  The waiter doesn't use `--force` (queue head is reserved for user
+  emergencies).
+- **Secrets**: the local log only carries rc + output tail, but `meta`
+  contains the command and the ping message shows name|cmd — pass
+  `--name` and avoid plaintext secrets in `<cmd>`.
+- The waiter survives the end of your turn (detached process), not a
+  machine reboot.
 
-## Note inter-agents
+## Cross-agent note
 
-`ac-wait` est un binaire PATH indépendant de l'agent (devin, cursor, …) —
-n'importe quelle session AgentControl peut l'utiliser. La SKILL.md vit dans
-le repo pour les sessions devin ; pour un autre agent, pointer le chemin du
-script (`~/.local/bin/ac-wait --help`) dans son contexte.
+`ac-wait` is a PATH binary independent of the agent (devin, cursor, …) —
+any AgentControl session can use it. The SKILL.md lives in the repo for
+devin sessions; for another agent, point the script's path
+(`~/.local/bin/ac-wait --help`) in its context.

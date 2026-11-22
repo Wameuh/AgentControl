@@ -1,81 +1,80 @@
 ---
 name: ac-steps
-description: Publier la liste d'étapes de la tâche en cours au démon AgentControl (acctl steps set) — visible dans le panneau « Étapes » du client et persistée par session
+description: Publish the current task's step list to the AgentControl daemon (acctl steps set) — shown in the client's "Steps" panel and persisted per session
 argument-hint: ""
 allowed-tools:
   - exec
 ---
 
-# ac-steps — progression de tâche visible dans le client
+# ac-steps — task progress visible in the client
 
-Quand tu travailles sur une tâche dans une session AgentControl, publie
-une liste d'étapes minimale (nom + statut) au démon. Le client affiche
-un panneau « Étapes » par session qui se met à jour en direct, et la
-liste survit au redémarrage du démon (steps.json) et au resume.
+When you work on a task in an AgentControl session, publish a minimal
+step list (name + status) to the daemon. The client shows a "Steps"
+panel per session that updates live, and the list survives daemon
+restarts (steps.json) and resume.
 
-Granularité volontairement minimale : **juste le nom de l'étape et son
-statut** — pas de sous-tâches, pas de descriptions, pas de nesting.
+Deliberately minimal granularity: **just the step name and its
+status** — no sub-tasks, no descriptions, no nesting.
 
-## Statuts
+## Statuses
 
 `todo` | `in_progress` | `done` | `abandoned`
 
-- **au plus une étape `in_progress`** à la fois — si tu avances, passe
-  l'ancienne à `done` dans le même `set`.
-- Marque `abandoned` plutôt que de **supprimer** une étape devenue
-  obsolète — l'historique de ce qui a été tenté reste visible.
-- Noms courts (un libellé, pas une phrase — ~200 caractères max,
-  tronqués au-delà).
+- **at most one `in_progress` step** at a time — when you move on, mark
+  the previous one `done` in the same `set`.
+- Mark `abandoned` rather than **deleting** an obsolete step — the
+  history of what was attempted stays visible.
+- Short names (a label, not a sentence — ~200 chars max, truncated
+  beyond).
 
-## Protocole
+## Protocol
 
-Ta session est `$AGENTCONTROL_SESSION` (injectée par le démon — même
-variable qu'`acctl send`). Tu n'as pas besoin de la passer :
+Your session is `$AGENTCONTROL_SESSION` (injected by the daemon — same
+variable as `acctl send`). You don't need to pass it:
 
 ```bash
-# Au démarrage de la tâche : publier la liste complète
-acctl steps set "Analyser le code:todo,Implémenter:in_progress,Tests:todo,PR et review:todo"
+# At task start: publish the full list
+acctl steps set "Analyze the code:todo,Implement:in_progress,Tests:todo,PR and review:todo"
 
-# À chaque changement : repousser la liste ENTIÈRE (remplacement complet,
-# idempotent — jamais d'édition incrémentale, pas de drift d'index)
-acctl steps set "Analyser le code:done,Implémenter:done,Tests:in_progress,PR et review:todo"
+# On every change: republish the WHOLE list (full replacement,
+# idempotent — never incremental edits, no index drift)
+acctl steps set "Analyze the code:done,Implement:done,Tests:in_progress,PR and review:todo"
 
-# Voir l'état courant (debug)
+# See the current state (debug)
 acctl steps get
 ```
 
-- La forme compacte est `nom:statut` séparés par des virgules ; le
-  statut est après le **dernier** `:` (un nom peut contenir `:`).
-  Alias acceptés : `wip`, `in-progress` → `in_progress` ;
-  `complete`, `finished` → `done` ; `skip`, `skipped` → `abandoned`.
-- Forme JSON aussi acceptée :
+- The compact form is `name:status` separated by commas; the status is
+  after the **last** `:` (a name may contain `:`).
+  Accepted aliases: `wip`, `in-progress` → `in_progress`;
+  `complete`, `finished` → `done`; `skip`, `skipped` → `abandoned`.
+- JSON form also accepted:
   `acctl steps set '[{"name":"Tests","status":"in_progress"}]'`
-- Vider la liste : `acctl steps set -` (ou `[]`).
-- La liste est **bornée à ~100 étapes** — au-delà le démon refuse ;
-  fusionne ou abandonne les étapes soldées.
-- Le démon émet un event `steps` à chaque changement → live update
-  client ; `session_info` porte `steps` pour reconstruire à
-  l'ouverture. `/clear` et le rebind vers une autre session native
-  vident la liste (le cycle repart à zéro).
+- Clear the list: `acctl steps set -` (or `[]`).
+- The list is **bounded to ~100 steps** — beyond that the daemon
+  refuses; merge or abandon completed steps.
+- The daemon emits a `steps` event on every change → live client
+  update; `session_info` carries `steps` to rebuild on open. `/clear`
+  and rebinding to another native session clear the list (the cycle
+  starts over).
 
-## Quand publier
+## When to publish
 
-- **Au début** d'une tâche non triviale : découpe en 3-8 étapes
-  représentatives du plan (ne pas sur-découper — le panneau doit rester
-  lisible).
-- **À chaque transition** d'étape (todo → in_progress → done).
-- **Quand le plan change** : republie la liste entière avec les étapes
-  révisées (`abandoned` pour celles abandonnées).
-- Pas besoin de republier à chaque action triviale — seulement quand
-  l'état d'une étape change.
+- **At the start** of a non-trivial task: split into 3-8 steps that
+  represent the plan (don't over-split — the panel must stay readable).
+- **At every step transition** (todo → in_progress → done).
+- **When the plan changes**: republish the whole list with revised
+  steps (`abandoned` for dropped ones).
+- No need to republish on every trivial action — only when a step's
+  state changes.
 
-## Compatibilité / autres providers
+## Compatibility / other providers
 
-Le protocole est `session_set_steps` (RPC unique, liste complète) —
-indépendant du provider. Ce skill vit dans `.devin/skills/ac-steps/`
-(format SKILL.md standard) : les agents Devin le voient nativement.
-Pour Claude Code / Codex / Cursor, copier ou lier ce répertoire dans
-leur répertoire de skills (`~/.claude/skills/`, `~/.codex/…`,
-`~/.cursor/…`) — le contenu reste identique, seul le chemin change ;
-`acctl` et `$AGENTCONTROL_SESSION` sont déjà disponibles dans toute
-session spawnée par le démon, quel que soit le provider.
+The protocol is `session_set_steps` (single RPC, full list) —
+provider-independent. This skill lives in `.devin/skills/ac-steps/`
+(standard SKILL.md format): Devin agents see it natively.
+For Claude Code / Codex / Cursor, copy or link this directory into
+their skills directory (`~/.claude/skills/`, `~/.codex/…`,
+`~/.cursor/…`) — the content stays identical, only the path changes;
+`acctl` and `$AGENTCONTROL_SESSION` are already available in every
+session spawned by the daemon, whatever the provider.

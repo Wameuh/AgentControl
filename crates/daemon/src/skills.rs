@@ -19,6 +19,12 @@
 //! manifeste n'est jamais écrasé : adoptable s'il est identique au
 //! contenu embarqué (repo dont les skills sont committés), sinon warn
 //! + skip — la main reste à l'utilisateur.
+//!
+//! Visibilité git : après la sync, toute racine qui porte un manifeste
+//! est ajoutée au `info/exclude` du dépôt qui la contient (commondir —
+//! partagé entre worktrees) : `git status` reste propre sans toucher
+//! au `.gitignore` de l'utilisateur. Une racine déjà suivie par git
+//! (repo qui versionne ses skills) n'est jamais exclue.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -104,13 +110,15 @@ pub(crate) fn dirs_for(agent: &str) -> &'static [&'static str] {
     }
 }
 
-/// Synchronise chaque racine (absolue) avec les skills embarqués.
+/// Synchronise chaque racine (absolue) avec les skills embarqués, puis
+/// rend la racine invisible pour git (info/exclude — voir git_exclude).
 /// Best-effort : jamais d'erreur remontée — un problème de FS est un
 /// warn, le spawn ne doit pas en pâtir.
 pub(crate) fn sync(roots: &[PathBuf]) {
     let skills = embedded();
     for root in roots {
         sync_root(root, skills);
+        git_exclude(root);
     }
 }
 
@@ -271,6 +279,152 @@ fn sync_root(root: &Path, skills: &[Skill]) {
     }
 }
 
+/// En-tête du bloc de lignes que le démon entretient dans le
+/// `info/exclude` des dépôts où il provisionne des skills.
+const EXCLUDE_HEADER: &str = "# agentcontrol (provisioned skills)";
+
+/// Rend la racine provisionnée invisible pour git : son chemin relatif
+/// est ajouté au `info/exclude` du dépôt qui la contient (item #331).
+/// `info/exclude` est local au clone et jamais committé — le
+/// `.gitignore` de l'utilisateur n'est pas touché.
+///
+/// No-op quand : hors dépôt git, rien de managé posé (pas de
+/// manifeste → le dossier existait déjà sans nous, ou tout a
+/// collisionné — ne pas cacher les fichiers des autres), ou racine
+/// déjà suivie par git (le repo a choisi de versionner ses skills ;
+/// l'exclude est sans effet sur du tracké de toute façon).
+/// Best-effort : warn seulement, jamais d'erreur remontée.
+fn git_exclude(root: &Path) {
+    if !manifest_path(root).exists() {
+        return;
+    }
+    // Canonisé : un cwd avec des composants symlinkés doit quand même
+    // trouver le `.git` réel en remontant.
+    let Ok(root) = root.canonicalize() else {
+        return;
+    };
+    let Some((worktree, gitdir)) = repo_of(&root) else {
+        return; // hors dépôt git — rien à faire
+    };
+    let Ok(rel) = root.strip_prefix(&worktree) else {
+        return;
+    };
+    if tracked(&worktree, rel) {
+        return;
+    }
+    // `info/exclude` vit dans le commondir : un fichier unique partagé
+    // par tous les worktrees du dépôt.
+    let common = common_dir(&gitdir);
+    let pat = format!("/{}/", rel.to_string_lossy().replace('\\', "/"));
+    if let Err(e) = ensure_exclude(&common.join("info/exclude"), &pat) {
+        tracing::warn!(
+            "skills: cannot hide {} from git ({}): {}",
+            rel.display(),
+            common.join("info/exclude").display(),
+            e
+        );
+    }
+}
+
+/// Dépôt git contenant `dir` (canonisé) : remonte les parents jusqu'au
+/// premier `.git` — dossier → gitdir direct ; fichier (worktree lié,
+/// submodule) → résolution de `gitdir:` (relatif au dossier porteur).
+/// Retourne `(racine_du_worktree, gitdir)`.
+fn repo_of(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    for anc in dir.ancestors() {
+        let g = anc.join(".git");
+        let Ok(md) = std::fs::metadata(&g) else {
+            continue;
+        };
+        if md.is_dir() {
+            return Some((anc.to_path_buf(), g));
+        }
+        if md.is_file() {
+            let text = std::fs::read_to_string(&g).ok()?;
+            let target = text.lines().next()?.trim().strip_prefix("gitdir:")?.trim();
+            let gitdir = if Path::new(target).is_absolute() {
+                PathBuf::from(target)
+            } else {
+                anc.join(target)
+            };
+            return Some((anc.to_path_buf(), gitdir));
+        }
+    }
+    None
+}
+
+/// Gitdir partagé du dépôt : `<gitdir>/commondir` (worktree lié →
+/// `../..`, submodule → chemin du gitdir commun) résolu relativement
+/// au gitdir ; absent → le gitdir lui-même est le commondir.
+fn common_dir(gitdir: &Path) -> PathBuf {
+    std::fs::read_to_string(gitdir.join("commondir"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|c| {
+            if Path::new(&c).is_absolute() {
+                PathBuf::from(c)
+            } else {
+                gitdir.join(c)
+            }
+        })
+        .unwrap_or_else(|| gitdir.to_path_buf())
+}
+
+/// Vrai si `rel` (relatif au worktree) couvre déjà des fichiers
+/// suivis par git — le repo versionne ses skills : ne rien exclure.
+/// git absent ou en erreur → false : ajouter l'exclude reste bénin
+/// (sans effet sur des fichiers trackés).
+fn tracked(worktree: &Path, rel: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["ls-files", "-z", "--"])
+        .arg(rel)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// Ajoute `pattern` au fichier `info/exclude` — idempotent : le motif
+/// déjà présent (où que ce soit) → réécriture évitée. Nos entrées sont
+/// regroupées sous `EXCLUDE_HEADER`, insérées à la fin du bloc contigu
+/// qui suit l'en-tête quand il existe déjà, sinon bloc ajouté en fin
+/// de fichier. Écriture `.part`+rename comme le manifeste. Retourne
+/// vrai si le fichier a été écrit.
+fn ensure_exclude(path: &Path, pattern: &str) -> std::io::Result<bool> {
+    let cur = std::fs::read_to_string(path).unwrap_or_default();
+    if cur.lines().any(|l| l.trim() == pattern) {
+        return Ok(false);
+    }
+    let mut lines: Vec<String> = cur.lines().map(str::to_string).collect();
+    if let Some(h) = lines.iter().position(|l| l.trim() == EXCLUDE_HEADER) {
+        let mut ins = h + 1;
+        while ins < lines.len() && !lines[ins].trim().is_empty() {
+            ins += 1;
+        }
+        lines.insert(ins, pattern.to_string());
+    } else {
+        if !lines.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
+            lines.push(String::new());
+        }
+        lines.push(EXCLUDE_HEADER.to_string());
+        lines.push(pattern.to_string());
+    }
+    let mut body = lines.join("\n");
+    body.push('\n');
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("part");
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +553,166 @@ mod tests {
         assert!(dirs_for("cursor").contains(&".cursor/skills"));
         assert_eq!(dirs_for("codex"), &[".agents/skills"]);
         assert_eq!(dirs_for("inconnu"), &[".agents/skills"]);
+    }
+
+    // ---- git_exclude : les racines provisionnées sont cachées de git.
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git spawn — requis pour ces tests");
+        assert!(
+            o.status.success(),
+            "git -C {} {:?} → {}\n{}",
+            dir.display(),
+            args,
+            o.status,
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// `git init` + identité minimale (les tests worktree/tracké
+    /// committent). `git init` crée déjà `info/exclude` (template) —
+    /// c'est l'état réel sur lequel on bosse.
+    fn init_repo(tag: &str) -> PathBuf {
+        let d = tmpdir(tag);
+        git(&d, &["init", "-q"]);
+        git(&d, &["config", "user.email", "t@t"]);
+        git(&d, &["config", "user.name", "t"]);
+        d
+    }
+
+    fn exclude_file(repo: &Path) -> String {
+        std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap_or_default()
+    }
+
+    #[test]
+    fn repo_propre_status_vide_et_idempotent() {
+        let repo = init_repo("clean");
+        let root = repo.join(".claude/skills");
+        let skills = [skill("ac-x", &[("SKILL.md", "x")])];
+        sync_root(&root, &skills);
+        git_exclude(&root);
+        // Les fichiers provisionnés n'apparaissent plus dans git status.
+        assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+        let ex = exclude_file(&repo);
+        assert_eq!(ex.matches("/.claude/skills/").count(), 1);
+        assert!(ex.contains(EXCLUDE_HEADER));
+        // Deuxième passe : toujours une seule ligne.
+        sync_root(&root, &skills);
+        git_exclude(&root);
+        assert_eq!(exclude_file(&repo).matches("/.claude/skills/").count(), 1);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn worktree_exclude_dans_le_commondir() {
+        let main = init_repo("wt");
+        std::fs::write(main.join("f"), "x").unwrap();
+        git(&main, &["add", "f"]);
+        git(&main, &["commit", "-qm", "init"]);
+        let wt = main.with_file_name(format!(
+            "{}-linked",
+            main.file_name().unwrap().to_string_lossy()
+        ));
+        git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        let root = wt.join(".claude/skills");
+        sync_root(&root, &[skill("ac-x", &[("SKILL.md", "x")])]);
+        git_exclude(&root);
+        // L'entrée va dans le commondir partagé — le .git du clone
+        // principal, pas le gitdir privé .git/worktrees/<n>.
+        assert!(exclude_file(&main).contains("/.claude/skills/"));
+        assert_eq!(git(&wt, &["status", "--porcelain"]), "");
+        git(
+            &main,
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
+        let _ = std::fs::remove_dir_all(&main);
+    }
+
+    #[test]
+    fn dossier_tracke_pas_d_exclude() {
+        let repo = init_repo("tracked");
+        let mine = repo.join(".claude/skills/mine");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(mine.join("SKILL.md"), "mien").unwrap();
+        git(&repo, &["add", ".claude/skills"]);
+        git(&repo, &["commit", "-qm", "skills"]);
+        // Le repo versionne ses skills : la racine provisionnée dedans
+        // n'est pas exclue (l'exclude serait sans effet et brouillerait
+        // le propos — le bruit git status est assumé par l'utilisateur).
+        let root = repo.join(".claude/skills");
+        sync_root(&root, &[skill("ac-x", &[("SKILL.md", "x")])]);
+        git_exclude(&root);
+        assert!(!exclude_file(&repo).contains(EXCLUDE_HEADER));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn collision_sans_manifeste_pas_d_exclude() {
+        let repo = init_repo("coll");
+        let root = repo.join(".claude/skills");
+        let mine = root.join("ac-x");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(mine.join("SKILL.md"), "mien").unwrap();
+        // Tout a collisionné → aucune sortie managée → on ne cache pas
+        // aux yeux de git un dossier qui n'est pas à nous.
+        sync_root(&root, &[skill("ac-x", &[("SKILL.md", "embedded")])]);
+        assert!(!manifest_path(&root).exists());
+        git_exclude(&root);
+        assert!(!exclude_file(&repo).contains(EXCLUDE_HEADER));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn hors_depot_aucune_erreur() {
+        let dir = tmpdir("nogit");
+        let root = dir.join(".agents/skills");
+        sync_root(&root, &[skill("ac-x", &[("SKILL.md", "x")])]);
+        git_exclude(&root); // pas de panic, aucune écriture
+        assert!(!dir.join(".git").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deux_racines_meme_bloc() {
+        let repo = init_repo("two");
+        for d in [".claude/skills", ".agents/skills"] {
+            let root = repo.join(d);
+            sync_root(&root, &[skill("ac-x", &[("SKILL.md", "x")])]);
+            git_exclude(&root);
+        }
+        let ex = exclude_file(&repo);
+        assert_eq!(ex.matches(EXCLUDE_HEADER).count(), 1);
+        assert!(ex.contains("/.claude/skills/"));
+        assert!(ex.contains("/.agents/skills/"));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn ensure_exclude_insere_dans_le_bloc_existant() {
+        let dir = tmpdir("block");
+        let f = dir.join("exclude");
+        std::fs::write(
+            &f,
+            "autre\n\n# agentcontrol (provisioned skills)\n/.a/\n\n# user\nfoo\n",
+        )
+        .unwrap();
+        assert!(ensure_exclude(&f, "/.b/").unwrap());
+        let body = std::fs::read_to_string(&f).unwrap();
+        // Dans le bloc agentcontrol, avant la section utilisateur.
+        let (a, b, u) = (
+            body.find("/.a/").unwrap(),
+            body.find("/.b/").unwrap(),
+            body.find("# user").unwrap(),
+        );
+        assert!(a < b && b < u);
+        assert!(!ensure_exclude(&f, "/.b/").unwrap()); // idempotent
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
