@@ -1,74 +1,74 @@
 ---
 name: acctl
-description: Piloter le démon AgentControl — sessions (new/spawn/msg/send/rm), fichiers, registre PR, RPC brut pour ce qu'acctl n'expose pas (groupe, rename, file)
-argument-hint: "<commande acctl ou RPC brut>"
+description: Drive the AgentControl daemon — sessions (new/spawn/msg/send/rm), files, PR registry, raw RPC for what acctl doesn't expose (group, rename, file)
+argument-hint: "<acctl command or raw RPC>"
 allowed-tools:
   - exec
 ---
 
-# acctl — pilotage du démon AgentControl
+# acctl — driving the AgentControl daemon
 
-`acctl` est le CLI du démon : créer/lister/supprimer des sessions, envoyer des
-messages (utilisateur ou agent→agent), lire/écrire des fichiers dans le
-workspace d'une session, gérer le registre PR.
+`acctl` is the daemon's CLI: create/list/delete sessions, send messages
+(user or agent→agent), read/write files in a session's workspace, manage
+the PR registry.
 
-## Connexion
+## Connection
 
-- `AGENTCONTROL_TCP=hôte:port` → socket TCP (ici le démon du conteneur écoute
-  `127.0.0.1:7331`)
-- sinon socket Unix `~/.agentcontrol/daemon.sock`
-- `AGENTCONTROL_SESSION` = id de la session courante (injecté quand on tourne
-  dans une session AgentControl — utile comme `from` pour `spawn`/`msg`)
-- Bruit stderr : les binaires des releases ≤ 0.10.4 peuvent imprimer un
-  warning `GLIBC_2.39 not found` inoffensif (liés à la glibc du runner
-  CI — corrigé en statique musl depuis #266) → ajouter `2>/dev/null`
-  aux pipes si le warning apparaît.
+- `AGENTCONTROL_TCP=host:port` → TCP socket (here the container daemon
+  listens on `127.0.0.1:7331`)
+- otherwise Unix socket `~/.agentcontrol/daemon.sock`
+- `AGENTCONTROL_SESSION` = current session id (injected when running
+  inside an AgentControl session — useful as `from` for `spawn`/`msg`)
+- stderr noise: release binaries ≤ 0.10.4 may print a harmless
+  `GLIBC_2.39 not found` warning (tied to the CI runner's glibc — fixed
+  with static musl since #266) → append `2>/dev/null` to pipes if the
+  warning shows up.
 
-## Commandes
+## Commands
 
-| Commande | Rôle |
+| Command | Role |
 |---|---|
-| `acctl status` | version du démon, nb sessions, self_update |
-| `acctl agents` | profils d'agents disponibles |
-| `acctl list` | sessions (état, agent, titre, badges `[#N]`, sous-agents indentés `↳`) |
-| `acctl new <agent> <cwd> [prompt...] [--title T] [--mode M] [--model X]` | crée une session **racine** (pas de `spawned_by`, pas de groupe) |
-| `acctl spawn <from> [task...] [--agent A] [--cwd C] [--title T] [--mode M] [--model X] [--group G]` | crée une **sous-session** de `from` : `spawned_by=from`, imbriquée dans la sidebar ; champs omis hérités du parent ; `--group` explicite possible ; `task` livré en message PeerMessage traçé |
-| `acctl send <session> [--steer|--force] <text...>` | message utilisateur → session ; `--steer` injecte pendant le tour, `--force` passe en tête de file ; session endormie → réveil auto |
-| `acctl msg <from> <to> [--steer] <text...>` | message agent→agent (PeerMessage journalisé des deux côtés) |
-| `acctl events <session> [before_seq] [limit]` | journal d'events formaté |
-| `acctl tail <session> [after_seq]` | suit le journal en continu |
-| `acctl search <session> <query...>` | plein-texte dans le journal (~20k events/scan) |
-| `acctl find <session> <query...>` | fichiers par nom dans le workspace |
-| `acctl create <session> <path> [--dir]` | crée fichier/dossier (exclusif : échoue si existe) |
-| `acctl write|wr <session> <path> [fichier|-]` | écrit un fichier (stdin si `-` ou absent) |
-| `acctl download|dl <session> <path> [dest]` | rapatrie un fichier/dossier |
-| `acctl blob <session> <id> [offset] [limit]` | lit un blob du journal |
-| `acctl resume <session> [native_id]` | réveille/respawn une session |
-| `acctl attach <agent> <cwd> <native_id> [title]` | attache une session native de l'agent |
-| `acctl fork <session>` | fork la session native → nouvelle session même groupe, titre `_fork` |
-| `acctl sleep <session>` | endort (tue le process, garde le journal — le prochain send réveille) |
-| `acctl cancel <session>` | annule le tour en cours |
-| `acctl kill <session>` | tue l'agent sans supprimer la session |
-| `acctl clear <session>` | vide le journal (`/clear`) |
-| `acctl rm <session>` | **supprime la session définitivement** |
-| `acctl mode <session> <mode>` / `acctl model <s> <m>` / `acctl setcfg <s> <id> <val>` | réglages runtime de l'agent |
-| `acctl respond <session> <request_id> [option_id | --answer JSON]` | répond à une question/permission en attente |
-| `acctl daemon-update [version]` | auto-update du démon (défaut : version d'acctl) |
-| `acctl pr ls|add|note|rm|sync` | registre PR ↔ session (voir règle globale registre PR) |
+| `acctl status` | daemon version, session count, self_update |
+| `acctl agents` | available agent profiles |
+| `acctl list` | sessions (state, agent, title, `[#N]` badges, sub-agents indented `↳`) |
+| `acctl new <agent> <cwd> [prompt...] [--title T] [--mode M] [--model X]` | creates a **root** session (no `spawned_by`, no group) |
+| `acctl spawn <from> [task...] [--agent A] [--cwd C] [--title T] [--mode M] [--model X] [--group G]` | creates a **sub-session** of `from`: `spawned_by=from`, nested in the sidebar; omitted fields inherited from the parent; explicit `--group` allowed; `task` delivered as a traced PeerMessage |
+| `acctl send <session> [--steer|--force] <text...>` | user message → session; `--steer` injects mid-turn, `--force` jumps the queue; a sleeping session wakes automatically |
+| `acctl msg <from> <to> [--steer] <text...>` | agent→agent message (PeerMessage journaled on both sides) |
+| `acctl events <session> [before_seq] [limit]` | formatted event journal |
+| `acctl tail <session> [after_seq]` | follows the journal live |
+| `acctl search <session> <query...>` | full-text search in the journal (~20k events/scan) |
+| `acctl find <session> <query...>` | files by name in the workspace |
+| `acctl create <session> <path> [--dir]` | creates file/dir (exclusive: fails if it exists) |
+| `acctl write|wr <session> <path> [file|-]` | writes a file (stdin if `-` or omitted) |
+| `acctl download|dl <session> <path> [dest]` | fetches a file/directory back |
+| `acctl blob <session> <id> [offset] [limit]` | reads a journal blob |
+| `acctl resume <session> [native_id]` | wakes/respawns a session |
+| `acctl attach <agent> <cwd> <native_id> [title]` | attaches a native agent session |
+| `acctl fork <session>` | forks the native session → new session, same group, `_fork` title |
+| `acctl sleep <session>` | puts to sleep (kills the process, keeps the journal — next send wakes) |
+| `acctl cancel <session>` | cancels the current turn |
+| `acctl kill <session>` | kills the agent without deleting the session |
+| `acctl clear <session>` | clears the journal (`/clear`) |
+| `acctl rm <session>` | **deletes the session permanently** |
+| `acctl mode <session> <mode>` / `acctl model <s> <m>` / `acctl setcfg <s> <id> <val>` | agent runtime settings |
+| `acctl respond <session> <request_id> [option_id | --answer JSON]` | answers a pending question/permission |
+| `acctl daemon-update [version]` | daemon self-update (default: acctl's own version) |
+| `acctl pr ls|add|note|rm|sync` | PR ↔ session registry (see the global PR-registry rule) |
 
-## Groupes
+## Groups
 
-- **Créer groupé** : `acctl spawn <parent> --group "a/b" ...` (sous-session)
-  ou rien pour `new` (racine). Un spawn sans `--group` hérite le groupe du
-  parent.
-- **Re-grouper une session existante** : `acctl` n'expose pas
-  `set_session_group` → RPC brut (ci-dessous). `group: null` retire du groupe.
-- Les noms avec `/` rendent l'arborescence (sous-groupes) dans la sidebar.
+- **Create grouped**: `acctl spawn <parent> --group "a/b" ...` (sub-session)
+  or nothing for `new` (root). A spawn without `--group` inherits the
+  parent's group.
+- **Re-group an existing session**: `acctl` doesn't expose
+  `set_session_group` → raw RPC (below). `group: null` removes from the group.
+- Names with `/` render as a tree (sub-groups) in the sidebar.
 
-## RPC brut (ce qu'acctl n'expose pas)
+## Raw RPC (what acctl doesn't expose)
 
-Protocole NDJSON sur le socket : `{"id":1,"req":"<snake_case>",...}` →
-`{"id":1,"ok":true,"result":...}`. Helper TCP :
+NDJSON protocol over the socket: `{"id":1,"req":"<snake_case>",...}` →
+`{"id":1,"ok":true,"result":...}`. TCP helper:
 
 ```bash
 ac_rpc() { python3 - "$@" <<'EOF'
@@ -83,30 +83,29 @@ EOF
 ac_rpc '{"id":1,"req":"set_session_group","session":"s-xxx","group":"a/b"}'
 ```
 
-Requêtes utiles hors acctl :
+Useful requests outside acctl:
 
-| req | effet |
+| req | effect |
 |---|---|
-| `set_session_group {session, group\|null}` | grouper/dégrouper |
-| `rename_session {session, title}` | renommer |
-| `session_info {session}` | méta complète (modes/models/commands dispo) |
-| `list_sessions` | méta JSON complète (group, spawned_by, context_used…) |
-| `queue_list / queue_edit / queue_drop / queue_promote {session, ...}` | file de messages en attente |
-| `list_dir {session, path}` / `delete_path {session, path}` | fichiers |
-| `list_native_sessions {session}` | sessions natives reprennables de l'agent |
-| `term_open/term_input/term_resize/term_close` | PTY terminal (usage client) |
+| `set_session_group {session, group\|null}` | group/ungroup |
+| `rename_session {session, title}` | rename |
+| `session_info {session}` | full metadata (available modes/models/commands) |
+| `list_sessions` | full JSON metadata (group, spawned_by, context_used…) |
+| `queue_list / queue_edit / queue_drop / queue_promote {session, ...}` | pending message queue |
+| `list_dir {session, path}` / `delete_path {session, path}` | files |
+| `list_native_sessions {session}` | resumable native sessions of the agent |
+| `term_open/term_input/term_resize/term_close` | PTY terminal (client usage) |
 
-Référence complète : `ReqKind` dans `crates/proto/src/lib.rs` (~l. 430).
+Full reference: `ReqKind` in `crates/proto/src/lib.rs` (~l. 430).
 
-## Garde-fous
+## Guardrails
 
-- **Jamais** stopper/redémarrer le démon lui-même (`systemctl`,
-  `supervisorctl`, kill du process) — il orchestre toutes les sessions
-  agents, dont la vôtre (règle AGENTS.md).
-- `rm` est définitif ; préférer `sleep` pour libérer une session qu'on
-  peut reprendre.
-- `spawn` exige un `from` = id de session existante ; `kill` sur une
-  session `dead`/`starting` est inoffensif.
-- Visibilité client : toute session créée ici apparaît dans la sidebar au
-  prochain refresh — imbriquée sous le parent si `spawned_by` est posé
-  (`spawn`), racine sinon (`new`).
+- **Never** stop/restart the daemon itself (`systemctl`,
+  `supervisorctl`, process kill) — it orchestrates every agent session,
+  including yours (AGENTS.md rule).
+- `rm` is final; prefer `sleep` to free a session you may resume.
+- `spawn` requires a `from` = existing session id; `kill` on a
+  `dead`/`starting` session is harmless.
+- Client visibility: any session created here appears in the sidebar on
+  the next refresh — nested under the parent if `spawned_by` is set
+  (`spawn`), root otherwise (`new`).

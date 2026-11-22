@@ -184,6 +184,15 @@ A few concrete setups — every bullet is something you can do today:
   reasoning effort are shared pipeline settings (PR reviewers get a
   dedicated model), and sessions can carry an optional advisor model
   declared per profile.
+- **Give every agent AgentControl's skills for free**: at each spawn the
+  daemon syncs its bundled skills (`acctl`, `ac-wait`, `ac-steps`) into
+  the directories your provider scans (`.claude/skills/`,
+  `.agents/skills/`…) inside the session's folder — and adds them to the
+  repo's `.git/info/exclude`, so `git status` stays clean without
+  touching your `.gitignore` (nothing is excluded if your repo already
+  tracks its skills directory). Sync is manifest-managed: your own
+  skills are never overwritten. Set `provision_skills = false`
+  (globally or per `[agents.*]` profile) to opt out.
 - **Let agents wait without burning turns**: agents delegate long waits
   (CI checks, review verdicts, merges) to `ac-wait` — background waiters
   that wake the session the moment the condition fires, surviving even

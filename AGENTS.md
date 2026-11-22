@@ -681,7 +681,11 @@ dans `.devin/skills` (répertoire de compat pour les PR en vol, et
 répertoire provisionné dans les workspaces — `build.rs` en exclut les
 skills listés par son `.agentcontrol-skills.json` pour éviter qu'une
 sortie provisionnée soit ré-embarquée). Les sorties provisionnées sont
-gitignorées (`.gitignore` racine).
+gitignorées (`.gitignore` racine) ET, depuis #331, ajoutées au
+`info/exclude` du dépôt de la session après chaque sync (commondir
+partagé entre worktrees — `git status` reste propre dans les repos
+utilisateurs sans toucher à leur `.gitignore` ; une racine déjà
+trackée n'est jamais exclue).
 
 ## Known pitfalls
 

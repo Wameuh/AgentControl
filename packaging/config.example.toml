@@ -47,10 +47,11 @@ auto_resume = true
 # adopté s'il est identique au contenu embarqué, sinon ignoré avec un
 # warn dans le log — pour garder votre propre version d'un skill fourni,
 # renommez-le ou supprimez-le (la version embarquée prendra le nom).
-# Dans un repo git, ignorer les sorties provisionnées pour ne pas les
-# voir comme des modifications : .agentcontrol-skills.json + les
-# répertoires .devin/skills, .claude/skills, .cursor/skills,
-# .agents/skills (le .gitignore du repo AgentControl le fait déjà).
+# Dans un repo git, le démon ajoute lui-même les racines provisionnées
+# au .git/info/exclude du dépôt (commondir — partagé entre worktrees) :
+# git status reste propre sans toucher à votre .gitignore. Rien n'est
+# ajouté si le dossier de skills est déjà suivi par git (repo qui
+# versionne ses skills).
 #
 # Désactiver globalement : provision_skills = false
 # Désactiver pour un seul profil : [agents.<id>] provision_skills = false
