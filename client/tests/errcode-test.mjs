@@ -5,7 +5,7 @@
 // le résultat remplace toujours l'erreur brute dans l'UI.
 // Usage : node tests/errcode-test.mjs   — Node ≥ 22.18 requis
 // (type stripping : errcode.ts + i18n importés sans transpilation).
-import { codedErrorMsg } from "../src/core/errcode.ts";
+import { codeLabel, codedErrorMsg } from "../src/core/errcode.ts";
 import { initLang, setLang } from "../src/i18n/index.ts";
 
 // Stubs DOM minimaux : i18n lit navigator/localStorage/document au
@@ -80,6 +80,17 @@ ok(
   codedErrorMsg("surprise", "pair") === "Pairing failed — surprise",
   "pair non typée → _other + brut"
 );
+
+// --- codeLabel : codes `warn:` serveur → clés qr_warn_* ---
+ok(
+  codeLabel("hk-mismatch", "qr_warn").startsWith("The server's fingerprints"),
+  "qr_warn_hk_mismatch (tiret → snake)"
+);
+ok(
+  codeLabel("sshd-version-unknown", "qr_warn").startsWith("Could not determine"),
+  "qr_warn_sshd_version_unknown"
+);
+ok(codeLabel("new-server-code", "qr_warn") === "new-server-code", "warn inconnu → brut");
 
 // --- i18n : les kinds passent par les 4 dictionnaires ---
 setLang("fr");

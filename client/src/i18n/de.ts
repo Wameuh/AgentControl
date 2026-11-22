@@ -95,6 +95,8 @@ export const de: Record<Key, string> = {
   qr_installing: "Einmalschlüssel wird auf dem Server installiert…",
   qr_waiting: "warte auf das Gerät — Code scannen",
   qr_sweep_hint: "Kein Cron auf dem Server: veraltete Kopplungsschlüssel werden erst beim nächsten Koppeln aufgeräumt.",
+  qr_warn_hk_mismatch: "Die Server-Fingerprints weichen von Ihren known_hosts ab — vor dem Koppeln Out-of-Band prüfen.",
+  qr_warn_sshd_version_unknown: "sshd-Version unbekannt — der Kopplungsschlüssel läuft eventuell nicht automatisch ab.",
   qr_paired: "gekoppelt ({label}) — Einmalschlüssel vernichtet",
   qr_expired: "Code abgelaufen — neuen generieren",
   qr_gone: "Kopplung abgebrochen oder widerrufen",

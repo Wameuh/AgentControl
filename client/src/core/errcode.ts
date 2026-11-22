@@ -20,3 +20,12 @@ export function codedErrorMsg(e: unknown, ns: keyof typeof PREFIX): string {
   const msg = m?.[1] && t(key) !== key ? t(key) : t(`${p}_other` as Key);
   return detail ? `${msg} — ${detail}` : msg;
 }
+
+/** Libellé i18n d'un code `<keyPrefix>_<code>` (tirets→snake) — brut si
+ *  la clé est absente (codes `warn:` du script pair, ex. `hk-mismatch`
+ *  → `qr_warn_hk_mismatch`). Jamais un code opaque dans l'UI. */
+export function codeLabel(code: string, keyPrefix: string): string {
+  const k = `${keyPrefix}_${code.replace(/-/g, "_")}` as Key;
+  const s = t(k);
+  return s === k ? code : s;
+}

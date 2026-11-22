@@ -93,6 +93,8 @@ export const fr: Record<Key, string> = {
   qr_installing: "pose de la clé jetable sur le serveur…",
   qr_waiting: "en attente de l'appareil — scannez le code",
   qr_sweep_hint: "Pas de cron sur le serveur : les clés d'appairage périmées ne sont balayées qu'au prochain appairage.",
+  qr_warn_hk_mismatch: "Les empreintes du serveur diffèrent de votre known_hosts — vérifiez hors-bande avant d'appairer.",
+  qr_warn_sshd_version_unknown: "Version sshd indéterminée — la clé d'appairage pourrait ne pas expirer seule.",
   qr_paired: "appairé ({label}) — clé jetable détruite",
   qr_expired: "code expiré — régénérez-en un",
   qr_gone: "appairage annulé ou révoqué",

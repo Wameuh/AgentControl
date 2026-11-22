@@ -733,7 +733,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
                 format!("start \"\" /wait \"{}\" /S", setup.display()),
                 String::new(),
                 String::new(),
-                "installer exited with code %errorlevel%".into(),
+                "update-failed:install:installer exited with code %errorlevel%".into(),
             )
         } else if let Some(pf) = program_files_root(&cur_l) {
             ulog(format!("exe sous {pf} → chemin msi (per-machine, élévation UAC)"));
@@ -785,7 +785,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
                 ),
                 format!("del \"{}\"\r\n", ps1.display()),
                 String::new(),
-                "msiexec failed with code %errorlevel%".into(),
+                "update-failed:install:msiexec failed with code %errorlevel%".into(),
             )
         } else {
             dir_writable_or_err(&cur, &tag)?;
@@ -829,7 +829,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
                 ),
                 String::new(),
                 format!("del \"{new}\" 2>nul\r\n"),
-                "replace failed with code %errorlevel%".into(),
+                "update-failed:install:replace failed with code %errorlevel%".into(),
             )
         };
     // cmd /C : ping ≈ sleep 1 s sans console (timeout.exe exige un handle

@@ -92,6 +92,8 @@ export const en = {
   qr_installing: "installing the one-shot key on the server…",
   qr_waiting: "waiting for the device — scan the code",
   qr_sweep_hint: "No cron on the server: stale pairing keys are only swept at the next pairing.",
+  qr_warn_hk_mismatch: "The server's fingerprints differ from your known_hosts — verify out-of-band before pairing.",
+  qr_warn_sshd_version_unknown: "Could not determine the sshd version — the pairing key may not auto-expire.",
   qr_paired: "paired ({label}) — one-shot key destroyed",
   qr_expired: "code expired — generate a new one",
   qr_gone: "pairing cancelled or revoked",

@@ -95,6 +95,8 @@ export const es: Record<Key, string> = {
   qr_installing: "instalando la clave de un solo uso en el servidor…",
   qr_waiting: "esperando al dispositivo — escanee el código",
   qr_sweep_hint: "Sin cron en el servidor: las claves de vinculación obsoletas solo se limpian en la próxima vinculación.",
+  qr_warn_hk_mismatch: "Las huellas del servidor difieren de tu known_hosts — verifica fuera de banda antes de vincular.",
+  qr_warn_sshd_version_unknown: "Versión de sshd desconocida — la clave de vinculación podría no caducar sola.",
   qr_paired: "vinculado ({label}) — clave de un solo uso destruida",
   qr_expired: "código expirado — genere uno nuevo",
   qr_gone: "vinculación cancelada o revocada",

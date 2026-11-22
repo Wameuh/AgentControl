@@ -22,7 +22,7 @@ import { invoke } from "../core/bridge";
 import { $, esc } from "../core/dom";
 import { accentOf, isAndroid } from "../core/chrome";
 import { t } from "../i18n";
-import { codedErrorMsg } from "../core/errcode";
+import { codeLabel, codedErrorMsg } from "../core/errcode";
 import { parsePair } from "./pair-payload";
 import type { SavedConn } from "../core/types";
 
@@ -288,7 +288,8 @@ async function beginPair(s: PairSession) {
     // prochain appairage (hint — l'expiry-time sshd borne déjà la clé).
     const sweepHint = r.sweep === "inline-only" ? t("qr_sweep_hint") : "";
     if (r.warn || sweepHint) {
-      warnEl.textContent = [r.warn, sweepHint].filter(Boolean).join(" ");
+      warnEl.textContent =
+        [r.warn && codeLabel(r.warn, "qr_warn"), sweepHint].filter(Boolean).join(" ");
       warnEl.hidden = false;
     } else {
       warnEl.hidden = true;
