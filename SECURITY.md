@@ -12,8 +12,9 @@ Security tab → "Report a vulnerability". You'll get an answer within a week.
 ## Scope
 
 The daemon, the desktop/Android app, the pairing script (`pair.sh`) and the
-release pipeline. See the "Security model" section of the README for what
-AgentControl does and doesn't protect against.
+release pipeline. The README — "Pairing a phone (or a second machine) by QR
+code" and the `bind_http` note — describes what AgentControl does and
+doesn't protect against.
 
 ## Release signing
 

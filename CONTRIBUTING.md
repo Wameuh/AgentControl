@@ -13,7 +13,9 @@ cd client && npm install && npx tauri build    # desktop app
 ## Before opening a PR
 
 - Run `cargo test --workspace` — the `rust` CI job gates merges on it.
-- If you touched `client/`, run `cd client && npm run build` (tsc + vite).
+- If you touched `client/`, run `cd client && npm run build` (tsc + vite);
+  for `client/src-tauri/` also `cd client && npm run check`
+  (tsc + `cargo check`).
 - Target the `next_release` branch — PRs are squash-merged there and
   `main` is only fed by releases.
 - Version bumps are driven by parenthesized keywords in commit subjects

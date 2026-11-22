@@ -23,8 +23,8 @@ body:
     id: agent
     attributes:
       label: Agent used
-      description: Which agent the session runs, if relevant
-      placeholder: "e.g. devin, claude, codex, cursor"
+      description: Which agent the session runs, and its version if you know it
+      placeholder: "e.g. devin 3000.14, claude 2.x"
     validations:
       required: false
   - type: textarea
