@@ -108,11 +108,18 @@ jobs:
   # -----------------------------------------------------------------
   # Audit des dépendances : advisories Rust (Cargo.lock) + npm
   # (client/package-lock.json, prod uniquement, sévérité high+).
+  # Les advisories non exploités/acceptés sont ignorés avec motif dans
+  # .cargo/audit.toml ; le lockfile client/src-tauri n'est pas couvert.
   # -----------------------------------------------------------------
   audit:
     if: github.event.pull_request.draft != true
     timeout-minutes: 15
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # rustsec/audit-check publie le rapport en check annotation —
+      # sans ce scope l'action loggue « Unable to publish audit check ».
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2

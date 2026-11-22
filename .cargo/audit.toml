@@ -1,0 +1,30 @@
+# cargo audit — advisories ignorés, chacun motivé ci-dessous.
+# Un NOUVEL advisory sur ces mêmes crates fait échouer le job CI ;
+# les ignores sont à retirer quand les upgrades correspondants landent
+# (russh 0.65 + rsa stable, zip 9.x — items de suivi dédiés).
+[advisories]
+ignore = [
+    # zip 2.6.1 — toutes les vulns portent sur l'EXTRACTION
+    # (ZipArchive::extract / ZipStreamReader : symlinks échappant la
+    # destination, permissions SUID/SGID, entrées AES tronquées,
+    # noms local-header divergents). Le démon n'écrit que des zips
+    # (files.rs — ZipWriter pour le téléchargement multi-fichiers) et
+    # n'en extrait jamais → surface non atteinte.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0429",
+    "RUSTSEC-2026-0545",
+    "RUSTSEC-2026-0548",
+    # russh 0.64.1 — la vuln cible keys::agent::server (un SERVEUR
+    # d'agent SSH qui signerait avec des clés confirm-constrained sans
+    # appeler Agent::confirm). client-core n'utilise russh qu'en
+    # transport SSH client (SshNative) — aucun agent server exposé.
+    "RUSTSEC-2026-0495",
+    # rsa 0.10.0-rc.18 — Marvin attack : oracle timing sur le
+    # déchiffrement PKCS#1v1.5 (opération clé privée). Le client ne fait
+    # que des vérifications de signature/hostkey (opérations publiques)
+    # avec des clés ed25519 — pas de déchiffrement RSA. rsa arrive via
+    # russh/ssh-key : l'upgrade russh 0.65 résorbe la rc.
+    "RUSTSEC-2023-0071",
+]

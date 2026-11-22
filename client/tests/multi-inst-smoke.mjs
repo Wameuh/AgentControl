@@ -13,18 +13,23 @@ const EXE = process.env.CHROME_BIN ?? "/usr/bin/chromium";
 // Port éphémère (`--port 0`) lu sur la sortie vite — un port fixe est
 // squatté par les previews des autres worktrees et le test pilotait
 // alors leur build (faux négatifs déjà observés).
-const server = spawn("npx", ["vite", "preview", "--port", "0", "--strictPort"], { stdio: ["ignore", "pipe", "ignore"], detached: true });
+const server = spawn("npx", ["vite", "preview", "--port", "0", "--strictPort"], { stdio: ["ignore", "pipe", "pipe"], detached: true });
 const BASE = await new Promise((res, rej) => {
-  let buf = "";
-  const to = setTimeout(() => rej(new Error("vite preview: URL introuvable")), 15000);
-  server.stdout.on("data", (d) => {
+  let buf = "", errbuf = "";
+  // Budget large : le cold start npx+vite d'un runner CI peut dépasser
+  // 15 s ; stderr capturé pour diagnostiquer un crash silencieux.
+  const to = setTimeout(() => rej(new Error(`vite preview: URL introuvable — stderr: ${errbuf.trim() || "(vide)"}`)), 60000);
+  const scan = (d) => {
     buf += d;
     const m = buf.match(/https?:\/\/localhost:(\d+)/);
     if (m) {
       clearTimeout(to);
       res(`http://localhost:${m[1]}`);
     }
-  });
+  };
+  server.stdout.on("data", scan);
+  server.stderr.on("data", (d) => { errbuf += d; scan(d); });
+  server.on("exit", (code) => rej(new Error(`vite preview: exit ${code} — stderr: ${errbuf.trim() || "(vide)"}`)));
 });
 // Attendre que le preview serve (npx cold peut dépasser 2 s) — un
 // goto prématuré donnait ERR_CONNECTION_REFUSED avant le cleanup.
