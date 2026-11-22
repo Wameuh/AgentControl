@@ -420,8 +420,13 @@ pub enum Transport {
         /// Chemin d'une clé privée OpenSSH ; None = clé générée de l'app.
         key_path: Option<PathBuf>,
         /// Empreintes `SHA256:…` de host key épinglées (profil appairé —
-        /// persiste le `hk` du QR). `None` = accept-all historique.
+        /// persiste le `hk` du QR). `None` = clé inconnue refusée
+        /// (TOFU `hostkey-unknown` — sauf `accept_unknown_hostkey`).
         expected_hk: Option<std::collections::HashSet<String>>,
+        /// Repli non interactif : accepte une host key inconnue quand
+        /// `expected_hk` est absent — réservé aux tests/outils, jamais
+        /// posé par l'UI (TOFU avec confirmation + épinglage).
+        accept_unknown_hostkey: bool,
     },
 }
 
@@ -728,9 +733,11 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
             password,
             key_path,
             expected_hk,
+            accept_unknown_hostkey,
         } => {
             let opts = ssh_native::Opts {
                 expected_hk: expected_hk.clone().map(Arc::new),
+                accept_unknown_hostkey: *accept_unknown_hostkey,
                 ..Default::default()
             };
             let (h, ch) = ssh_native::open_direct_tcpip(
@@ -1036,8 +1043,9 @@ fn connect_fail(kind: &str, detail: &str) -> String {
 /// port démon fermé côté sshd). `msg` = `format!("{e:#}")` de l'erreur.
 pub fn classify_connect_stage1(t: &Transport, msg: &str) -> String {
     // Contrat existant : le frontend intercepte `hostkey-mismatch:<fp>`
-    // pour la re-confirmation TOFU — le laisser passer tel quel.
-    if msg.contains("hostkey-mismatch:") {
+    // (re-confirmation) et `hostkey-unknown:<fp>` (première connexion —
+    // épinglage TOFU) — les laisser passer tels quels.
+    if msg.contains("hostkey-mismatch:") || msg.contains("hostkey-unknown:") {
         return msg.to_string();
     }
     // `auth-required` : le démon a lu la ligne d'ouverture et refusé —
@@ -2093,6 +2101,7 @@ mod tests {
             password: None,
             key_path: None,
             expected_hk: None,
+            accept_unknown_hostkey: false,
         };
         let unix = Transport::Unix("/tmp/s.sock".into());
         let tcp = Transport::Tcp {
@@ -2133,10 +2142,14 @@ mod tests {
         // distinct de « démon absent » et de l'échec transport (B1).
         assert!(classify_connect_stage1(&tcp, "auth-required")
             .starts_with("connect-failed:auth:"));
-        // hostkey-mismatch : contrat TOFU — passe tel quel.
+        // hostkey-mismatch / hostkey-unknown : contrat TOFU — tels quels.
         assert_eq!(
             classify_connect_stage1(&native, "hostkey-mismatch:SHA256:abc"),
             "hostkey-mismatch:SHA256:abc"
+        );
+        assert_eq!(
+            classify_connect_stage1(&native, "hostkey-unknown:SHA256:def"),
+            "hostkey-unknown:SHA256:def"
         );
     }
 
@@ -2155,6 +2168,7 @@ mod tests {
             password: None,
             key_path: None,
             expected_hk: None,
+            accept_unknown_hostkey: false,
         };
         let unix = Transport::Unix("/tmp/s.sock".into());
 

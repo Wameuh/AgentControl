@@ -321,25 +321,37 @@ export class ConnView {
       // Toujours établir la connexion — daemon_status fusionné renvoie Ok
       // même sans connexions, il ne peut pas servir de pré-vérification.
       status = await invoke("connect", { cfg });
-    } catch (e) {
-      // Host key divergée d'un profil appairé : rotation possible, mais
-      // JAMAIS acceptée silencieusement — re-confirmation explicite,
-      // puis le nouveau fp remplace le pinning persisté (la save qui
-      // suit propage la nouvelle empreinte).
-      const m = /hostkey-mismatch:(\S+)/.exec(String(e));
-      if (m && cfg.kind === "ssh") {
+    } catch (e0) {
+      let e = e0;
+      // Host key divergée d'un profil épinglé, ou inconnue à la première
+      // connexion native : rotation possible, mais JAMAIS acceptée
+      // silencieusement — confirmation explicite, puis le fp devient le
+      // pinning persisté (TOFU). L'erreur du retry repasse par la
+      // classification normale (daemon-absent → bootstrap…).
+      const mm = /hostkey-mismatch:(\S+)/.exec(String(e));
+      const mu = /hostkey-unknown:(\S+)/.exec(String(e));
+      if ((mm || mu) && cfg.kind === "ssh") {
+        const fp = (mm ?? mu)![1];
+        const where = `${cfg.user ? cfg.user + "@" : ""}${cfg.host}:${cfg.port ?? 22}`;
         const ok = await confirmPair(
-          t("hk_h"),
-          t("hk_msg", { where: `${cfg.user ? cfg.user + "@" : ""}${cfg.host}:${cfg.port ?? 22}`, fp: m[1] }),
-          t("hk_go"),
+          mm ? t("hk_h") : t("hk_new_h"),
+          mm ? t("hk_msg", { where, fp }) : t("hk_new_msg", { where, fp }),
+          mm ? t("hk_go") : t("hk_new_go"),
         );
         if (!ok) throw e;
-        cfg.host_keys = [m[1]];
+        cfg.host_keys = [fp];
+        // Épinglage persisté tout de suite : tous les chemins —
+        // liste des connexions, auto-connect, formulaire — voient la
+        // confirmation survivre (go() le ré-écrira après succès).
+        await invoke("save_connection", { cfg }).catch(() => {});
         this.cStatus(t("connecting_to", { host }));
-        status = await invoke("connect", { cfg }).catch((e3) => {
-          throw this.connectErrorMsg(e3, cfg);
-        });
-      } else {
+        try {
+          status = await invoke("connect", { cfg });
+        } catch (e2) {
+          e = e2;
+        }
+      }
+      if (status === undefined) {
       // Erreur typée `connect-failed:<kind>:<detail>` : SEUL
       // `daemon-absent` (transport OK, port démon refusé) justifie le
       // bootstrap — auth refusée, DNS, timeout, démon gelé ou kind

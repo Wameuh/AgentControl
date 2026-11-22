@@ -14,6 +14,8 @@
 //      encore ouvert n'est jamais stripé par le close de l'autre.
 //   J. Clic sur une session de la sidebar pendant que la vue est
 //      ouverte → la vue se ferme (comme le panneau settings).
+//   K. TOFU natif : auto-connect → hostkey-unknown → dialogue avec
+//      l'empreinte → confirmation → retry épinglé + profil persisté.
 // Usage : node tests/conn-view-smoke.mjs   (après npm run build)
 import puppeteer from "puppeteer-core";
 import { spawn } from "node:child_process";
@@ -47,7 +49,16 @@ const PATCH = `(() => {
       window.__saved = window.__saved.filter((c) => keyOf(c) !== keyOf(args?.cfg));
       return Promise.resolve(null);
     }
-    if (cmd === "connect") { window.__calls.connect.push(args?.cfg); }
+    if (cmd === "connect") {
+      window.__calls.connect.push(args?.cfg);
+      // Rejet injecté par le test (consommé une fois) — scénario TOFU :
+      // hostkey-unknown doit ouvrir le dialogue de confirmation avant retry.
+      if (window.__connectReject) {
+        const e = window.__connectReject;
+        window.__connectReject = null;
+        return Promise.reject(e);
+      }
+    }
     return inv(cmd, args);
   };
 })();`;
@@ -206,6 +217,33 @@ await sleep(500);
 ok(!(await viewOpen(pJ)), "J2 clic session → conn-view fermée (comme settings)");
 ok(!(await pJ.evaluate(() => document.getElementById("composer").inert)),
   "J3 #input réutilisable après ouverture de la session");
+
+// ---------- K : TOFU — hostkey-unknown → confirmation → pin + retry ----------
+// Conn ssh-native sauvegardée sans host_keys : l'auto-connect reçoit
+// « hostkey-unknown:<fp> » → le dialogue doit montrer l'empreinte, la
+// confirmation l'épingle (cfg + profil persisté) puis réessaie.
+const SAVED_K = [{ kind: "ssh", host: "tofu.example", user: "u", port: 22,
+  remote_port: 7331, native: true }];
+const pK = await initPage(SAVED_K, "#desktop",
+  `localStorage.removeItem("ac-autoconnect");
+   window.__connectReject = "hostkey-unknown:SHA256:abc";`);
+await sleep(600);
+ok(await pK.evaluate(() => {
+  const d = document.getElementById("dlg-pair");
+  return d.open &&
+    document.getElementById("pair-msg").textContent.includes("SHA256:abc") &&
+    document.getElementById("pair-msg").textContent.includes("ssh-keygen -lf");
+}), "K1 hostkey-unknown → dialogue TOFU affiché avec l'empreinte");
+await pK.evaluate(() => document.getElementById("pair-go").click());
+await sleep(1000);
+const callsK = await pK.evaluate(() => window.__calls);
+ok(callsK.connect.length === 2, "K2 connect réessayé après confirmation");
+ok(JSON.stringify(callsK.connect[1]?.host_keys) === '["SHA256:abc"]',
+  "K3 retry avec host_keys épinglé");
+ok(callsK.save.some((c) => JSON.stringify(c?.host_keys) === '["SHA256:abc"]'),
+  "K4 empreinte persistée via save_connection");
+ok(await pK.evaluate(() => !document.getElementById("dlg-pair").open),
+  "K5 dialogue refermé après confirmation");
 
 console.log(`\n${fails === 0 ? "SMOKE OK" : "SMOKE FAIL"} — ${fails} échec(s)`);
 await b.close();

@@ -263,6 +263,24 @@ async function daemonViaScript(
       notify("error", res || t("update_failed"));
     }
   } catch (e) {
+    // Host key encore inconnue du profil (première connexion native) :
+    // même TOFU que le flux de connexion — confirmation explicite,
+    // épinglage persisté, puis le script est rejoué avec le pin.
+    const u = /hostkey-unknown:(\S+)/.exec(String(e));
+    if (u && o.cfg) {
+      const where = `${o.cfg.user ? o.cfg.user + "@" : ""}${o.cfg.host}:${o.cfg.port ?? 22}`;
+      const ok = await confirmPair(
+        t("hk_new_h"),
+        t("hk_new_msg", { where, fp: u[1] }),
+        t("hk_new_go"),
+      );
+      if (ok) {
+        o.cfg.host_keys = [u[1]];
+        await invoke("save_connection", { cfg: o.cfg }).catch(() => {});
+        await daemonViaScript(o, host);
+        return;
+      }
+    }
     notify("error", String(e));
   }
 }

@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::commands::pair::effective_hk;
 use crate::state::{
     conn_key, get_conn, split_user_host, AppState, ConnCtx, ConnectCfg,
 };
@@ -33,7 +34,7 @@ enum SshDiag {
 
 /// Extrait ce qu'il faut pour le diag post-mortem — `None` pour les
 /// transports non-ssh (pas de serveur ssh à interroger).
-fn ssh_diag(cfg: &ConnectCfg) -> Result<Option<SshDiag>, String> {
+async fn ssh_diag(cfg: &ConnectCfg) -> Result<Option<SshDiag>, String> {
     let ConnectCfg::Ssh {
         host,
         args,
@@ -50,16 +51,15 @@ fn ssh_diag(cfg: &ConnectCfg) -> Result<Option<SshDiag>, String> {
     };
     if native.unwrap_or(false) || cfg!(target_os = "android") {
         let (user, h) = split_user_host(host, user.as_deref())?;
+        let port = port.unwrap_or(22);
         Ok(Some(SshDiag::Native {
             host: h,
-            port: port.unwrap_or(22),
+            port,
             user,
             password: password.clone(),
             key: key.as_deref().map(PathBuf::from),
-            expected_hk: host_keys
-                .clone()
-                .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
-                .filter(|s| !s.is_empty())
+            expected_hk: effective_hk(host_keys.clone(), &h, port)
+                .await
                 .map(Arc::new),
         }))
     } else {
@@ -74,7 +74,7 @@ fn ssh_diag(cfg: &ConnectCfg) -> Result<Option<SshDiag>, String> {
 #[tauri::command]
 pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: ConnectCfg) -> Result<Value, String> {
     let key = conn_key(&cfg);
-    let diag = ssh_diag(&cfg)?;
+    let diag = ssh_diag(&cfg).await?;
     let t = match cfg {
         ConnectCfg::Local {} => {
             let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
@@ -95,16 +95,19 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
             let native = native.unwrap_or(false) || cfg!(target_os = "android");
             if native {
                 let (user, host) = split_user_host(&host, user.as_deref())?;
+                let port = port.unwrap_or(22);
+                // Épinglage effectif : profil, sinon known_hosts —
+                // clé encore inconnue → `hostkey-unknown` (TOFU UI).
+                let expected_hk = effective_hk(host_keys, &host, port).await;
                 Transport::SshNative {
                     host,
-                    port: port.unwrap_or(22),
+                    port,
                     user,
                     remote_port: remote_port.unwrap_or(7331),
                     password,
                     key_path: key.map(PathBuf::from),
-                    expected_hk: host_keys
-                        .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
-                        .filter(|s| !s.is_empty()),
+                    expected_hk,
+                    accept_unknown_hostkey: false,
                 }
             } else {
                 Transport::Ssh {
@@ -557,20 +560,20 @@ pub(crate) async fn ensure_daemon(
     // instance doit rester corrélable dans client.log au flap transport.
     if native.unwrap_or(false) || cfg!(target_os = "android") {
         let (user, h) = split_user_host(&host, user.as_deref())?;
+        let port = port.unwrap_or(22);
         let err_acc = std::sync::Mutex::new(String::new());
         let app2 = app.clone();
         let host_step = host.clone();
-        // Profil appairé → la host key est épinglée pour l'exec aussi.
+        // Profil appairé → la host key est épinglée pour l'exec aussi ;
+        // known_hosts sert d'épinglage initial (TOFU — `hostkey-unknown`
+        // sinon, traité par l'UI comme une première connexion).
         let opts = client_core::ssh_native::Opts {
-            expected_hk: host_keys
-                .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
-                .filter(|s| !s.is_empty())
-                .map(Arc::new),
+            expected_hk: effective_hk(host_keys, &h, port).await.map(Arc::new),
             ..Default::default()
         };
         let (code, out, _err) = client_core::ssh_native::ssh_exec(
             &h,
-            port.unwrap_or(22),
+            port,
             &user,
             password.as_deref(),
             key.map(PathBuf::from).as_deref(),
