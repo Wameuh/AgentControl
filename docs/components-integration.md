@@ -589,9 +589,9 @@ mode    = "agent"   # empty = global `mode`
    ignores; old daemon → clean `parse:` with extracted id). The client
    gates on `daemon_status.components`. `(sync)` keyword on the
    proto+daemon PR (client↔daemon incompat = auto-update).
-3. **Security**: the daemon binds loopback only **by default** — unix
-   socket 0600 and `bind_http` enforced loopback; `bind_tcp` stays
-   freely configurable in `config.toml` (no guard) — component RPC
+3. **Security**: the daemon binds loopback only — unix socket 0600 and
+   both `bind_http`/`bind_tcp` enforced loopback at startup (a daemon
+   refusing to start on a non-loopback address) — component RPC
    trust amounts to "whoever talks to the socket drives the agents"
    (`NewSession` can already spawn processes; `ComponentInstall` only
    runs **embedded declarative recipes**, never arbitrary shell sent by
