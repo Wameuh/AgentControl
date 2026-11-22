@@ -37,12 +37,26 @@ const MOCK = `(function () {
       { name: "deep.md", dir: false, size: 80 },
     ] },
   };
+  // Une réponse d'agent avec image distante (markdown + URL nue) — la
+  // section N6 vérifie qu'aucune requête ne part sans clic.
+  const EVENTS = [
+    { seq: 1, type: "agent_text",
+      text: "Image : ![x](https://example.com/a.png)\\n" +
+            "Lien nu : https://example.com/b.png" },
+  ];
   function rpc(method, args) {
     switch (method) {
       case "list_sessions": return SESSIONS;
       case "list_agents": return [{ id: "devin", name: "Devin" }];
-      case "session_info": return { meta: SESSIONS[0], pending: [], alive: true, last_seq: 0 };
-      case "events": return { events: [], last_seq: 0 };
+      case "session_info": return { meta: SESSIONS[0], pending: [], alive: true, last_seq: EVENTS.length };
+      case "events": {
+        const evs = args.session === "s1"
+          ? EVENTS.filter((e) =>
+              (args.after_seq == null || e.seq > args.after_seq) &&
+              (args.before_seq == null || e.seq < args.before_seq))
+          : [];
+        return { events: evs, last_seq: EVENTS.length };
+      }
       case "list_dir": return DIRS[args.path] ?? { dir: "/home/agent/api/" + args.path, entries: [] };
       case "read_file": {
         if (args.path === "bad.md") throw new Error("permission denied");
@@ -87,6 +101,7 @@ const MOCK = `(function () {
         case "connect": return p.then(() => ({ version: "9.9.9", sessions: 1, servers: 1 }));
         case "call": return p.then(() => rpc(args.method, args.params ?? args));
         case "subscribe": return p.then(() => null);
+        case "other_instances": return p.then(() => []);
         case "saved_connections": return p.then(() => []);
         case "ssh_hosts": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAA x");
@@ -103,6 +118,24 @@ const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
 p.on("console", (m) => { if (m.type() === "error") console.log("[page]", m.text()); });
 await p.evaluateOnNewDocument(MOCK);
+
+// N6 : les requêtes vers l'extérieur sont interceptées — chaque hit
+// example.com est enregistré puis servi en PNG 1×1 (l'<img> aboutit :
+// sans ça le listener « image cassée » la remplacerait par son alt).
+const PNG1 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+const extReqs = [];
+const extSniff = (r) => {
+  const u = r.url();
+  if (u.startsWith("https://example.com/")) {
+    extReqs.push(u);
+    r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
+  } else r.continue().catch(() => {});
+};
+await p.setRequestInterception(true);
+p.on("request", extSniff);
 
 let pass = 0, fail = 0;
 const check = (name, ok, extra = "") => {
@@ -124,6 +157,22 @@ await click("#btn-connect"); await sleep(300);
 await p.type("#c-host", "me@pi5.local"); await click("#c-go"); await sleep(900);
 await p.evaluate(() => [...document.querySelectorAll(".sess")].find((s) => s.textContent.includes("Refactor"))?.click());
 await sleep(900);
+
+// --- N6 « au clic » (défaut) : aucune requête réseau avant le geste ---
+const phCount = () => p.evaluate(() => document.querySelectorAll("#events .md-img-ph").length);
+const imgCount = () => p.evaluate(() => document.querySelectorAll("#events img.md-img").length);
+check("N6 défaut : 2 placeholders .md-img-ph", (await phCount()) === 2, `n=${await phCount()}`);
+check("N6 défaut : aucun <img> distant", (await imgCount()) === 0);
+check("N6 défaut : 0 requête example.com au rendu", extReqs.length === 0, extReqs.join(","));
+await p.evaluate(() => document.querySelectorAll("#events .md-img-ph")[0]?.click());
+await sleep(800);
+check("N6 clic → <img> insérée", (await imgCount()) === 1, `img=${await imgCount()}`);
+check("N6 clic → requête a.png émise", extReqs.some((u) => u.includes("a.png")), extReqs.join(","));
+check("N6 : le 2e placeholder survit", (await phCount()) === 1);
+await p.evaluate(() => document.querySelector("#events .md-img-ph")?.click());
+await sleep(800);
+check("N6 clic 2 → requête b.png émise", extReqs.some((u) => u.includes("b.png")), extReqs.join(","));
+
 await click("#btn-files"); await sleep(800);
 
 // Ouvre README.md dans le viewer
@@ -263,6 +312,86 @@ check("erreur : file-md masqué", !(await vis("#file-md")));
 check("erreur : fv-md masqué", !(await vis("#fv-md")));
 const errTxt = await p.evaluate(() => document.querySelector("#file-view").textContent);
 check("erreur : message visible", errTxt.includes("permission denied"), errTxt.slice(0, 80));
+
+// ------------------------------------------------------------------
+// N6 — autres modes via localStorage (page dédiée ; chaque reload
+// reproduit le cycle connect → ouverture session → re-render complet).
+const p2 = await b.newPage();
+await p2.setViewport({ width: 1280, height: 860 });
+const extReqs2 = [];
+await p2.setRequestInterception(true);
+p2.on("request", (r) => {
+  const u = r.url();
+  if (u.startsWith("https://example.com/")) {
+    extReqs2.push(u);
+    r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
+  } else r.continue().catch(() => {});
+});
+await p2.evaluateOnNewDocument(MOCK);
+const reopen2 = async (mode, hosts) => {
+  await p2.goto("http://localhost:4185/", { waitUntil: "networkidle0" });
+  // Pref posée après le load (localStorage accessible) mais avant
+  // l'ouverture de session — imgMode() n'est lu qu'au rendu du message.
+  await p2.evaluate((m, h) => {
+    if (m == null) localStorage.removeItem("ac-inline-images");
+    else localStorage.setItem("ac-inline-images", m);
+    if (h == null) localStorage.removeItem("ac-img-hosts");
+    else localStorage.setItem("ac-img-hosts", h);
+  }, mode, hosts);
+  await p2.waitForSelector("#btn-connect", { timeout: 15000 });
+  await p2.evaluate(() => document.querySelector("#btn-connect").click());
+  await sleep(300);
+  await p2.evaluate(() => {
+    const h = document.querySelector("#c-host");
+    h.value = "me@pi5.local";
+    h.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector("#c-go").click();
+  });
+  await sleep(900);
+  await p2.evaluate(() => [...document.querySelectorAll(".sess")].find((s) => s.textContent.includes("Refactor"))?.click());
+  await sleep(900);
+};
+const ph2 = () => p2.evaluate(() => document.querySelectorAll("#events .md-img-ph").length);
+const im2 = () => p2.evaluate(() => document.querySelectorAll("#events img.md-img").length);
+
+// « always » : <img> au rendu (comportement historique conservé).
+extReqs2.length = 0;
+await reopen2("always", null);
+check("N6 always : 2 <img> au rendu, 0 placeholder",
+  (await im2()) === 2 && (await ph2()) === 0, `img=${await im2()} ph=${await ph2()}`);
+check("N6 always : requêtes émises sans clic",
+  extReqs2.some((u) => u.includes("a.png")) && extReqs2.some((u) => u.includes("b.png")),
+  extReqs2.join(","));
+
+// « never » via la valeur legacy « 0 » : ni placeholder ni <img>, liens seuls.
+extReqs2.length = 0;
+await reopen2("0", null);
+check("N6 never(\"0\") : 0 placeholder / 0 <img>",
+  (await ph2()) === 0 && (await im2()) === 0);
+check("N6 never : les liens simples restent",
+  (await p2.evaluate(() => document.querySelectorAll('#events a[href^="https://example.com"]').length)) === 2);
+await sleep(300);
+check("N6 never : aucune requête", extReqs2.length === 0, extReqs2.join(","));
+
+// « never » explicite : même rendu.
+extReqs2.length = 0;
+await reopen2("never", null);
+check("N6 never : 0 placeholder / 0 <img>", (await ph2()) === 0 && (await im2()) === 0);
+await sleep(300);
+check("N6 never : aucune requête", extReqs2.length === 0, extReqs2.join(","));
+
+// Whitelist : mode click + hôte de confiance → chargement direct.
+extReqs2.length = 0;
+await reopen2("click", "example.com");
+check("N6 whitelist : <img> direct (hôte confiance)",
+  (await im2()) === 2 && (await ph2()) === 0);
+check("N6 whitelist : requêtes sans clic", extReqs2.some((u) => u.includes("a.png")), extReqs2.join(","));
+
+// Compat legacy « 1 » → always.
+extReqs2.length = 0;
+await reopen2("1", null);
+check("N6 legacy \"1\" → always : <img> direct", (await im2()) === 2 && (await ph2()) === 0);
+await p2.close();
 
 console.log(`\n${pass} PASS, ${fail} FAIL`);
 await b.close(); server.kill();

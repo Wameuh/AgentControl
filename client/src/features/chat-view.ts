@@ -7,7 +7,7 @@
 
 import { invoke } from "../core/bridge";
 import { $, copyText, esc, showErr } from "../core/dom";
-import { fmtTok } from "../core/format";
+import { expandImgPh, fmtTok } from "../core/format";
 import { bgErr, call, callBg, connOp } from "../core/rpc";
 import { app } from "../core/state";
 import type { AcEvent, SessionMeta } from "../core/types";
@@ -1932,6 +1932,11 @@ export class ChatView {
       },
       true,
     );
+    // Placeholder image distante (réglage « au clic », N6) : l'<img> n'est
+    // insérée qu'au geste — jamais de requête au simple affichage.
+    this.eventsEl.addEventListener("click", (e) => {
+      if (expandImgPh(e.target as HTMLElement)) e.preventDefault();
+    });
     // Boot : écran d'accueil avant la première réponse de list_sessions.
     this.updateEmptyState();
   }

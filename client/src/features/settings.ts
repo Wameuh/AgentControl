@@ -9,7 +9,7 @@ import { $, notify } from "../core/dom";
 import { bindLogView } from "../core/logview";
 import { applyTheme, themePref, applyAccent, stageAccent, accentPref, applyAccentStrong, accentStrongPref, applyBgAnim, bgAnimPrefOn, isAndroid, type Accent } from "../core/chrome";
 import { defaultEncoding } from "../core/encoding";
-import { inlineImages } from "../core/format";
+import { imgMode, imgTrustedHosts } from "../core/format";
 import { cmpVer, connKeyOf, connLabel } from "../core/conn";
 import { call } from "../core/rpc";
 import { setLang, getLang, t, LANGS, type Lang } from "../i18n";
@@ -184,7 +184,9 @@ export class SettingsPanel {
     ($("s-autoconn") as HTMLInputElement).checked =
       localStorage.getItem("ac-autoconnect") !== "0";
     if (!isWeb) void this.refreshPairConns();
-    ($("s-images") as HTMLInputElement).checked = inlineImages();
+    ($("s-images") as HTMLSelectElement).value = imgMode();
+    ($("s-img-hosts") as HTMLInputElement).value =
+      imgTrustedHosts().join(", ");
     ($("s-rcchan") as HTMLInputElement).checked = rcChannel();
     ($("s-encoding") as HTMLSelectElement).value = defaultEncoding();
     ($("s-mdrender") as HTMLInputElement).checked =
@@ -554,13 +556,30 @@ export class SettingsPanel {
     ($("s-pacc-ref") as HTMLButtonElement).onclick = () =>
       void this.refreshPairAccess();
     this.stage("s-images", {
-      apply: () =>
+      apply: () => {
         localStorage.setItem(
           "ac-inline-images",
-          ($("s-images") as HTMLInputElement).checked ? "1" : "0",
-        ),
+          ($("s-images") as HTMLSelectElement).value,
+        );
+        this.syncSecStates();
+      },
       reset: () => {
-        ($("s-images") as HTMLInputElement).checked = inlineImages();
+        ($("s-images") as HTMLSelectElement).value = imgMode();
+      },
+    });
+    // Whitelist normalisée au save : csv → minuscules, sans doublons —
+    // le stockage est la forme déjà propre, la saisie reste libre.
+    this.stage("s-img-hosts", {
+      apply: () => {
+        const hosts = ($("s-img-hosts") as HTMLInputElement).value
+          .split(",")
+          .map((h) => h.trim().toLowerCase())
+          .filter(Boolean);
+        localStorage.setItem("ac-img-hosts", [...new Set(hosts)].join(", "));
+      },
+      reset: () => {
+        ($("s-img-hosts") as HTMLInputElement).value =
+          imgTrustedHosts().join(", ");
       },
     });
     this.stage("s-rcchan", {
@@ -757,7 +776,7 @@ export class SettingsPanel {
       "";
     $("s-st-appearance").textContent =
       `${opt("s-theme")} · ${opt("s-accent")} · ${opt("s-accent-int")}`;
-    $("s-st-chat").textContent = opt("s-sendmode");
+    $("s-st-chat").textContent = `${opt("s-sendmode")} · ${opt("s-images")}`;
     const sndOn = ($("s-snd") as HTMLInputElement).checked;
     const notifOn = !isWeb && ($("s-notif") as HTMLInputElement).checked;
     $("s-st-notif").textContent = [
