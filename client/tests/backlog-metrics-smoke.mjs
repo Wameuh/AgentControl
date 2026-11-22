@@ -4,40 +4,15 @@
 // placeholder discret + cartes conservées. Usage :
 //   node tests/backlog-metrics-smoke.mjs   (après npm run build)
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const EXE = process.env.CHROME_BIN ?? "/usr/bin/chromium";
-// detached:true → kill(-pid) tue tout le groupe ; port éphère lu sur la
-// sortie vite (un port fixe squatté piloterait le build d'un autre
-// worktree — faux négatifs déjà observés).
-// Spawn direct de vite.js (pas de shim npx : un npx résolu de travers
-// restait muet >60 s sur runner CI — ni stdout ni stderr ni exit).
-const server = spawn("node", ["node_modules/vite/bin/vite.js", "preview", "--port", "0", "--strictPort"], { stdio: ["ignore", "pipe", "pipe"], detached: true });
-const BASE = await new Promise((res, rej) => {
-  let buf = "", errbuf = "";
-  // Budget large : le cold start vite d'un runner CI peut dépasser
-  // 15 s ; stderr capturé pour diagnostiquer un crash silencieux.
-  const to = setTimeout(() => rej(new Error(`vite preview: URL introuvable — stderr: ${errbuf.trim() || "(vide)"}`)), 60000);
-  const scan = (d) => {
-    buf += d;
-    const m = buf.match(/https?:\/\/localhost:(\d+)/);
-    if (m) {
-      clearTimeout(to);
-      res(`http://localhost:${m[1]}`);
-    }
-  };
-  server.stdout.on("data", scan);
-  server.stderr.on("data", (d) => { errbuf += d; scan(d); });
-  server.on("exit", (code) => rej(new Error(`vite preview: exit ${code} — stderr: ${errbuf.trim() || "(vide)"}`)));
-});
-for (let i = 0; i < 40; i++) {
-  try {
-    const r = await fetch(BASE + "/");
-    if (r.ok) break;
-  } catch {}
-  await new Promise((r) => setTimeout(r, 250));
-}
+// vite preview : port libre + poll HTTP jusqu'à réponse — la sortie
+// vite n'est pas un contrat fiable (muette >60 s sur runner GHA) et
+// un port fixe squatté piloterait le build d'un autre worktree
+// (faux négatifs déjà observés).
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: EXE, headless: true, args: ["--no-sandbox"] });
 const mock = readFileSync("tests/tauri-mock.js", "utf8");
 
