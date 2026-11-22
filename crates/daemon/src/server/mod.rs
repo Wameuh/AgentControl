@@ -114,6 +114,10 @@ const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// write_file accepte 16 Mio de données encodées : 32 Mio laisse de la
 /// marge. Au-delà la connexion est refermée (cf. next_bounded_line).
 const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
+/// Délai max pour recevoir la ligne `auth` d'une connexion TCP : une
+/// conn ouverte sans s'authentifier ne doit pas rester (scan, socket
+/// oubliée par un port-forward) — refermée passé cette fenêtre.
+const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Étiquette cheap d'une ligne géante déjà sérialisée : push →
 /// `push=<genre>` + type_tag de l'event quand présent ; réponse →
@@ -335,6 +339,12 @@ pub struct Daemon {
     /// provider au spawn et au boot (skills.rs) ; combiné au flag par
     /// profil `AgentProfile::provision_skills`.
     pub provision_skills: bool,
+    /// Jeton d'authentification du port TCP (`daemon.token`, 0600) —
+    /// chaque conn `accept_tcp` souscrit un `Receiver` : la première
+    /// ligne de la conn doit être `ReqKind::Auth` avec la valeur vue à
+    /// ce moment, et un `send_replace` (token_rotate) révoque toutes
+    /// les conns TCP ouvertes. Unix/WS n'y souscrivent pas.
+    pub tcp_token: watch::Sender<std::sync::Arc<str>>,
 }
 
 impl Daemon {
@@ -354,6 +364,7 @@ impl Daemon {
         watchdog: WatchdogCfg,
         provision_skills: bool,
         catalog: HashMap<String, CatalogPatch>,
+        tcp_token: std::sync::Arc<str>,
     ) -> Result<(Arc<Self>, Vec<String>)> {
         let web = Arc::new(RwLock::new(None));
         let orch = Arc::new(OrchProbe::open(orch));
@@ -447,6 +458,7 @@ impl Daemon {
             model_costs: CostCache::default(),
             catalogues: CatalogueCache::default(),
             provision_skills,
+            tcp_token: watch::channel(tcp_token).0,
         });
         d.pr_verify.spawn_worker();
         let mut resumable = Vec::new();
@@ -924,6 +936,7 @@ impl Daemon {
             } => self.h_daemon_log_tail(file, offset, limit).await,
             ReqKind::DaemonStatus => self.h_daemon_status().await,
             ReqKind::UpdateDaemon { version } => self.h_update_daemon(version).await,
+            ReqKind::TokenRotate => self.h_token_rotate().await,
             ReqKind::ListAgents => self.h_list_agents().await,
             ReqKind::ModelCosts { agent } => self.h_model_costs(agent).await,
             ReqKind::RefreshAgentCaps { agent } => self.h_refresh_agent_caps(agent).await,
@@ -1157,7 +1170,8 @@ impl Daemon {
             }
             // Interceptés par la couche connexion (ordre des inputs +
             // cycle de vie borné à la connexion) — jamais atteint ici.
-            ReqKind::TermOpen { .. }
+            ReqKind::Auth { .. }
+            | ReqKind::TermOpen { .. }
             | ReqKind::TermInput { .. }
             | ReqKind::TermResize { .. }
             | ReqKind::TermClose { .. }
@@ -1198,7 +1212,17 @@ impl Daemon {
     /// déconnecte — et dès la première ligne invalide : le protocole n'a
     /// pas de ligne non-JSON légitime et la tolérer laissait une requête
     /// HTTP quelconque exécuter son corps comme RPC.
-    pub async fn serve_conn<S>(self: &Arc<Self>, stream: S, peer: &str) -> Result<()>
+    /// `auth` = garde TCP (`Some` = accept_tcp seulement) : la première
+    /// ligne non vide doit être `ReqKind::Auth` avec le jeton
+    /// d'installation, sous [`AUTH_TIMEOUT`] — aucune RPC n'est servie
+    /// sans ça. Unix et le pont WS passent `None` : leur confiance est
+    /// portée ailleurs (mode 0600 du socket / `web.token` + Origin).
+    pub async fn serve_conn<S>(
+        self: &Arc<Self>,
+        stream: S,
+        peer: &str,
+        mut auth: Option<ConnAuth>,
+    ) -> Result<()>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -1265,6 +1289,75 @@ impl Daemon {
             })
         });
 
+        // Porte d'authentification TCP : la 1re ligne non vide doit être
+        // {req:"auth", token} avec le jeton de l'installation — aucun
+        // dispatch ne peut être atteint sans (un non-authentifié ne
+        // reçoit que « auth-required » ou un silence). Le jeton attendu
+        // est figé à l'entrée (borrow_and_update) : `changed()` dans le
+        // select ci-dessous ne révoque que sur une rotation POSTÉRIEURE.
+        if let Some(gate) = auth.as_mut() {
+            // Ligne bornée en taille comme les autres, ET en temps —
+            // une conn TCP ouverte sans auth ne reste pas.
+            let first = tokio::time::timeout(AUTH_TIMEOUT, async {
+                loop {
+                    match next_bounded_line(&mut reader, &mut line_buf).await {
+                        Ok(Some(l)) if l.iter().all(|b| b.is_ascii_whitespace()) => continue,
+                        other => break other,
+                    }
+                }
+            })
+            .await;
+            match first {
+                Err(_) => {
+                    info!("conn {peer}: auth timeout — closing");
+                    return Ok(());
+                }
+                Ok(Err(e)) => return Err(e).context("reading conn"),
+                Ok(Ok(None)) => return Ok(()),
+                Ok(Ok(Some(line))) => {
+                    // Cross-protocol : une requête HTTP est refermée
+                    // sans réponse — même règle que dans la boucle.
+                    if is_http_request_line(&line) {
+                        warn!("conn {peer}: http request line — closing cross-protocol conn");
+                        return Ok(());
+                    }
+                    let raw: Value = match serde_json::from_slice(&line) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            Self::send_resp(&outbox, &Response::err(0, proto::ERR_AUTH_REQUIRED))?;
+                            Self::drain_outbox(&outbox).await;
+                            return Ok(());
+                        }
+                    };
+                    let id = raw.get("id").and_then(Value::as_u64).unwrap_or(0);
+                    // Échec uniforme : même réponse pour mauvais jeton,
+                    // mauvaise requête ou schéma invalide — aucun oracle
+                    // ne distingue un jeton « presque bon ».
+                    let good = serde_json::from_value::<Request>(raw)
+                        .ok()
+                        .is_some_and(|r| match r.req {
+                            ReqKind::Auth { token } => {
+                                ct_eq(token.as_bytes(), gate.token.borrow_and_update().as_bytes())
+                            }
+                            _ => false,
+                        });
+                    if !good {
+                        Self::send_resp(&outbox, &Response::err(id, proto::ERR_AUTH_REQUIRED))?;
+                        Self::drain_outbox(&outbox).await;
+                        info!("conn {peer}: auth required — closing");
+                        return Ok(());
+                    }
+                    Self::send_resp(&outbox, &Response::ok(id, json!({"auth": "ok"})))?;
+                }
+            }
+        }
+
+        // Révocation post-auth : token_rotate change la valeur du
+        // channel → toute conn TCP ouverte est refermée (le client se
+        // ré-authentifiera au reconnect). None (unix/WS) = pending()
+        // permanent — branche morte sans coût.
+        let mut rotate_rx = auth.map(|a| a.token);
+
         // État de subscription : (session_id, broadcast rx, last_sent,
         // journal_gen) — la gen trahit un reset quand les seqs coïncident.
         let mut sub: Option<(String, broadcast::Receiver<proto::Event>, u64, u64)> = None;
@@ -1322,22 +1415,8 @@ impl Daemon {
                             let resp = Response::err(0, format!("parse: {e}"));
                             Self::send_resp(&outbox, &resp)?;
                             // La réponse doit sortir avant la fermeture :
-                            // la tâche d'écriture est avortée au retour —
-                            // bref délai borné pour vider la file.
-                            let _ = tokio::time::timeout(
-                                std::time::Duration::from_millis(500),
-                                async {
-                                    while outbox
-                                        .queued
-                                        .load(std::sync::atomic::Ordering::Relaxed)
-                                        > 0
-                                    {
-                                        tokio::time::sleep(std::time::Duration::from_millis(5))
-                                            .await;
-                                    }
-                                },
-                            )
-                            .await;
+                            // la tâche d'écriture est avortée au retour.
+                            Self::drain_outbox(&outbox).await;
                             return Ok(());
                         }
                     };
@@ -1475,6 +1554,24 @@ impl Daemon {
                 // erreur pour que le log de fermeture donne la raison.
                 _ = wdead.changed() => {
                     return Err(anyhow::anyhow!("writer dead (flush timeout / queue full)"));
+                }
+                // token_rotate : les conns TCP ouvertes sont révoquées
+                // — ré-auth exigée au reconnect (unix/WS : pas de rx).
+                // Le match est dans le bloc async : select! évalue les
+                // expressions AVANT les gardes — un unwrap() direct
+                // paniquerait sur les conns sans rx (unix/WS).
+                _ = async {
+                    match rotate_rx.as_mut() {
+                        Some(rx) => rx.changed().await,
+                        None => std::future::pending().await,
+                    }
+                }, if rotate_rx.is_some() => {
+                    info!("conn {peer}: daemon token rotated — closing conn");
+                    // Un token_rotate émis sur CETTE conn a sa réponse
+                    // encore dans l'outbox (dispatch spawné) — drain
+                    // borné pour la laisser sortir avant le close.
+                    Self::drain_outbox(&outbox).await;
+                    return Ok(());
                 }
                 ev = async {
                     match sub.as_mut() {
@@ -1639,6 +1736,18 @@ impl Daemon {
     /// un appel ne piétine pas derrière un backlog de term_data/replay).
     fn send_resp(w: &Outbox, v: &impl serde::Serialize) -> Result<()> {
         w.line_resp(v)
+    }
+
+    /// Laisse à la tâche d'écriture un bref délai borné pour vider sa
+    /// file avant la fermeture — sans ça la réponse d'erreur posée juste
+    /// avant le `return` est avortée avec la tâche.
+    async fn drain_outbox(outbox: &Outbox) {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            while outbox.queued.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
     }
 
     fn send_push(w: &Outbox, session: &str, ev: &proto::Event) -> Result<()> {
@@ -1931,6 +2040,7 @@ mod tests {
             super::WatchdogCfg::default(),
             false,
             HashMap::new(),
+            std::sync::Arc::from("test-token"),
         )
         .await
         .unwrap();
@@ -2006,7 +2116,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let serve = {
             let d = Arc::clone(&d);
-            tokio::spawn(async move { d.serve_conn(server, "tcp 127.0.0.1:9").await })
+            tokio::spawn(async move { d.serve_conn(server, "tcp 127.0.0.1:9", None).await })
         };
         let (mut rd, mut wr) = tokio::io::split(client);
         wr.write_all(b"POST / HTTP/1.1\r\nHost: x\r\n\r\n{\"id\":1,\"req\":\"daemon_status\"}\n")
@@ -2041,7 +2151,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let serve = {
             let d = Arc::clone(&d);
-            tokio::spawn(async move { d.serve_conn(server, "unix#1").await })
+            tokio::spawn(async move { d.serve_conn(server, "unix#1", None).await })
         };
         let (rd, mut wr) = tokio::io::split(client);
         let mut rd = BufReader::new(rd);
@@ -2089,7 +2199,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let serve = {
             let d = Arc::clone(&d);
-            tokio::spawn(async move { d.serve_conn(server, "tcp 127.0.0.1:10").await })
+            tokio::spawn(async move { d.serve_conn(server, "tcp 127.0.0.1:10", None).await })
         };
         let (rd, mut wr) = tokio::io::split(client);
         let mut rd = BufReader::new(rd);
@@ -2205,6 +2315,29 @@ fn log_conn_close(peer: &str, t0: std::time::Instant, r: &Result<()>) {
     }
 }
 
+/// Garde d'authentification posée sur les conns TCP — `accept_tcp`
+/// seulement (unix et le pont WS ont leur confiance propre et passent
+/// `None` à serve_conn). Porte le canal du jeton : `borrow_and_update`
+/// fige la valeur attendue à la porte ; `changed` signale ensuite une
+/// rotation (token_rotate) → la conn est révoquée.
+pub struct ConnAuth {
+    pub token: watch::Receiver<std::sync::Arc<str>>,
+}
+
+/// Égalité en temps constant — la comparaison du jeton ne doit pas
+/// fuiter un préfixe via le timing de sortie. (La longueur n'est pas
+/// protégée : daemon.token est un format fixe 64 hex.)
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
+}
+
 /// Wrapper pour accepter des connexions Unix.
 pub async fn accept_unix(daemon: Arc<Daemon>, listener: tokio::net::UnixListener) {
     // Compteur d'accept — pas de peer addr sur unix : l'id corréle les
@@ -2220,7 +2353,9 @@ pub async fn accept_unix(daemon: Arc<Daemon>, listener: tokio::net::UnixListener
                 tokio::spawn(async move {
                     let t0 = std::time::Instant::now();
                     let s: UnixStream = stream;
-                    let r = d.serve_conn(s, &id).await;
+                    // Socket 0600 = confiance par le FS — pas de gate
+                    // auth (le canal token_rotate n'est pas souscrit).
+                    let r = d.serve_conn(s, &id, None).await;
                     log_conn_close(&id, t0, &r);
                 });
             }
@@ -2233,17 +2368,23 @@ pub async fn accept_unix(daemon: Arc<Daemon>, listener: tokio::net::UnixListener
 }
 
 /// Wrapper pour accepter des connexions TCP (loopback, tunnelé via SSH).
+/// Loopback ≠ isolation par utilisateur : chaque conn est placée sous
+/// garde `ConnAuth` — 1re ligne `ReqKind::Auth` obligatoire, sous 10 s.
 pub async fn accept_tcp(daemon: Arc<Daemon>, listener: tokio::net::TcpListener) {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 let _ = stream.set_nodelay(true);
                 let d = Arc::clone(&daemon);
+                // Abonnement posé à l'accept : la valeur attendue est
+                // figée à la porte (borrow_and_update) et toute rotation
+                // postérieure révoque la conn (select! de serve_conn).
+                let token = d.tcp_token.subscribe();
                 info!("conn tcp open {addr}");
                 tokio::spawn(async move {
                     let t0 = std::time::Instant::now();
                     let peer = format!("tcp {addr}");
-                    let r = d.serve_conn(stream, &peer).await;
+                    let r = d.serve_conn(stream, &peer, Some(ConnAuth { token })).await;
                     log_conn_close(&peer, t0, &r);
                 });
             }

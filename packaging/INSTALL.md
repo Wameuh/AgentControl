@@ -22,6 +22,16 @@ The daemon listens on:
 - `127.0.0.1:7331` (loopback → reachable only via SSH tunnel)
 - `~/.agentcontrol/daemon.sock` (local)
 
+The TCP port requires an authentication token as the first line of
+every connection: `~/.agentcontrol/daemon.token` is generated at first
+start (mode `0600`). Loopback alone is not per-user isolation — another
+local account, or anything reaching your forwarded port, would
+otherwise get full RPC access. SSH connections read the token over the
+already-authenticated SSH channel; nothing to configure there.
+Direct-TCP profiles carry the token in the connection form.
+Rotate it any time with `acctl token rotate` (open TCP connections are
+dropped; clients re-read the file or field on reconnect).
+
 Local test: `~/.local/bin/acctl status` → `{"agents":["devin","cursor"],...}`
 
 ### Without systemd (testing)
@@ -57,7 +67,11 @@ The client opens `ssh -N -L <local>:127.0.0.1:7331 <host>` automatically.
 
 ```bash
 ssh -N -L 7331:127.0.0.1:7331 user@server &
-AGENTCONTROL_TCP=127.0.0.1:7331 acctl status   # → {"sessions":0,...}
+AGENTCONTROL_TCP=127.0.0.1:7331 \
+  AGENTCONTROL_TOKEN=$(ssh user@server cat .agentcontrol/daemon.token) \
+  acctl status   # → {"sessions":0,...}
+# Run on the server itself, acctl reads daemon.token (or the unix
+# socket) directly — AGENTCONTROL_TOKEN is only needed off-host.
 ```
 
 ## 3. Usage

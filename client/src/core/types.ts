@@ -203,6 +203,11 @@ export type SavedConn = {
   host?: string;
   addr?: string;
   path?: string;
+  /** Jeton `daemon.token` du transport TCP direct (auth 1re ligne,
+   *  B1) — saisi à la main (pas de canal SSH pour le lire) ; absent =
+   *  démon pré-B1 sans exigence. Les transports SSH ne le stockent
+   *  JAMAIS : il est relu sur le canal ssh à chaque connexion. */
+  token?: string;
   remote_port?: number;
   args?: string[];
   port?: number;

@@ -81,7 +81,7 @@ pub(crate) async fn get_conn(state: &State<'_, AppState>, key: Option<&str>) -> 
 pub(crate) fn conn_key(cfg: &ConnectCfg) -> String {
     match cfg {
         ConnectCfg::Local {} => "local".into(),
-        ConnectCfg::Tcp { addr } => format!("tcp:{addr}"),
+        ConnectCfg::Tcp { addr, .. } => format!("tcp:{addr}"),
         ConnectCfg::Ssh {
             host, port, native, ..
         } => format!(
@@ -100,7 +100,14 @@ pub(crate) fn conn_key(cfg: &ConnectCfg) -> String {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ConnectCfg {
     Local {},
-    Tcp { addr: String },
+    Tcp {
+        addr: String,
+        /// Jeton `daemon.token` pour l'auth TCP (1re ligne) — pas de
+        /// canal SSH en connexion directe : saisi par l'utilisateur
+        /// (persisté dans connections.json — chiffré par la SecretBox
+        /// sur Android). Optionnel : démons pré-B1 sans.
+        token: Option<String>,
+    },
     Ssh {
         /// `user@host` ou host nu (user demandé côté natif).
         host: String,

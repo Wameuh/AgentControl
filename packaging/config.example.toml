@@ -3,6 +3,11 @@
 # Listener TCP loopback (tunnelé par le client via ssh -L). Le démon refuse
 # de démarrer sur une adresse non-loopback — une exposition réseau donnerait
 # à tout le monde sur le réseau le contrôle des agents.
+# Chaque connexion TCP doit s'authentifier en première ligne avec le jeton
+# <root>/daemon.token (généré au premier démarrage, mode 0600) — le
+# loopback seul ne vaut pas isolation par utilisateur (autre compte local,
+# port forwardé). Rotation : `acctl token rotate` (révoque les conns TCP
+# ouvertes). Le socket unix et l'accès web ont leur confiance propre.
 bind_tcp = "127.0.0.1:7331"
 
 # Interface web : le démon sert la même SPA que le client Tauri — sessions,

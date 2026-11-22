@@ -6,6 +6,12 @@ pub use components::*;
 
 use serde::{Deserialize, Serialize};
 
+/// Erreur renvoyée par le démon quand une connexion TCP présente un
+/// jeton absent/invalide — ou une 1re ligne qui n'est pas `auth`.
+/// Chaîne fixe partagée client↔démon (le client la reconnaît pour
+/// relire le jeton et retenter, cf. client-core::auth_handshake).
+pub const ERR_AUTH_REQUIRED: &str = "auth-required";
+
 // ---------------------------------------------------------------------------
 // Journal events
 // ---------------------------------------------------------------------------
@@ -747,6 +753,18 @@ pub struct Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "req", rename_all = "snake_case")]
 pub enum ReqKind {
+    /// Authentifie une connexion TCP (loopback ≠ par-utilisateur : un
+    /// autre utilisateur local ou un tunnel `ssh -L` atteint le port
+    /// bind_tcp). Exigée en PREMIÈRE ligne non vide de toute connexion
+    /// TCP, sous 10 s ; le serveur la traite dans la couche connexion
+    /// (jamais dispatchée aux handlers) et compare le jeton en temps
+    /// constant — `daemon.token` à la racine du démon, mode 0600.
+    /// Les conns Unix et le pont WebSocket (auth `web.token` + Origin)
+    /// n'envoient jamais cette requête. Compat : un vieux démon répond
+    /// « unknown variant auth » → le client repasse en mode pré-auth.
+    Auth {
+        token: String,
+    },
     /// Crée une session et démarre l'agent.
     NewSession {
         agent: String,
@@ -1473,6 +1491,16 @@ pub enum ReqKind {
     UpdateDaemon {
         version: String,
     },
+    /// Régénère `daemon.token` (32 octets aléatoires, écriture atomique
+    /// mode 0600) et révoque les connexions TCP ouvertes — elles
+    /// devront se ré-authentifier avec le nouveau jeton. Réservé aux
+    /// connexions déjà authentifiées (socket Unix — pas d'auth — ou
+    /// TCP authentifiée) : un appelant non authentifié ne peut jamais
+    /// atteindre ce handler, la conn TCP est refermée avant le dispatch.
+    /// Réponse `{rotated:true}` — le jeton lui-même n'est JAMAIS
+    /// renvoyé par RPC (il se lit dans le fichier, 0600, côté admin).
+    /// Extension additive : démons anciens → erreur « req inconnue ».
+    TokenRotate,
     /// Moissonne les capacités d'un profil agent par un spawn jetable
     /// (initialize + session/new dans un cwd scratch, drain bref des
     /// notifications, kill) puis met à jour le cache `agent_caps.json`
@@ -1533,6 +1561,7 @@ impl ReqKind {
     /// (qui peut contenir des prompts/texte volumineux ou sensibles).
     pub fn kind_name(&self) -> &'static str {
         match self {
+            Self::Auth { .. } => "auth",
             Self::NewSession { .. } => "new_session",
             Self::ResumeSession { .. } => "resume_session",
             Self::ListNativeSessions { .. } => "list_native_sessions",
@@ -1612,6 +1641,7 @@ impl ReqKind {
             Self::DaemonLogTail { .. } => "daemon_log_tail",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
+            Self::TokenRotate => "token_rotate",
             Self::RefreshAgentCaps { .. } => "refresh_agent_caps",
             Self::InstallAgentAdapter { .. } => "install_agent_adapter",
             Self::ReviewReport { .. } => "review_report",

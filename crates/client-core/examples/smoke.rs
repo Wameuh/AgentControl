@@ -8,7 +8,10 @@ use std::path::PathBuf;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let t = if let Ok(addr) = std::env::var("AGENTCONTROL_TCP") {
-        Transport::Tcp(addr)
+        Transport::Tcp {
+            addr,
+            token: std::env::var("AGENTCONTROL_TOKEN").ok(),
+        }
     } else {
         let p = std::env::var("AGENTCONTROL_SOCK").unwrap_or_else(|_| {
             format!(

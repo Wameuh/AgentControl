@@ -29,11 +29,12 @@ const SELF_STEPS = ["send", "restart"];
 
 /** Préfixe d'erreur typée émis par la commande Tauri `connect` :
  *  `connect-failed:<kind>:<detail>` — kinds `transport` |
- *  `daemon-absent` | `daemon-unresponsive` (commands/connect.rs).
+ *  `daemon-absent` | `daemon-unresponsive` | `auth`
+ *  (commands/connect.rs — `auth` = rejet du jeton démon, B1).
  *  Seul `daemon-absent` justifie la proposition d'install : tout autre
  *  échec (auth, DNS, timeout, démon gelé) doit montrer sa cause réelle. */
 const CONNECT_FAIL_RE =
-  /^connect-failed:(transport|daemon-absent|daemon-unresponsive):([\s\S]*)$/;
+  /^connect-failed:(transport|daemon-absent|daemon-unresponsive|auth):([\s\S]*)$/;
 
 /** Signature reconnaissable dans le détail d'un échec → clé i18n du
  *  message (cause + hint d'action) ; repli = libellé générique, le détail
@@ -127,7 +128,9 @@ export class ConnView {
           })
         : kind === "daemon-absent"
           ? t("connfail_absent", { host })
-          : t(transportHint(detail));
+          : kind === "auth"
+            ? t("connfail_daemon_auth")
+            : t(transportHint(detail));
     return detail ? `${msg} — ${detail}` : msg;
   }
 
@@ -484,6 +487,7 @@ export class ConnView {
     ($("c-host") as HTMLInputElement).value = c.host ?? c.addr ?? c.path ?? "";
     ($("c-port") as HTMLInputElement).value = String(c.remote_port ?? 7331);
     ($("c-args") as HTMLInputElement).value = (c.args ?? []).join(" ");
+    ($("c-token") as HTMLInputElement).value = c.token ?? "";
     ($("c-sport") as HTMLInputElement).value = String(c.port ?? 22);
     ($("c-user") as HTMLInputElement).value = c.user ?? "";
     ($("c-pass") as HTMLInputElement).value = c.password ?? "";
@@ -500,7 +504,7 @@ export class ConnView {
     ($("cv-form-reset") as HTMLButtonElement).hidden = true;
     // Défaut ssh : le cas nominal (démon sur serveur distant).
     ($("c-kind") as HTMLSelectElement).value = "ssh";
-    for (const id of ["c-host", "c-args", "c-user", "c-pass"]) {
+    for (const id of ["c-host", "c-args", "c-user", "c-pass", "c-token"]) {
       ($(id) as HTMLInputElement).value = "";
     }
     ($("c-port") as HTMLInputElement).value = "7331";
@@ -543,6 +547,9 @@ export class ConnView {
     ($("c-native-wrap") as HTMLElement).style.display = ssh && !isAndroid() ? "" : "none";
     ($("c-host") as HTMLInputElement).style.display = kind === "local" ? "none" : "";
     ($("c-port") as HTMLInputElement).style.display = ssh ? "" : "none";
+    // Jeton daemon.token : TCP direct seulement (SSH le relit sur le
+    // canal authentifié — rien à saisir ni à persister pour lui).
+    ($("c-token-wrap") as HTMLElement).style.display = kind === "tcp" ? "" : "none";
     if (ssh && nat) void this.showPubkey();
   }
 
@@ -807,7 +814,11 @@ export class ConnView {
             native: ($("c-native") as HTMLInputElement).checked || isAndroid() || undefined,
           }
         : kind === "tcp"
-          ? { kind: "tcp", addr: ($("c-host") as HTMLInputElement).value }
+          ? {
+              kind: "tcp",
+              addr: ($("c-host") as HTMLInputElement).value,
+              token: ($("c-token") as HTMLInputElement).value || undefined,
+            }
           : { kind: "local" };
     // Couleur propre à la connexion ("" = accent global des réglages).
     cfg.color = ($("c-accent") as HTMLSelectElement).value || undefined;

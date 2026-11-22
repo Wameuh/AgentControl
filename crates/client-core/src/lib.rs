@@ -395,8 +395,12 @@ pub fn log_read(offset: Option<u64>, limit: Option<u64>) -> serde_json::Value {
 pub enum Transport {
     /// Socket Unix local (démon sur la même machine — dev)
     Unix(PathBuf),
-    /// TCP direct (démon loopback distant via tunnel déjà ouvert, ou local)
-    Tcp(String),
+    /// TCP direct (démon loopback distant via tunnel déjà ouvert, ou
+    /// local). `token` = jeton `daemon.token` attendu en 1re ligne par
+    /// les démons ≥ B1 — pas de canal SSH pour le lire en TCP direct :
+    /// il vient du profil de connexion (champ du formulaire), optionnel
+    /// pour rester compatible avec les démons pré-auth.
+    Tcp { addr: String, token: Option<String> },
     /// Tunnel SSH : spawn `ssh -N -L <local>:127.0.0.1:<remote_port> <host>`
     Ssh {
         host: String,
@@ -578,7 +582,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 bail!("unix socket not supported on this platform — use ssh or tcp")
             }
         }
-        Transport::Tcp(addr) => {
+        Transport::Tcp { addr, .. } => {
             let s = TcpStream::connect(addr)
                 .await
                 .with_context(|| format!("tcp {addr}"))?;
@@ -750,6 +754,250 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
 }
 
 // ---------------------------------------------------------------------------
+// Auth du port TCP (B1) — daemon.token exigé en 1re ligne
+// ---------------------------------------------------------------------------
+
+/// Commande distante de lecture du jeton — le canal SSH authentifié est
+/// le seul chemin de confiance pour le recevoir (jamais en clair sur le
+/// port TCP). Respecte `AGENTCONTROL_HOME` côté serveur.
+const TOKEN_CAT_CMD: &str =
+    "cat \"${AGENTCONTROL_HOME:-$HOME/.agentcontrol}/daemon.token\" 2>/dev/null";
+
+/// Les args de connexion ssh (`-p`, `-i`, `-o`, `-J`…) servent aussi
+/// l'exec de lecture du jeton — ceux qui changent le mode sont retirés :
+/// `-N`/`-f`/`-T`/`-n`/`-t` (pas de commande / fond / tty) et les
+/// forwards `-L`/`-R`/`-D` avec leur argument. Tout autre token est
+/// conservé. (Partagé avec le diag post-mortem — même règle.)
+pub fn sanitize_ssh_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match a.as_str() {
+            "-L" | "-R" | "-D" => {
+                skip_next = true;
+                continue;
+            }
+            s if s.starts_with("-L") || s.starts_with("-R") || s.starts_with("-D") => continue,
+            s => {
+                let f = s.strip_prefix('-').unwrap_or("");
+                if !f.is_empty() && f.chars().all(|c| "NfTnt".contains(c)) {
+                    continue;
+                }
+                out.push(a.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Jetons lus via SSH, mémoire seulement — un jeton ne retombe jamais
+/// dans un fichier de profil. `None` = relu et absent (démon pré-B1)
+/// ou exec en échec : le cache négatif évite un exec ssh à chaque
+/// reconnect, et une erreur « auth-required » l'invalide (rotation ou
+/// démon fraîchement upgradé) → refresh forcé.
+static TOKEN_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Option<String>>>> =
+    std::sync::OnceLock::new();
+
+fn token_cache() -> &'static std::sync::Mutex<HashMap<String, Option<String>>> {
+    TOKEN_CACHE.get_or_init(Default::default)
+}
+
+/// Purge le jeton mémorisé du transport — appelé quand le démon refuse
+/// le jeton présenté (rotation entre-temps).
+fn invalidate_token(t: &Transport) {
+    if let Ok(mut m) = token_cache().lock() {
+        m.remove(&transport_desc(t));
+    }
+}
+
+/// `ssh host cat daemon.token` via le binaire — `args` sanitisés (les
+/// flags de tunnel/détachement du Transport::Ssh casseraient l'exec).
+async fn ssh_cat_token(host: &str, args: &[String]) -> Option<String> {
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+    ])
+    .args(sanitize_ssh_args(args))
+    .arg(host)
+    .arg(TOKEN_CAT_CMD)
+    .stderr(std::process::Stdio::null());
+    hide_console(&mut cmd);
+    let out = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!t.is_empty()).then_some(t)
+}
+
+/// Lecture du jeton sur le canal SSH authentifié — session native déjà
+/// ouverte (`guard`) ou exec `ssh` indépendant. None = pas de jeton à
+/// présenter (unix, démon pré-B1, ou exec sans résultat).
+async fn fetch_token(t: &Transport, guard: Option<&SshGuard>) -> Option<String> {
+    match (t, guard) {
+        (Transport::Ssh { host, args, .. }, _) => ssh_cat_token(host, args).await,
+        (
+            Transport::SshNative {
+                host,
+                port,
+                user,
+                password,
+                key_path,
+                expected_hk,
+                ..
+            },
+            g,
+        ) => {
+            if let Some(SshGuard::Native(g)) = g {
+                if let Ok((0, out, _)) = g.exec(TOKEN_CAT_CMD).await {
+                    let t = out.trim().to_string();
+                    return (!t.is_empty()).then_some(t);
+                }
+            }
+            // Pas de session réutilisable : connexion jetable (auth
+            // complète — même code que open_direct_tcpip).
+            let opts = ssh_native::Opts {
+                expected_hk: expected_hk.clone().map(Arc::new),
+                ..Default::default()
+            };
+            ssh_native::ssh_exec(
+                host,
+                *port,
+                user,
+                password.as_deref(),
+                key_path.as_deref(),
+                TOKEN_CAT_CMD,
+                None,
+                &opts,
+            )
+            .await
+            .ok()
+            .filter(|(code, _, _)| *code == 0)
+            .and_then(|(_, out, _)| {
+                let t = out.trim().to_string();
+                (!t.is_empty()).then_some(t)
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Jeton à présenter pour `t` : champ du profil en TCP direct, cache
+/// mémoire sinon fetch SSH. `refresh` saute le cache (appelé après un
+/// refus — le jeton a pu tourner).
+async fn transport_token(t: &Transport, guard: Option<&SshGuard>, refresh: bool) -> Option<String> {
+    if let Transport::Tcp { token, .. } = t {
+        return token.clone().filter(|s| !s.is_empty());
+    }
+    if matches!(t, Transport::Unix(_)) {
+        return None;
+    }
+    let key = transport_desc(t);
+    if !refresh {
+        if let Some(hit) = token_cache().lock().ok().and_then(|m| m.get(&key).cloned()) {
+            return hit;
+        }
+    }
+    let tok = fetch_token(t, guard).await;
+    if let Ok(mut m) = token_cache().lock() {
+        m.insert(key, tok.clone());
+    }
+    tok
+}
+
+/// Verdict du handshake d'ouverture TCP.
+enum AuthOutcome {
+    /// Réponse ok — authentifié.
+    Authed,
+    /// « unknown variant `auth` » : démon pré-B1 — la connexion reste
+    /// ouverte et utilisable en mode pré-auth (compat à conserver tant
+    /// que le parc n'est pas mis à jour).
+    PreAuth,
+    /// auth-required / conn refermée : jeton absent, faux ou périmé.
+    Refused,
+}
+
+/// Envoie `auth` en 1re ligne et lit la réponse — synchrone, avant le
+/// spawn des tasks reader/writer du Client (aucune trame ne part avant).
+/// `token` vide = sonde d'ouverture (le démon refuse s'il exige auth —
+/// la réponse `unknown variant` d'un vieux démon est le signal compat).
+async fn auth_handshake(
+    br: &mut BufReader<BoxedStream>,
+    w: &mut BoxedWriter,
+    token: &str,
+) -> Result<AuthOutcome> {
+    let mut line = serde_json::to_string(&Request {
+        id: 0,
+        req: ReqKind::Auth {
+            token: token.to_string(),
+        },
+    })?;
+    line.push('\n');
+    w.write_all(line.as_bytes()).await?;
+    w.flush().await?;
+    // Réponse bornée en temps — un pair gelé ne doit pas pendre le
+    // connect indéfiniment (le démon se donne 10 s pour LIRE la ligne).
+    let got = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        (&mut *br).lines().next_line(),
+    )
+    .await;
+    let line = match got {
+        Ok(Ok(Some(l))) => l,
+        // EOF (refus implicite) / timeout / erreur : tout est « refus ».
+        _ => return Ok(AuthOutcome::Refused),
+    };
+    let v: Value = serde_json::from_str(&line).unwrap_or_default();
+    if v["ok"].as_bool() == Some(true) {
+        return Ok(AuthOutcome::Authed);
+    }
+    match v["error"].as_str().unwrap_or("") {
+        e if e.contains("unknown variant `auth`") => Ok(AuthOutcome::PreAuth),
+        _ => Ok(AuthOutcome::Refused),
+    }
+}
+
+/// open_stream + retry TOCTOU du port local (ssh -L) — extrait de
+/// `connect` : le retry auth en ré-ouvre une conn neuve (la précédente
+/// est refermée par le démon après « auth-required »).
+async fn open_transport(
+    t: &Transport,
+) -> Result<(BoxedStream, BoxedWriter, Option<Arc<SshGuard>>)> {
+    let mut attempt = 0u8;
+    loop {
+        attempt += 1;
+        match open_stream(t).await {
+            Ok(x) => return Ok(x),
+            Err(e) => {
+                let m = format!("{e:#}");
+                let busy =
+                    m.contains("Address already in use") || m.contains("cannot listen to port");
+                if !busy || attempt >= 4 {
+                    return Err(e);
+                }
+                log(
+                    Level::Warn,
+                    format!("local port busy — tunnel retry {attempt}/3"),
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Classification des échecs de `connect` — `connect-failed:<kind>:<detail>`.
 //
 // Le frontend (conn-view) propose l'install du démon UNIQUEMENT sur
@@ -792,8 +1040,13 @@ pub fn classify_connect_stage1(t: &Transport, msg: &str) -> String {
     if msg.contains("hostkey-mismatch:") {
         return msg.to_string();
     }
+    // `auth-required` : le démon a lu la ligne d'ouverture et refusé —
+    // échec d'authentification, jamais « démon absent » ni transport.
+    if msg.contains(proto::ERR_AUTH_REQUIRED) {
+        return connect_fail("auth", msg);
+    }
     let kind = match t {
-        Transport::Unix(_) | Transport::Tcp(_)
+        Transport::Unix(_) | Transport::Tcp { .. }
             if msg.contains("Connection refused")
                 || msg.contains("No such file or directory")
                 || msg.contains("ENOENT") =>
@@ -830,6 +1083,11 @@ pub fn classify_connect_stage2(
         // service sur le port ou démon gelé (cf. #302). Installer un
         // démon par-dessus serait dangereux → classe dédiée, pas d'install.
         "daemon-unresponsive"
+    } else if rpc_err.contains(proto::ERR_AUTH_REQUIRED) {
+        // Le démon exige un jeton en 1re ligne TCP : un vieux client
+        // (ou un profil sans jeton) le reçoit ici — échec AUTH, jamais
+        // « démon absent » (installer par-dessus ne résoudrait rien).
+        "auth"
     } else {
         match t {
             // ssh -L : le listener local accepte même port distant fermé
@@ -1206,7 +1464,7 @@ fn now_ms() -> u64 {
 fn transport_desc(t: &Transport) -> String {
     match t {
         Transport::Unix(p) => format!("unix:{}", p.display()),
-        Transport::Tcp(a) => format!("tcp:{a}"),
+        Transport::Tcp { addr, .. } => format!("tcp:{addr}"),
         Transport::Ssh { host, .. } => format!("ssh:{host}"),
         Transport::SshNative {
             host, port, user, ..
@@ -1233,26 +1491,32 @@ impl Client {
     pub async fn connect(t: &Transport) -> Result<Arc<Self>> {
         // Retry sur TOCTOU de free_port() : le port est relâché avant le
         // bind ssh -L → un autre tunnel/process peut le prendre entre-temps.
-        let mut attempt = 0u8;
-        let (r, w, guard) = loop {
-            attempt += 1;
-            match open_stream(t).await {
-                Ok(x) => break x,
-                Err(e) => {
-                    let m = format!("{e:#}");
-                    let busy =
-                        m.contains("Address already in use") || m.contains("cannot listen to port");
-                    if !busy || attempt >= 4 {
-                        return Err(e);
+        let (r, w, guard) = open_transport(t).await?;
+        let mut br = BufReader::new(r);
+        let mut w = w;
+        let mut guard = guard;
+        // ── Handshake auth (B1) : la 1re ligne d'une connexion TCP est
+        // le jeton. Le démon récent répond ok / auth-required ; un démon
+        // pré-B1 répond « unknown variant `auth` » → mode pré-auth.
+        // Sur refus : purge du cache + relecture (rotation) puis UNE
+        // seconde tentative — sur connexion neuve : le démon a déjà
+        // refermé la précédente. Unix : pas d'auth, rien à envoyer.
+        if !matches!(t, Transport::Unix(_)) {
+            for attempt in 0..2 {
+                let token = transport_token(t, guard.as_deref(), attempt > 0).await;
+                match auth_handshake(&mut br, &mut w, token.as_deref().unwrap_or("")).await? {
+                    AuthOutcome::Authed | AuthOutcome::PreAuth => break,
+                    AuthOutcome::Refused if attempt == 0 => {
+                        invalidate_token(t);
+                        let (r2, w2, g2) = open_transport(t).await?;
+                        br = BufReader::new(r2);
+                        w = w2;
+                        guard = g2;
                     }
-                    log(
-                        Level::Warn,
-                        format!("local port busy — tunnel retry {attempt}/3"),
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    AuthOutcome::Refused => bail!("{}", proto::ERR_AUTH_REQUIRED),
                 }
             }
-        };
+        }
         let (dead_tx, dead) = watch::channel(false);
         let client = Arc::new(Self {
             pending: Mutex::new(Inflight::default()),
@@ -1391,12 +1655,14 @@ impl Client {
         {
             let c = Arc::clone(&client);
             let jh = tokio::spawn(async move {
+                // br vient du handshake auth — il peut déjà bufferiser
+                // des octets arrivés pendant la réponse (push…).
                 // fill_buf/consume plutôt que lines() : une ligne
                 // NDJSON de 150 ko arrive en centaines de chunks —
                 // lines() ne la voit qu'à sa fin et les octets en cours
                 // resteraient invisibles (rx_partial vaudrait 0 pile
                 // pendant la vidange qu'on veut mesurer).
-                let mut br = BufReader::new(r);
+                let mut br = br;
                 // Octets reçus depuis le dernier '\n' — la ligne en
                 // cours de vidange.
                 let mut pending: Vec<u8> = Vec::new();
@@ -1829,7 +2095,10 @@ mod tests {
             expected_hk: None,
         };
         let unix = Transport::Unix("/tmp/s.sock".into());
-        let tcp = Transport::Tcp("127.0.0.1:1".into());
+        let tcp = Transport::Tcp {
+            addr: "127.0.0.1:1".into(),
+            token: None,
+        };
 
         // ssh CLI : TOUT échec étage 1 = transport (auth, DNS, timeout…).
         for m in [
@@ -1860,6 +2129,10 @@ mod tests {
             .starts_with("connect-failed:daemon-absent:"));
         assert!(classify_connect_stage1(&tcp, "tcp 127.0.0.1:1: Connection refused (os error 111)")
             .starts_with("connect-failed:daemon-absent:"));
+        // auth-required : le démon a répondu — échec d'authentification,
+        // distinct de « démon absent » et de l'échec transport (B1).
+        assert!(classify_connect_stage1(&tcp, "auth-required")
+            .starts_with("connect-failed:auth:"));
         // hostkey-mismatch : contrat TOFU — passe tel quel.
         assert_eq!(
             classify_connect_stage1(&native, "hostkey-mismatch:SHA256:abc"),
