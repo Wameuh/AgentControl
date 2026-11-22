@@ -95,7 +95,8 @@ Same sessions, same agents — native mobile UI on Android:
     next to AgentControl (right-click → *Open* no longer bypasses
     Gatekeeper for unnotarized apps). If the app is reported as
     *"damaged"*, remove the quarantine flag instead:
-    `xattr -dr com.apple.quarantine /Applications/AgentControl.app`.
+    `xattr -dr com.apple.quarantine /Applications/AgentControl.app`
+    (adjust the path if the app lives elsewhere).
   - **Windows 11**: on the *"Windows protected your PC"* SmartScreen
     prompt, click **More info → Run anyway**.
 
