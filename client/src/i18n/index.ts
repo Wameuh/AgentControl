@@ -6,10 +6,10 @@
 // {mod} est un placeholder implicite, substitué par t() dans toutes les
 // chaînes (ex. "{mod}+Enter = force"). Détection UA synchrone, cohérente
 // avec isAndroid/isWindows de core/chrome.
-import { en, type Key } from "./en";
-import { fr } from "./fr";
-import { es } from "./es";
-import { de } from "./de";
+import { en, type Key } from "./en.ts";
+import { fr } from "./fr.ts";
+import { es } from "./es.ts";
+import { de } from "./de.ts";
 
 const MOD = /Mac OS X|Macintosh/i.test(navigator.userAgent) ? "Cmd" : "Ctrl";
 

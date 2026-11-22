@@ -143,13 +143,13 @@ async fn exec_via_cfg(cfg: &Value, script: &str) -> Result<(i32, String, String)
             &opts,
         )
         .await
-        .map_err(|e| format!("{e:#}"));
+        .map_err(|e| format!("pair-failed:transport:{e:#}"));
     }
     let host = cfg
         .get("host")
         .and_then(Value::as_str)
         .filter(|h| !h.is_empty())
-        .ok_or("hôte manquant")?;
+        .ok_or("pair-failed:no-host:missing host")?;
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
         .args(cfg_args(cfg))
@@ -162,8 +162,8 @@ async fn exec_via_cfg(cfg: &Value, script: &str) -> Result<(i32, String, String)
     client_core::hide_console(&mut cmd);
     let out = tokio::time::timeout(std::time::Duration::from_secs(60), cmd.output())
         .await
-        .map_err(|_| "ssh exec timeout".to_string())?
-        .map_err(|e| format!("ssh: {e}"))?;
+        .map_err(|_| "pair-failed:transport:ssh exec timeout".to_string())?
+        .map_err(|e| format!("pair-failed:transport:ssh: {e}"))?;
     Ok((
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).to_string(),
@@ -183,7 +183,7 @@ async fn exec_via_cfg(cfg: &Value, script: &str) -> Result<(i32, String, String)
 #[tauri::command]
 pub(crate) async fn pair_resolve(cfg: Value) -> Result<Value, String> {
     if cfg.get("kind").and_then(Value::as_str) != Some("ssh") {
-        return Err("seules les connexions SSH sont appairables".into());
+        return Err("pair-failed:ssh-only:only SSH connections can be paired".into());
     }
     let native = cfg.get("native").and_then(Value::as_bool).unwrap_or(false)
         || cfg!(target_os = "android");
@@ -203,7 +203,7 @@ pub(crate) async fn pair_resolve(cfg: Value) -> Result<Value, String> {
         .get("host")
         .and_then(Value::as_str)
         .filter(|h| !h.is_empty())
-        .ok_or("hôte manquant")?
+        .ok_or("pair-failed:no-host:missing host")?
         .to_string();
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.arg("-G").args(cfg_args(&cfg)).arg(&host)
@@ -214,11 +214,11 @@ pub(crate) async fn pair_resolve(cfg: Value) -> Result<Value, String> {
     client_core::hide_console(&mut cmd);
     let out = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
         .await
-        .map_err(|_| "ssh -G timeout".to_string())?
-        .map_err(|e| format!("ssh -G: {e}"))?;
+        .map_err(|_| "pair-failed:transport:ssh -G timeout".to_string())?
+        .map_err(|e| format!("pair-failed:transport:ssh -G: {e}"))?;
     if !out.status.success() {
         return Err(format!(
-            "ssh -G a échoué : {}",
+            "pair-failed:resolve:ssh -G failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
@@ -231,7 +231,8 @@ pub(crate) async fn pair_resolve(cfg: Value) -> Result<Value, String> {
             .filter(|s| !s.is_empty())
             .map(String::from)
     };
-    let rhost = val("hostname ").ok_or("ssh -G : hostname introuvable")?;
+    let rhost = val("hostname ")
+        .ok_or("pair-failed:resolve:ssh -G: hostname not found")?;
     let port = val("port ").and_then(|p| p.parse::<u64>().ok()).unwrap_or(22);
     let user = val("user ").unwrap_or_default();
     Ok(json!({ "host": rhost, "port": port, "user": user }))
@@ -505,7 +506,7 @@ fn check_nonce(n: &str) -> Result<(), String> {
     if n.len() == 32 && n.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
         Ok(())
     } else {
-        Err("nonce serveur invalide".into())
+        Err("pair-failed:nonce:invalid server nonce".into())
     }
 }
 
@@ -585,22 +586,23 @@ pub(crate) async fn pair_begin(
     user: String,
 ) -> Result<Value, String> {
     if cfg.get("kind").and_then(Value::as_str) != Some("ssh") {
-        return Err("seules les connexions SSH sont appairables".into());
+        return Err("pair-failed:ssh-only:only SSH connections can be paired".into());
     }
     if host.is_empty() || host.len() > 253 || host.bytes().any(|b| b.is_ascii_whitespace() || b == b'@' || b == b'/') {
-        return Err("endpoint invalide".into());
+        return Err("pair-failed:endpoint:invalid endpoint".into());
     }
     if user.len() > 64 || user.bytes().any(|b| b.is_ascii_whitespace() || b == b'@') {
-        return Err("user invalide".into());
+        return Err("pair-failed:user:invalid user".into());
     }
     let rport = cfg.get("remote_port").and_then(Value::as_u64).unwrap_or(7331) as u16;
 
     let (k_pem, k_pub) =
-        client_core::ssh_native::gen_keypair_mem().map_err(|e| format!("{e:#}"))?;
+        client_core::ssh_native::gen_keypair_mem()
+            .map_err(|e| format!("pair-failed:key:{e:#}"))?;
     // "ssh-ed25519 <b64>" → la partie blob, seule interpolée dans le script.
     let k_b64 = k_pub.split_whitespace().nth(1).unwrap_or_default().to_string();
     if !k_b64.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=')) {
-        return Err("clé jetable illisible".into());
+        return Err("pair-failed:key:unreadable one-shot key".into());
     }
 
     let script = build_install(&k_b64, rport);
@@ -612,16 +614,16 @@ pub(crate) async fn pair_begin(
     let first_err = out.lines().find_map(|l| l.strip_prefix("err:"));
     if let Some(e) = first_err {
         let msg = match e {
-            "nohk" => "host keys introuvables sur le serveur — appairage impossible, utilisez le code endpoint seul".into(),
-            "managed-ak" => "authorized_keys managé (symlink) — utilisez le mode manuel".into(),
-            "lock" => "verrou authorized_keys indisponible — réessayez".into(),
-            other => format!("install refusée par le serveur ({other})"),
+            "nohk" => "pair-failed:nohk:no host keys on the server — pairing impossible, use the endpoint-only code".into(),
+            "managed-ak" => "pair-failed:managed-ak:authorized_keys is managed (symlink) — use manual mode".into(),
+            "lock" => "pair-failed:lock:authorized_keys lock unavailable — retry".into(),
+            other => format!("pair-failed:install:install refused by the server ({other})"),
         };
         return Err(msg);
     }
     if code != 0 {
         return Err(format!(
-            "install a échoué (code {code}){}",
+            "pair-failed:install:install failed (code {code}){}",
             if err.trim().is_empty() { String::new() } else { format!(" : {}", err.trim()) }
         ));
     }
@@ -630,7 +632,7 @@ pub(crate) async fn pair_begin(
         .filter_map(|l| l.strip_prefix("hk:").map(String::from))
         .collect();
     if hk.is_empty() {
-        return Err("host keys introuvables sur le serveur — appairage refusé".into());
+        return Err("pair-failed:nohk:no host keys on the server — pairing refused".into());
     }
     let exp = out
         .lines()
@@ -648,7 +650,7 @@ pub(crate) async fn pair_begin(
     // known_hosts du desktop — divergence = avertissement, pas un refus.
     let known = known_hosts_fps(&host, port).await;
     let warn = if !known.is_empty() && !hk.iter().any(|f| known.contains(f)) {
-        Some("les empreintes du serveur diffèrent de votre known_hosts — vérifiez hors-bande".to_string())
+        Some("hk-mismatch".to_string())
     } else {
         out.lines()
             .find_map(|l| l.strip_prefix("warn:"))
@@ -671,7 +673,7 @@ pub(crate) async fn pair_begin(
     });
     let payload = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
     if payload.len() > URI_MAX {
-        return Err("payload trop grand pour un QR".into());
+        return Err("pair-failed:payload:payload too large for a QR".into());
     }
     Ok(json!({
         "payload": payload,
@@ -744,15 +746,15 @@ pub(crate) async fn pair_revoke(cfg: Value, fp: String) -> Result<(), String> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
     {
-        return Err("empreinte invalide".into());
+        return Err("pair-failed:fingerprint:invalid fingerprint".into());
     }
     let script = REVOKE_SH.replace("@FP@", &fp);
     let (code, out, err) = exec_via_cfg(&cfg, &script).await?;
     if let Some(e) = out.lines().find_map(|l| l.strip_prefix("err:")) {
         return Err(match e {
-            "notfound" => "appareil introuvable (déjà révoqué ?)".into(),
-            "lock" => "verrou authorized_keys indisponible".into(),
-            other => format!("révocation refusée ({other})"),
+            "notfound" => "pair-failed:notfound:device not found (already revoked?)".into(),
+            "lock" => "pair-failed:lock:authorized_keys lock unavailable".into(),
+            other => format!("pair-failed:revoke:revoke refused ({other})"),
         });
     }
     // Mort silencieuse du script (verrou impossible, AK perdu entre-
@@ -760,7 +762,7 @@ pub(crate) async fn pair_revoke(cfg: Value, fp: String) -> Result<(), String> {
     // pas afficher une révocation réussie qui n'a pas eu lieu.
     if code != 0 || !out.lines().any(|l| l.trim() == "ok") {
         return Err(format!(
-            "révocation échouée (code {code}){}",
+            "pair-failed:revoke:revoke failed (code {code}){}",
             if err.trim().is_empty() { String::new() } else { format!(" : {}", err.trim()) }
         ));
     }
@@ -787,7 +789,7 @@ pub(crate) async fn pair_attempt(
     label: String,
 ) -> Result<String, String> {
     if hk.is_empty() {
-        return Err("hk absent — appairage refusé".into());
+        return Err("pair-failed:hk-missing:no host keys — pairing refused".into());
     }
     let hk: HashSet<String> = hk.into_iter().collect();
     let label: String = label
@@ -806,7 +808,7 @@ pub(crate) async fn pair_attempt(
     // effort du buffer avant le drop (usage unique, échec compris).
     let r = client_core::ssh_native::pair_attempt(&host, port, &user, &k_pem, hk, &label)
         .await
-        .map_err(|e| format!("{e:#}"));
+        .map_err(|e| format!("pair-failed:transport:{e:#}"));
     // Scrub best-effort du buffer avant le drop (usage unique, échec
     // compris) — le PEM reste présent dans le QR rendu à l'écran, mais
     // ne doit pas traîner dans le process plus que nécessaire.
@@ -827,13 +829,13 @@ pub(crate) async fn pair_attempt(
 #[tauri::command]
 pub(crate) fn pair_payload(cfg: Value) -> Result<String, String> {
     if cfg.get("kind").and_then(Value::as_str) != Some("ssh") {
-        return Err("seules les connexions SSH sont partageables".into());
+        return Err("pair-failed:ssh-only:only SSH connections can be shared".into());
     }
     let host_raw = cfg.get("host").and_then(Value::as_str).unwrap_or_default();
     let user_f = cfg.get("user").and_then(Value::as_str);
     let (user, host) = split_user_host(host_raw, user_f)?;
     if host.is_empty() {
-        return Err("hôte manquant".into());
+        return Err("pair-failed:no-host:missing host".into());
     }
     let native = cfg.get("native").and_then(Value::as_bool).unwrap_or(false)
         || cfg!(target_os = "android");
@@ -887,8 +889,8 @@ pub(crate) fn pair_payload(cfg: Value) -> Result<String, String> {
             }
             None => {
                 return Err(
-                    "aucun secret exportable — auth par agent/config ssh : \
-                     passez en SSH natif ou renseignez une clé/un mot de passe"
+                    "pair-failed:no-secret:no exportable secret — auth via agent/ssh config: \
+                     switch to native SSH or set a key/password"
                         .into(),
                 )
             }
@@ -899,7 +901,7 @@ pub(crate) fn pair_payload(cfg: Value) -> Result<String, String> {
     }
     let uri = format!("agentcontrol://pair?{}", q.finish());
     if uri.len() > URI_MAX {
-        return Err("clé trop grande pour un QR — utilisez une clé ed25519".into());
+        return Err("pair-failed:key-too-big:key too large for a QR — use an ed25519 key".into());
     }
     Ok(uri)
 }
@@ -910,5 +912,5 @@ pub(crate) fn pair_payload(cfg: Value) -> Result<String, String> {
 pub(crate) fn pair_import_key(pem: String, name: String) -> Result<String, String> {
     client_core::ssh_native::import_paired_key(&pem, &name)
         .map(|p| p.to_string_lossy().into_owned())
-        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| format!("pair-failed:key:{e:#}"))
 }

@@ -538,107 +538,107 @@ impl ItemPhase {
 // (injecté au spawn quand a2a est actif — pas de placeholder dédié).
 // ---------------------------------------------------------------------------
 
-pub(crate) const PLANNER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
+pub(crate) const PLANNER_PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — not by a human agent or a parent session.]
 
-Tu es le PLANIFICATEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION, cwd {WS}). Un reviewer relira ton plan ; si le verdict est APPROVED tu passeras en implementation toi-meme.
-
-## ITEM
-{ITEM}
-
-## MISSION — planification UNIQUEMENT
-
-Tu es en mode plan : tu n'implementes RIEN, tu ne modifies aucun fichier du repo.
-
-1. Lis {WS}/AGENTS.md (ou {WS}/CLAUDE.md a defaut) : les regles de contribution du repo s'y trouvent et s'appliqueront a l'implementation — worktree dedie sous {WORKTREE_DIR} base sur {BASE}, cycle defini par ces regles.
-2. Explore le code concerne dans {WS} et redige un plan d'implementation concret : fichiers a toucher, etapes ordonnees, points de vigilance/risques, verifications a demander. Ecris-le dans un fichier HORS du checkout git (ex. /tmp/backlog-plan-{ID}.md).
-3. Termine ton tour par une ligne exactement :
-   PLAN_FILE: <chemin absolu du fichier plan>
-   (Si ton agent sait cloturer un plan via un outil exit-plan, ce signal est aussi detecte.)
-4. Un reviewer relira ton plan : si tu recois un verdict DENIED ou CONDITIONAL (message d'une session Backlog-R*), revise le plan en tenant compte du commentaire, recris le fichier et termine par une nouvelle ligne « PLAN_FILE: <chemin> ».
-5. Si le plan est approuve, l'orchestrateur compacte ton contexte, te passe en mode implementation et t'ordonne d'implementer — attends son message.
-
-Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
-
-Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; reponds en francais."#;
-
-const REVIEWER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
-
-Tu es le REVIEWER du plan de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION, cwd {WS}) — tu es PERSISTANT : apres ton verdict tu es endormi (pas supprime), et reveille a chaque plan resoumis pour un nouveau round.
+You are the PLANNER of the backlog item below (session $AGENTCONTROL_SESSION, cwd {WS}). A reviewer will read your plan; if the verdict is APPROVED you will move to implementation yourself.
 
 ## ITEM
 {ITEM}
 
-## PLAN SOUMIS — round {ROUND} (par {PLANNER})
+## MISSION — planning ONLY
+
+You are in plan mode: you implement NOTHING, you modify no repo file.
+
+1. Read {WS}/AGENTS.md (or {WS}/CLAUDE.md as a fallback): the repo's contribution rules live there and will apply to the implementation — dedicated worktree under {WORKTREE_DIR} based on {BASE}, cycle defined by those rules.
+2. Explore the relevant code in {WS} and write a concrete implementation plan: files to touch, ordered steps, watch points/risks, checks to request. Write it to a file OUTSIDE the git checkout (e.g. /tmp/backlog-plan-{ID}.md).
+3. End your turn with a line exactly:
+   PLAN_FILE: <absolute path of the plan file>
+   (If your agent can close a plan via an exit-plan tool, that signal is detected too.)
+4. A reviewer will read your plan: if you receive a DENIED or CONDITIONAL verdict (message from a Backlog-R* session), revise the plan accounting for the comment, rewrite the file and end with a new "PLAN_FILE: <path>" line.
+5. If the plan is approved, the orchestrator compacts your context, switches you to implementation mode and orders you to implement — wait for its message.
+
+Steps: publish your task's step list via `acctl steps set` (ac-steps skill, provisioned in your workspace) — the list from the start, then an update at each step completed; the client's "Steps" panel shows it to the user.
+
+Absolute rules: never stop/restart/touch the agentcontrol-daemon daemon; no secrets committed. Language: write PR text and review comments in the repository's language; reply in the user's language."#;
+
+const REVIEWER_PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — not by a human agent or a parent session.]
+
+You are the REVIEWER of the backlog item's plan below (session $AGENTCONTROL_SESSION, cwd {WS}) — you are PERSISTENT: after your verdict you are put to sleep (not deleted), and woken on each resubmitted plan for a new round.
+
+## ITEM
+{ITEM}
+
+## SUBMITTED PLAN — round {ROUND} (by {PLANNER})
 {PLAN}
 
-## REVUES PRECEDENTES
+## PREVIOUS REVIEWS
 {HISTORY}
 
 ## ROLE
 
-Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+Steps: publish your task's step list via `acctl steps set` (ac-steps skill, provisioned in your workspace) — the list from the start, then an update at each step completed; the client's "Steps" panel shows it to the user.
 
-Verifie la faisabilite, la completude et les risques du plan EN REGARDANT LE CODE dans {WS} (les chemins/API du plan peuvent etre inexacts — c'est a toi de trancher). Verdicts : APPROVED si le plan est implementable tel quel ; CONDITIONAL s'il l'est moyennant des ajustements precis ; DENIED s'il est faux, incomplet ou dangereux.
+Check the plan's feasibility, completeness and risks BY READING THE CODE in {WS} (the plan's paths/APIs may be inaccurate — it is up to you to decide). Verdicts: APPROVED if the plan is implementable as is; CONDITIONAL if it is so subject to precise adjustments; DENIED if it is wrong, incomplete or dangerous.
 
-Aux rounds successifs : verifie d'abord que TES points du round precedent sont traites ; ne souleve de nouveaux points que s'ils sont bloquants ; APPROVED si tes points bloquants sont resolus et rien de nouveau bloquant.
+On successive rounds: first check that YOUR points from the previous round are addressed; raise new points only if they are blocking; APPROVED if your blocking points are resolved and nothing new blocks.
 
-Tu NE modifies RIEN : aucune edition, aucune commande mutante — lecture seule — ET tu ne compiles, ne buildes, ne testes RIEN non plus (cargo/npm/tsc/go…) : verifier un plan = lire le code, pas executer — si un point du plan semble faux ou infaisable, tranche-le a la lecture ou refuse-le, ne lance pas de build pour le prouver. SAUF ces deux commandes, dans l'ordre, quand ton verdict est pret :
+You modify NOTHING: no edits, no mutating command — read-only — AND you compile, build, test NOTHING either (cargo/npm/tsc/go…): reviewing a plan = reading the code, not executing — if a plan point looks wrong or unfeasible, settle it by reading or refuse it, do not run a build to prove it. EXCEPT these two commands, in order, once your verdict is ready:
 
-  a) agentbacklog --verdict {ID} --reviewer "$AGENTCONTROL_SESSION" --outcome APPROVED|DENIED|CONDITIONAL --comment "<ton commentaire>"
-  b) acctl msg "$AGENTCONTROL_SESSION" {PLANNER} "<verdict + commentaire>"
+  a) agentbacklog --verdict {ID} --reviewer "$AGENTCONTROL_SESSION" --outcome APPROVED|DENIED|CONDITIONAL --comment "<your comment>"
+  b) acctl msg "$AGENTCONTROL_SESSION" {PLANNER} "<verdict + comment>"
 
-Termine ton tour par une ligne exactement « VERDICT: APPROVED|DENIED|CONDITIONAL ». Reponds en francais."#;
+End your turn with a line exactly "VERDICT: APPROVED|DENIED|CONDITIONAL". Language: write review comments in the repository's language; reply in the user's language."#;
 
 /// Message de réveil du reviewer persistant au round N — il a déjà
 /// l'item en contexte : plan resoumis + consigne de round.
-const REVIEWER_ROUND_MSG: &str = r#"Plan resoumis pour l'item #{ID} — round {ROUND}. Verifie d'abord que TES points du round precedent sont traites ; ne souleve de nouveaux points que s'ils sont bloquants ; APPROVED si tes points bloquants sont resolus et rien de nouveau bloquant.
+const REVIEWER_ROUND_MSG: &str = r#"Plan resubmitted for item #{ID} — round {ROUND}. First check that YOUR points from the previous round are addressed; raise new points only if they are blocking; APPROVED if your blocking points are resolved and nothing new blocks.
 
 ## PLAN — round {ROUND}
 {PLAN}
 
-Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+Steps: publish your task's step list via `acctl steps set` (ac-steps skill, provisioned in your workspace) — the list from the start, then an update at each step completed; the client's "Steps" panel shows it to the user.
 
-Quand ton verdict est pret, dans l'ordre :
-  a) agentbacklog --verdict {ID} --reviewer "$AGENTCONTROL_SESSION" --outcome APPROVED|DENIED|CONDITIONAL --comment "<ton commentaire>"
-  b) acctl msg "$AGENTCONTROL_SESSION" {PLANNER} "<verdict + commentaire>"
-Termine ton tour par une ligne exactement « VERDICT: APPROVED|DENIED|CONDITIONAL »."#;
+Once your verdict is ready, in order:
+  a) agentbacklog --verdict {ID} --reviewer "$AGENTCONTROL_SESSION" --outcome APPROVED|DENIED|CONDITIONAL --comment "<your comment>"
+  b) acctl msg "$AGENTCONTROL_SESSION" {PLANNER} "<verdict + comment>"
+End your turn with a line exactly "VERDICT: APPROVED|DENIED|CONDITIONAL". Language: write review comments in the repository's language."#;
 
-pub(crate) const IMPLEMENTER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
+pub(crate) const IMPLEMENTER_PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — not by a human agent or a parent session.]
 
-Tu es l'IMPLEMENTEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION, cwd {WS}) — le plan a ete APPROUVE (round {ROUND}). Le planificateur initial a disparu avant l'implementation : tu reprends la tache.
+You are the IMPLEMENTER of the backlog item below (session $AGENTCONTROL_SESSION, cwd {WS}) — the plan was APPROVED (round {ROUND}). The initial planner disappeared before implementation: you take over the task.
 
 ## ITEM
 {ITEM}
 
-## PLAN APPROUVE
+## APPROVED PLAN
 {PLAN}
 
 ## MISSION
 
-Implemente le plan en suivant le workflow de contribution de {WS}/AGENTS.md (ou {WS}/CLAUDE.md a defaut) a la lettre : worktree dedie sous {WORKTREE_DIR} base sur {BASE} (JAMAIS dans le checkout principal {WS}) -> branche -> push -> PR draft -> demande la review ({REVIEW_TRIGGER}) -> iterations -> review soldee -> PR prete -> checks requis VERTS -> merge : {MERGE_RULE}. Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait — jamais de --watch bloquant ni de boucle de poll dans un tool call.
+Implement the plan following the contribution workflow of {WS}/AGENTS.md (or {WS}/CLAUDE.md as a fallback) to the letter: dedicated worktree under {WORKTREE_DIR} based on {BASE} (NEVER in the main checkout {WS}) -> branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> iterations -> review settled -> PR ready -> required GREEN checks -> merge: {MERGE_RULE}. Any wait > ~1 min (verdict, checks, merge) goes through an ac-wait waiter — never a blocking --watch or a poll loop inside a tool call.
 
-{DOD} Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explique pourquoi, puis arrete.
+{DOD} Unrecoverable blocker: agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explain why, then stop.
 
-Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+Steps: publish your task's step list via `acctl steps set` (ac-steps skill, provisioned in your workspace) — the list from the start, then an update at each step completed; the client's "Steps" panel shows it to the user.
 
-Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
+Absolute rules: never stop/restart/touch the agentcontrol-daemon daemon; no secrets committed; push only to your PR branch; clean up your worktree at the end (git worktree remove). Language: write PR text and review comments in the repository's language; reply in the user's language."#;
 
-const CLAIMED_WORKER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
+const CLAIMED_WORKER_PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — not by a human agent or a parent session.]
 
-Tu es un worker autonome sur le repo (cwd {WS}). Lis {WS}/AGENTS.md (ou {WS}/CLAUDE.md a defaut) — les regles de branches, PR, review, CI et merge du repo s'y trouvent et priment.
+You are an autonomous worker on the repo (cwd {WS}). Read {WS}/AGENTS.md (or {WS}/CLAUDE.md as a fallback) — the repo's branch, PR, review, CI and merge rules live there and take precedence.
 
-## MISSION — une seule tache, deja assignee (item backlog)
+## MISSION — a single task, already assigned (backlog item)
 {ITEM}
 
-1. Implemente en suivant la description a la lettre : worktree dedie sous {WORKTREE_DIR} base sur {BASE} (JAMAIS dans le checkout principal {WS}), spec, verifications demandees.
-2. Cycle de contribution (selon les regles du repo) : branche -> push -> PR draft -> demande la review ({REVIEW_TRIGGER}) -> iterations -> review soldee -> PR prete -> checks requis VERTS sur le head -> merge : {MERGE_RULE}. Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait — jamais de --watch bloquant ni de boucle de poll dans un tool call.
+1. Implement following the description to the letter: dedicated worktree under {WORKTREE_DIR} based on {BASE} (NEVER in the main checkout {WS}), spec, requested checks.
+2. Contribution cycle (per the repo's rules): branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> iterations -> review settled -> PR ready -> required GREEN checks on the head -> merge: {MERGE_RULE}. Any wait > ~1 min (verdict, checks, merge) goes through an ac-wait waiter — never a blocking --watch or a poll loop inside a tool call.
 3. {DOD}
 
-Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+Steps: publish your task's step list via `acctl steps set` (ac-steps skill, provisioned in your workspace) — the list from the start, then an update at each step completed; the client's "Steps" panel shows it to the user.
 
-Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explique la raison, puis arrete.
+Unrecoverable blocker: agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explain the reason, then stop.
 
-Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
+Absolute rules: never stop/restart/touch the agentcontrol-daemon daemon; no secrets committed; push only to your PR branch; clean up your worktree at the end (git worktree remove). Language: write PR text and review comments in the repository's language; reply in the user's language."#;
 
 pub(crate) fn fill(tpl: &str, pairs: &[(&str, String)]) -> String {
     let mut s = tpl.to_string();
@@ -666,13 +666,13 @@ pub(crate) fn fill(tpl: &str, pairs: &[(&str, String)]) -> String {
 pub(crate) fn review_trigger_text(cfg: &cfg::OrchCfg) -> String {
     if cfg.pr_review {
         format!(
-            "le commentaire « {} » (corps exact, seul dans son \
-             commentaire) sur la PR — la review est servie par le daemon",
+            "the comment \"{}\" (exact body, alone in its \
+             comment) on the PR — the review is served by the daemon",
             cfg.pr_review_trigger
         )
     } else {
-        "le mecanisme decrit dans les regles du repo (la review native \
-         du daemon est desactivee — pr_review off)"
+        "the mechanism described in the repo's rules (the daemon's \
+         native review is disabled — pr_review off)"
             .into()
     }
 }
@@ -682,9 +682,9 @@ pub(crate) fn review_trigger_text(cfg: &cfg::OrchCfg) -> String {
 /// elles l'y autorisent, sinon le merge reste à l'utilisateur.
 pub(crate) fn merge_rule_text(cfg: &cfg::OrchCfg) -> String {
     if cfg.merge_rule.trim().is_empty() {
-        "applique la regle de merge decrite dans les regles du repo \
-         (AGENTS.md/CLAUDE.md du workspace — merge par l'agent \
-         seulement si elles l'y autorisent)"
+        "apply the merge rule described in the repo's rules \
+         (AGENTS.md/CLAUDE.md of the workspace — merge by the agent \
+         only if they allow it there)"
             .into()
     } else {
         cfg.merge_rule.clone()
@@ -1692,12 +1692,12 @@ impl Daemon {
                     let force = force_safe_state(&pstate) && pstate != "compacting";
                     self.plan_send(&planner_sid, "/compact".into(), force).await;
                     let msg = format!(
-                        "Ton plan de l'item #{id} a été approuvé (round {}){cmt}. \
-                         Tu passes en implémentation : suis-le en appliquant \
-                         le workflow de contribution décrit dans \
-                         {}/AGENTS.md ou CLAUDE.md (worktree dédié \
-                         basé sur {}). {} Blocage \
-                         insurmontable : --release + explication.",
+                        "Your plan for item #{id} was approved (round {}){cmt}. \
+                         You are moving to implementation: follow it while \
+                         applying the contribution workflow described in \
+                         {}/AGENTS.md or CLAUDE.md (dedicated worktree \
+                         based on {}). {} Unrecoverable \
+                         blocker: --release + explanation.",
                         round.saturating_sub(1).max(0),
                         iws,
                         cfg.pr_base(),
@@ -2135,10 +2135,10 @@ impl Daemon {
                     return false;
                 }
                 let msg = format!(
-                    "Ton item #{item_id} attend un plan : rédige-le dans un \
-                     fichier hors checkout (ex. /tmp/backlog-plan-{item_id}.md) \
-                     et termine par « PLAN_FILE: <chemin> ». Après {} nudges \
-                     sans plan, la tâche est release.",
+                    "Your item #{item_id} is waiting for a plan: write it in a \
+                     file outside the checkout (e.g. /tmp/backlog-plan-{item_id}.md) \
+                     and end with \"PLAN_FILE: <path>\". After {} nudges \
+                     without a plan, the task is released.",
                     PLAN_MAX_NUDGES
                 );
                 // Nudge de contrôle en force (tête de file) — précède
@@ -2159,8 +2159,8 @@ impl Daemon {
                 let mut parts: Vec<String> = Vec::new();
                 if !open_prs.is_empty() {
                     parts.push(format!(
-                        "Tes PR encore ouvertes : {}. Ta mission continue \
-                         jusqu'au merge.",
+                        "Your still-open PRs: {}. Your mission continues \
+                         until merge.",
                         open_prs
                             .iter()
                             .map(|p| format!("#{p}"))
@@ -2170,10 +2170,10 @@ impl Daemon {
                 }
                 if !my_open.is_empty() {
                     parts.push(format!(
-                        "Ta tâche encore ouverte : {}. Si tu l'as abandonnée, \
-                         release-la : agentbacklog --release <ID> --agent-id \
-                         \"$AGENTCONTROL_SESSION\". Sinon reprends le travail \
-                         dessus jusqu'au --done.",
+                        "Your still-open task: {}. If you abandoned it, \
+                         release it: agentbacklog --release <ID> --agent-id \
+                         \"$AGENTCONTROL_SESSION\". Otherwise resume work \
+                         on it until --done.",
                         my_open
                             .iter()
                             .map(|t| format!("#{t}"))
@@ -2316,9 +2316,9 @@ impl Daemon {
                         self.plan_send(
                             &sid,
                             format!(
-                                "Ton marqueur PLAN_FILE pointe vers un fichier \
-                                 illisible ({}) — corrige le chemin et réénonce \
-                                 « PLAN_FILE: <chemin> ».",
+                                "Your PLAN_FILE marker points to an \
+                                 unreadable file ({}) — fix the path and \
+                                 repeat \"PLAN_FILE: <path>\".",
                                 path.display()
                             ),
                             false,
@@ -2596,7 +2596,7 @@ impl Daemon {
                     if now - seen < timeout {
                         continue;
                     }
-                    let a = serde_json::json!("procède au mieux de ton jugement");
+                    let a = serde_json::json!("proceed using your best judgment");
                     if let Err(e) = s.respond(&rid, None, Some(&a)) {
                         warn!("orchestrator: respond {rid} ({sid}): {e:#}");
                     } else {
@@ -2644,11 +2644,11 @@ impl Daemon {
         target.emit(kind.clone());
         sender.emit(kind);
         let wrapped = format!(
-            "[AgentControl] message de la session « {} » ({}, agent={})\n\
+            "[AgentControl] message from session \"{}\" ({}, agent={})\n\
             ---\n{}\n---\n\
-            Réponds via l'outil MCP `agentcontrol_send_message` \
-            (session=\"{}\") — ou ignore ce message s'il n'appelle \
-            pas de réponse.",
+            Reply via the MCP tool `agentcontrol_send_message` \
+            (session=\"{}\") — or ignore this message if it does not \
+            call for a reply.",
             fm.title, from_sid, fm.agent, text, from_sid
         );
         if target.is_alive() || target.is_waking() || target.is_spawning() {
@@ -2776,12 +2776,12 @@ impl Daemon {
         let id = task_id(t);
         let planner = task_agent(t);
         let msg = format!(
-            "Ta revue de l'item #{id} est toujours en attente : poste ton \
+            "Your review of item #{id} is still pending: post your \
              verdict (agentbacklog --verdict {id} --reviewer \
              \"$AGENTCONTROL_SESSION\" --outcome APPROVED|DENIED|CONDITIONAL \
-             --comment \"…\", puis acctl msg \"$AGENTCONTROL_SESSION\" \
-             {planner} \"<verdict>\") et termine par « VERDICT: … ». \
-             Sans verdict, la revue sera réattribuée."
+             --comment \"…\", then acctl msg \"$AGENTCONTROL_SESSION\" \
+             {planner} \"<verdict>\") and end with \"VERDICT: …\". \
+             Without a verdict, the review will be reassigned."
         );
         self.plan_send(rsid, msg, force).await
     }
@@ -3069,8 +3069,8 @@ mod tests {
         // merge_rule vide → « règles du repo ».
         assert_eq!(get(&c, "BASE"), c.integration_branch);
         assert_eq!(get(&c, "WORKTREE_DIR"), c.worktree_dir);
-        assert!(get(&c, "REVIEW_TRIGGER").contains("regles du repo"));
-        assert!(get(&c, "MERGE_RULE").contains("regles du repo"));
+        assert!(get(&c, "REVIEW_TRIGGER").contains("repo's rules"));
+        assert!(get(&c, "MERGE_RULE").contains("repo's rules"));
         // Review native servie → trigger commentaire injecté tel quel.
         c.pr_review = true;
         c.pr_review_trigger = "/please review".into();

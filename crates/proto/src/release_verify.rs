@@ -66,7 +66,7 @@ pub fn valid_tag(v: &str) -> bool {
 /// distincte d'une signature invalide.
 fn pubkey() -> Result<minisign_verify::PublicKey, String> {
     minisign_verify::PublicKey::decode(PUBKEY_FILE).map_err(|e| {
-        format!("clé publique de release non configurée (packaging/agentcontrol.pub placeholder ?) — {e}")
+        format!("release public key not configured (packaging/agentcontrol.pub placeholder?) — {e}")
     })
 }
 
@@ -81,11 +81,11 @@ fn expected_hash<'a>(sums: &'a str, name: &str) -> Result<&'a str, String> {
             if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Ok(hash);
             }
-            return Err(format!("{SUMS_NAME}: ligne malformée pour {name}"));
+            return Err(format!("{SUMS_NAME}: malformed line for {name}"));
         }
     }
     Err(format!(
-        "{name} absent de {SUMS_NAME} signé — release incomplète ?"
+        "{name} missing from signed {SUMS_NAME} — incomplete release?"
     ))
 }
 
@@ -110,20 +110,20 @@ fn verify_with(
     sig: &str,
 ) -> Result<(), String> {
     let signature = minisign_verify::Signature::decode(sig)
-        .map_err(|e| format!("{SIG_NAME} illisible — {e}"))?;
+        .map_err(|e| format!("{SIG_NAME} unreadable — {e}"))?;
     // allow_legacy=false : nos releases sont signées en mode pré-haché
     // (défaut minisign ≥0.9) — une signature legacy serait anormale.
     pk.verify(sums.as_bytes(), &signature, false).map_err(|e| {
-        format!("{SUMS_NAME}: signature minisign invalide (release altérée ?) — {e}")
+        format!("{SUMS_NAME}: invalid minisign signature (tampered release?) — {e}")
     })?;
     let want = expected_hash(sums, asset_name)?;
     let mut h = Sha256::new();
     std::io::copy(reader, &mut DigestWriter(&mut h))
-        .map_err(|e| format!("lecture de {asset_name} pour l'empreinte : {e}"))?;
+        .map_err(|e| format!("failed to read {asset_name} for digest: {e}"))?;
     let got = hex(&h.finalize());
     if !got.eq_ignore_ascii_case(want) {
         return Err(format!(
-            "{asset_name}: empreinte sha256 ≠ {SUMS_NAME} signé — artefact altéré ou corrompu"
+            "{asset_name}: sha256 digest ≠ signed {SUMS_NAME} — tampered or corrupted artifact"
         ));
     }
     Ok(())
@@ -273,7 +273,7 @@ mod tests {
         assert!(err.contains("signature"), "{err}");
         // Asset non listé dans le manifeste signé → refus.
         let err = verify_with(&pk, "absent.deb", &mut &asset[..], &sums, &sig).unwrap_err();
-        assert!(err.contains("absent"), "{err}");
+        assert!(err.contains("missing"), "{err}");
     }
 
     #[test]

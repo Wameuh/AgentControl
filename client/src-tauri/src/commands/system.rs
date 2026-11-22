@@ -77,7 +77,7 @@ pub(crate) fn other_instances() -> Vec<serde_json::Value> {
 pub(crate) fn spawn_instance(conn: String) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        return Err("multi-instances indisponible sur Android".to_string());
+        return Err("multi-instance unavailable on Android".to_string());
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -108,7 +108,7 @@ pub(crate) async fn sys_stats(state: State<'_, AppState>) -> Result<Value, Strin
     let pid = sysinfo::get_current_pid().map_err(|e| e.to_string())?;
     let mut sys = state.sys.lock().await;
     sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
-    let p = sys.process(pid).ok_or("process introuvable")?;
+    let p = sys.process(pid).ok_or("process not found")?;
     // Débit : fenêtre glissante des 5 dernières secondes sur les compteurs
     // cumulés de client-core (toutes connexions confondues).
     let now = std::time::Instant::now();
@@ -272,7 +272,7 @@ pub(crate) async fn mem_breakdown(state: State<'_, AppState>) -> Result<Value, S
 
     // Une ligne par groupe, triée par RSS décroissante — le plus gros
     // process (typiquement le web content) est lu en premier.
-    let host = sys.process(pid).ok_or("process introuvable")?;
+    let host = sys.process(pid).ok_or("process not found")?;
     let mut procs = vec![json!({
         "role": "app",
         "count": 1,

@@ -87,9 +87,9 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         // déclaré à la main peut toujours les viser explicitement.
         commands: &[&["acp-claude"]],
         detect: &["claude"],
-        install_hint: "acp-claude est livré avec AgentControl — \
-             réinstaller ou mettre à jour le démon (et installer le \
-             CLI `claude` s'il est absent)",
+        install_hint: "acp-claude ships with AgentControl — \
+             reinstall or update the daemon (and install the \
+             `claude` CLI if missing)",
         // Pas de provisioning npm pour claude : acp-claude arrive avec
         // le démon (daemon-update le pose depuis #284) — « installer »
         // renvoie l'erreur no-automatic-install + le hint ci-dessus.
@@ -547,7 +547,7 @@ mod tests {
         // claude : acp-claude livré avec le démon → hint « update »,
         // plus aucune suggestion npm (#285).
         let hint = install_hint_for("claude").unwrap();
-        assert!(hint.contains("acp-claude") && hint.contains("mettre à jour"));
+        assert!(hint.contains("acp-claude") && hint.contains("update"));
         assert!(!hint.contains("npm"));
         assert!(install_hint_for("codex").is_some());
         assert!(install_hint_for("devin").is_none());

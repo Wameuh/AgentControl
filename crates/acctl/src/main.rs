@@ -109,7 +109,7 @@ async fn tcp_auth(c: &mut Conn) -> Result<()> {
                 return Ok(());
             }
             Err(e).context(
-                "tcp auth refused — vérifier AGENTCONTROL_TOKEN ou le daemon.token distant",
+                "tcp auth refused — check AGENTCONTROL_TOKEN or the remote daemon.token",
             )
         }
     }
@@ -134,7 +134,7 @@ async fn connect() -> Result<Conn> {
         });
         let s = tokio::net::UnixStream::connect(&path)
             .await
-            .with_context(|| format!("unix {path} — le démon tourne-t-il ?"))?;
+            .with_context(|| format!("unix {path} — is the daemon running?"))?;
         let (r, w) = s.into_split();
         return Ok(Conn {
             w: Box::new(w),
@@ -144,7 +144,7 @@ async fn connect() -> Result<Conn> {
     }
     #[cfg(not(unix))]
     {
-        bail!("pas de socket unix ici — utilisez AGENTCONTROL_TCP=host:port")
+        bail!("no unix socket here — use AGENTCONTROL_TCP=host:port")
     }
 }
 
@@ -159,7 +159,7 @@ impl Conn {
         s.push('\n');
         self.w.write_all(s.as_bytes()).await?;
         self.w.flush().await?;
-        let line = self.lines.next_line().await?.context("connexion fermée")?;
+        let line = self.lines.next_line().await?.context("connection closed")?;
         let resp: proto::Response = serde_json::from_str(&line)?;
         if resp.ok {
             Ok(resp.result.unwrap_or(Value::Null))
@@ -170,7 +170,7 @@ impl Conn {
                 // manquait ou était faux (auth skip sans jeton, ou
                 // rotation entre-temps).
                 bail!(
-                    "{err} — jeton attendu en 1re ligne (AGENTCONTROL_TOKEN ou {})",
+                    "{err} — token expected on the first line (AGENTCONTROL_TOKEN ou {})",
                     daemon_token_path().display()
                 );
             }
@@ -237,7 +237,7 @@ fn print_event(ev: &Value) {
             ev["text"].as_str().unwrap_or("")
         ),
         "agent_text" => println!("[{seq}] {}", ev["text"].as_str().unwrap_or("")),
-        "agent_thought" => println!("\x1b[90m[{seq}] (pensée) {}\x1b[0m", ev["text"].as_str().unwrap_or("")),
+        "agent_thought" => println!("\x1b[90m[{seq}] (thought) {}\x1b[0m", ev["text"].as_str().unwrap_or("")),
         "tool_call" | "tool_call_update" => {
             let title = ev["title"].as_str().unwrap_or_else(|| ev["call_id"].as_str().unwrap_or("?"));
             let status = ev["status"].as_str().unwrap_or("?");
@@ -248,7 +248,7 @@ fn print_event(ev: &Value) {
                 }
             }
             if let Some(b) = ev["blob"].as_str() {
-                println!("    \x1b[90m[sortie complète: {b}, {} o]\x1b[0m", ev["size"].as_u64().unwrap_or(0));
+                println!("    \x1b[90m[full output: {b}, {} B]\x1b[0m", ev["size"].as_u64().unwrap_or(0));
             }
         }
         "permission_request" => {
@@ -268,7 +268,7 @@ fn print_event(ev: &Value) {
             println!("    → acctl respond <session> {} --answer '{{...}}'", ev["request_id"].as_str().unwrap_or(""));
         }
         "permission_resolved" | "question_resolved" => {
-            println!("[{seq}] résolu: {}", ev["outcome"].as_str().or_else(|| ev["answer"].as_str()).unwrap_or(""));
+            println!("[{seq}] resolved: {}", ev["outcome"].as_str().or_else(|| ev["answer"].as_str()).unwrap_or(""));
         }
         "mode_changed" => println!("[{seq}] mode → {}", ev["mode"].as_str().unwrap_or("")),
         "commands_available" => {
@@ -279,20 +279,20 @@ fn print_event(ev: &Value) {
             }).unwrap_or_default();
             println!("[{seq}] commandes: {}", names.join(" "));
         }
-        "status_changed" => println!("\x1b[90m[{seq}] état → {}\x1b[0m", ev["state"].as_str().unwrap_or("")),
+        "status_changed" => println!("\x1b[90m[{seq}] state → {}\x1b[0m", ev["state"].as_str().unwrap_or("")),
         "steps" => {
             let n = ev["steps"].as_array().map(|a| a.len()).unwrap_or(0);
             let cur = ev["steps"].as_array().and_then(|a| {
                 a.iter().find(|s| s["status"].as_str() == Some("in_progress"))
             });
             println!(
-                "\x1b[36m[{seq}] ▤ étapes: {n}{}\x1b[0m",
+                "\x1b[36m[{seq}] ▤ steps: {n}{}\x1b[0m",
                 cur.and_then(|s| s["name"].as_str())
                     .map(|n| format!(" — en cours: {n}"))
                     .unwrap_or_default()
             );
         }
-        "session_cleared" => println!("\x1b[90m[{seq}] ── contexte effacé ──\x1b[0m"),
+        "session_cleared" => println!("\x1b[90m[{seq}] ── context cleared ──\x1b[0m"),
         "error" => println!("\x1b[31m[{seq}] ERREUR {}\x1b[0m", ev["message"].as_str().unwrap_or("")),
         "system" => println!("\x1b[90m[{seq}] ⦿ {}\x1b[0m", ev["text"].as_str().unwrap_or("")),
         _ => println!("[{seq}] {ty} {ev}"),
@@ -655,7 +655,7 @@ async fn main() -> Result<()> {
                 );
             }
             if !v["done"].as_bool().unwrap_or(true) {
-                eprintln!("(scan partiel — {} events parcourus)", v["scanned"].as_u64().unwrap_or(0));
+                eprintln!("(partial scan — {} events scanned)", v["scanned"].as_u64().unwrap_or(0));
             }
         }
         "find" => {
@@ -678,7 +678,7 @@ async fn main() -> Result<()> {
                 );
             }
             if v["truncated"].as_bool().unwrap_or(false) {
-                eprintln!("(résultats tronqués — {} entrées scannées)", v["scanned"].as_u64().unwrap_or(0));
+                eprintln!("(truncated results — {} entries scanned)", v["scanned"].as_u64().unwrap_or(0));
             }
         }
         "create" => {
@@ -761,7 +761,7 @@ async fn main() -> Result<()> {
             }
             let session = session
                 .or_else(|| std::env::var("AGENTCONTROL_SESSION").ok())
-                .context("pas de session : --session S ou AGENTCONTROL_SESSION")?;
+                .context("no session: --session S or AGENTCONTROL_SESSION")?;
             match args[1].as_str() {
                 "set" => {
                     let spec = rest.join(" ");
@@ -788,7 +788,7 @@ async fn main() -> Result<()> {
                             .unwrap_or_else(|_| "null".into())
                     );
                 }
-                other => bail!("steps : sous-commande inconnue «{other}» (set|get)"),
+                other => bail!("steps: unknown sub-command \"{other}\" (set|get)"),
             }
         }
         "respond" => {
@@ -829,7 +829,7 @@ async fn main() -> Result<()> {
             let dest = args.get(3).cloned()
                 .unwrap_or_else(|| info["name"].as_str().unwrap_or("download").to_string());
             if std::path::Path::new(&dest).is_dir() {
-                bail!("destinataire est un dossier: {dest}");
+                bail!("destination is a directory: {dest}");
             }
             let mut out: Option<std::fs::File> = None;
             let mut archive: Option<String> = None;
@@ -924,7 +924,7 @@ async fn main() -> Result<()> {
                                     .context("--window <24h|7d|30d|all>")?;
                             }
                             other if !other.starts_with('-') => window = other.into(),
-                            other => bail!("option inconnue: {other}"),
+                            other => bail!("unknown option: {other}"),
                         }
                         i += 1;
                     }
@@ -945,7 +945,7 @@ async fn main() -> Result<()> {
                     // clé dans les deux cas (même validation).
                     let pairs = &args[2..];
                     if pairs.is_empty() || pairs.len() % 2 != 0 {
-                        bail!("usage: acctl orch set <clé> <valeur> [<clé> <valeur>…]");
+                        bail!("usage: acctl orch set <key> <value> [<key> <value>…]");
                     }
                     let mut patch = std::collections::BTreeMap::new();
                     for kv in pairs.chunks_exact(2) {
@@ -958,13 +958,13 @@ async fn main() -> Result<()> {
                     }).await?;
                     println!("{}", serde_json::to_string_pretty(&v)?);
                 }
-                other => bail!("usage: acctl orch [on|off|status|config|set <clé> <val>…|metrics [--window W]] (inconnu: {other})"),
+                other => bail!("usage: acctl orch [on|off|status|config|set <key> <val>…|metrics [--window W]] (unknown: {other})"),
             }
         }
         other => bail!(
-            "commande inconnue: {other}{}",
+            "unknown command: {other}{}",
             suggest_command(other)
-                .map(|c| format!(" — vouliez-vous dire « {c} » ?"))
+                .map(|c| format!(" — did you mean \"{c}\"?"))
                 .unwrap_or_default()
         ),
     }
@@ -987,16 +987,16 @@ fn parse_steps_spec(spec: &str) -> Result<Vec<proto::SessionStep>> {
     }
     if spec.starts_with('[') {
         let raw: Vec<Value> = serde_json::from_str(spec)
-            .context("spec JSON invalide — attendu [{\"name\":..,\"status\":..}]")?;
+            .context("invalid JSON spec — expected [{\"name\":..,\"status\":..}]")?;
         return raw
             .iter()
             .map(|v| {
                 let name = v["name"]
                     .as_str()
-                    .context("étape JSON sans \"name\"")?
+                    .context("step JSON missing \"name\"")?
                     .to_string();
                 let status = parse_step_status(
-                    v["status"].as_str().context("étape JSON sans \"status\"")?,
+                    v["status"].as_str().context("step JSON missing \"status\"")?,
                 )?;
                 Ok(proto::SessionStep { name, status })
             })
@@ -1006,14 +1006,14 @@ fn parse_steps_spec(spec: &str) -> Result<Vec<proto::SessionStep>> {
         .map(|part| {
             let part = part.trim();
             if part.is_empty() {
-                bail!("entrée d'étape vide dans «{spec}»");
+                bail!("empty step entry in '{spec}'");
             }
             let (name, st) = part
                 .rsplit_once(':')
-                .with_context(|| format!("étape «{part}» sans statut — forme attendue nom:statut"))?;
+                .with_context(|| format!("step '{part}' has no status — expected name:status"))?;
             let name = name.trim();
             if name.is_empty() {
-                bail!("étape sans nom dans «{part}»");
+                bail!("unnamed step in '{part}'");
             }
             Ok(proto::SessionStep {
                 name: name.to_string(),
@@ -1032,7 +1032,7 @@ fn parse_step_status(s: &str) -> Result<proto::StepStatus> {
         "done" | "complete" | "completed" | "finished" => Ok(proto::StepStatus::Done),
         "abandoned" | "abandon" | "skip" | "skipped" => Ok(proto::StepStatus::Abandoned),
         other => bail!(
-            "statut d'étape inconnu «{other}» — attendu todo|in_progress|done|abandoned"
+            "unknown step status '{other}' — expected todo|in_progress|done|abandoned"
         ),
     }
 }
