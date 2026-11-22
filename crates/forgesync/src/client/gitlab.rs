@@ -19,6 +19,15 @@ use serde_json::{json, Value};
 
 /// MR JSON (REST ou `glab api`) → ChangeInfo normalisé.
 fn mr_change(v: &Value) -> ChangeInfo {
+    // MR cross-projet (fork) : `source_project_id` ≠ `target_project_id`
+    // — les deux sont dans le listing, aucun appel supplémentaire.
+    let cross_repo = match (
+        v["source_project_id"].as_u64(),
+        v["target_project_id"].as_u64(),
+    ) {
+        (Some(s), Some(t)) => Some(s != t),
+        _ => None,
+    };
     ChangeInfo {
         number: v["iid"].as_u64().unwrap_or(0),
         title: v["title"].as_str().unwrap_or("").into(),
@@ -30,6 +39,12 @@ fn mr_change(v: &Value) -> ChangeInfo {
         url: v["web_url"].as_str().unwrap_or("").into(),
         review: glab_review_state(v),
         ci: glab_ci_state(v),
+        author: v["author"]["username"].as_str().unwrap_or("").into(),
+        author_id: v["author"]["id"]
+            .as_u64()
+            .map(|i| i.to_string())
+            .unwrap_or_default(),
+        cross_repo,
         ..Default::default()
     }
 }
@@ -121,6 +136,22 @@ impl GitlabRestClient {
 
     fn get(&self, url: &str) -> Http {
         http_get(url, &self.headers())
+    }
+
+    /// Appartenance au projet — `/members/all/<user_id>` : résolution
+    /// lazy (notes candidates au trigger, changes candidats au gate
+    /// de confiance). `preset` non vide = déjà résolu.
+    fn resolve_assoc(&self, preset: &str, author_id: &str) -> String {
+        if !preset.is_empty() {
+            return preset.to_string();
+        }
+        if author_id.is_empty() {
+            return "NONE".into();
+        }
+        match self.get(&self.proj(&format!("/members/all/{author_id}"))) {
+            Http::Ok(v) => member_assoc(v["access_level"].as_u64().unwrap_or(0)),
+            _ => "NONE".into(),
+        }
     }
 
     /// PUT titre sans « Draft: » — l'impl partagée de mark_ready
@@ -245,19 +276,16 @@ impl ForgeClient for GitlabRestClient {
         Some(format!("merge-requests/{id}/head"))
     }
 
-    /// Appartenance au projet — `/members/all/<user_id>` : résolution
-    /// lazy (uniquement pour les notes candidates au trigger).
+    /// Appartenance au projet — résolution lazy (uniquement pour les
+    /// notes candidates au trigger).
     fn author_assoc(&self, comment: &ChangeComment) -> String {
-        if !comment.assoc.is_empty() {
-            return comment.assoc.clone();
-        }
-        if comment.author_id.is_empty() {
-            return "NONE".into();
-        }
-        match self.get(&self.proj(&format!("/members/all/{}", comment.author_id))) {
-            Http::Ok(v) => member_assoc(v["access_level"].as_u64().unwrap_or(0)),
-            _ => "NONE".into(),
-        }
+        self.resolve_assoc(&comment.assoc, &comment.author_id)
+    }
+
+    /// Idem pour l'auteur du change — gate de confiance des modes
+    /// auto (jamais invoqué pour un same-project).
+    fn change_author_assoc(&self, change: &ChangeInfo) -> String {
+        self.resolve_assoc(&change.author_assoc, &change.author_id)
     }
 
     fn verify(&self, id: &str) -> Option<bool> {
@@ -297,6 +325,24 @@ impl GlabClient {
     fn api_json(&self, endpoint: &str) -> Option<Value> {
         self.api(endpoint, &[])
             .and_then(|s| serde_json::from_str(&s).ok())
+    }
+
+    /// `/members/all/<id>` via `glab api` — même règle que le client
+    /// REST (`resolve_assoc`).
+    fn resolve_assoc(&self, preset: &str, author_id: &str) -> String {
+        if !preset.is_empty() {
+            return preset.to_string();
+        }
+        if author_id.is_empty() {
+            return "NONE".into();
+        }
+        self.api_json(&format!(
+            "projects/{}/members/all/{}",
+            urlenc(&self.target.repo),
+            author_id
+        ))
+        .map(|v| member_assoc(v["access_level"].as_u64().unwrap_or(0)))
+        .unwrap_or_else(|| "NONE".into())
     }
 }
 
@@ -401,19 +447,13 @@ impl ForgeClient for GlabClient {
     /// Appartenance via `glab api members/all/<id>` — même règle que
     /// le client REST.
     fn author_assoc(&self, comment: &ChangeComment) -> String {
-        if !comment.assoc.is_empty() {
-            return comment.assoc.clone();
-        }
-        if comment.author_id.is_empty() {
-            return "NONE".into();
-        }
-        self.api_json(&format!(
-            "projects/{}/members/all/{}",
-            urlenc(&self.target.repo),
-            comment.author_id
-        ))
-        .map(|v| member_assoc(v["access_level"].as_u64().unwrap_or(0)))
-        .unwrap_or_else(|| "NONE".into())
+        self.resolve_assoc(&comment.assoc, &comment.author_id)
+    }
+
+    /// Idem pour l'auteur du change — gate de confiance des modes
+    /// auto (jamais invoqué pour un same-project).
+    fn change_author_assoc(&self, change: &ChangeInfo) -> String {
+        self.resolve_assoc(&change.author_assoc, &change.author_id)
     }
 
     fn verify(&self, id: &str) -> Option<bool> {

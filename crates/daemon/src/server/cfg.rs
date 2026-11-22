@@ -380,6 +380,11 @@ pub struct ReviewOverride {
     /// Label `## <changes>` local — vide = `verdict_changes` global.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub verdict_changes: String,
+    /// `auto_review_untrusted` local — absent = param global ; `true`
+    /// relâche le filtre de confiance des modes auto pour ce repo
+    /// seul, `false` le force même si le global est relâché.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_review_untrusted: Option<bool>,
 }
 
 /// Orchestrateur backlog natif (section [backlog_orchestrator] de
@@ -647,6 +652,17 @@ pub struct OrchCfg {
     /// `## <label>` (défaut « Verdict: CHANGES_REQUESTED »).
     #[serde(default = "dvchanges")]
     pub verdict_changes: String,
+    /// Filtre de confiance des modes auto (`auto_open`/`auto_push`) :
+    /// `false` (défaut) = une review auto ne se lance que sur un
+    /// change fiable — branche source dans le même dépôt OU auteur
+    /// OWNER/MEMBER/COLLABORATOR ; `true` = review même les PR de
+    /// forks d'auteurs externes (risqué sur un dépôt public : une
+    /// session agent démarre sur du contenu non contrôlé). Le mode
+    /// `comment` et les demandes internes ne sont pas filtrés (le
+    /// déclencheur humain fait déjà office de validation).
+    /// Surchargeable par repo via `review.<repo>.auto_review_untrusted`.
+    #[serde(default)]
+    pub auto_review_untrusted: bool,
     /// Pool de workers structurés (`[[worker_pool]]` dans config.toml) —
     /// présent non vide = la somme des `count` remplace `max_workers`
     /// pour la capacité workers et chaque entrée porte profil +
@@ -793,6 +809,7 @@ impl Default for OrchCfg {
             review_prompt: None,
             verdict_approved: dvapproved(),
             verdict_changes: dvchanges(),
+            auto_review_untrusted: false,
             worker_pool: Vec::new(),
             review: std::collections::BTreeMap::new(),
             repo_workspaces: std::collections::BTreeMap::new(),
@@ -1040,6 +1057,16 @@ impl OrchCfg {
         self.review_ov(repo)
             .and_then(|o| ReviewTriggerMode::parse(&o.trigger_mode))
             .unwrap_or_else(|| self.review_mode())
+    }
+
+    /// Le filtre de confiance des modes auto est-il relâché pour ce
+    /// repo ? Override `auto_review_untrusted` puis global — défaut
+    /// `false` (fail-closed : un change d'auteur externe n'est jamais
+    /// reviewé automatiquement).
+    pub fn auto_review_untrusted_for(&self, repo: &str) -> bool {
+        self.review_ov(repo)
+            .and_then(|o| o.auto_review_untrusted)
+            .unwrap_or(self.auto_review_untrusted)
     }
 
     /// Trigger commentaire effectif d'un repo (`pr_review_trigger`

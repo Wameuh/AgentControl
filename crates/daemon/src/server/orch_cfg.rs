@@ -89,6 +89,7 @@ const KEYS: &[&str] = &[
     "review_prompt",
     "verdict_approved",
     "verdict_changes",
+    "auto_review_untrusted",
     "review_overrides",
     "repo_workspaces",
 ];
@@ -702,6 +703,10 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
                  RPC only (no forge scan at all); off = nothing, \
                  internal requests refused too (in-flight reviews \
                  still settle — flip pr_review off to abort them). \
+                 auto_open/auto_push only review TRUSTED changes — \
+                 same-repo branch or OWNER/MEMBER/COLLABORATOR author \
+                 (fork/external PRs are skipped, see \
+                 auto_review_untrusted). \
                  Per-repo override via review_overrides",
                 ParamKind::Enum,
                 Some("comment"),
@@ -712,6 +717,21 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
                 .collect();
             p
         },
+        ps(
+            "auto_review_untrusted",
+            "Auto review untrusted PRs",
+            "trust filter of the auto trigger modes (auto_open/ \
+             auto_push): false (default) = a review only launches on \
+             a trusted change — same-repo branch OR \
+             OWNER/MEMBER/COLLABORATOR author; a PR from a fork by an \
+             external author never spawns a reviewer session \
+             (untrusted changes are remembered, not re-evaluated \
+             every tick). true = review everything — risky on public \
+             repos. comment mode and internal requests are not \
+             filtered. Per-repo override via review_overrides",
+            ParamKind::Bool,
+            Some("false"),
+        ),
         ps(
             "review_prompt",
             "PR review prompt",
@@ -743,7 +763,8 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             "review_overrides",
             "Per-repo review overrides",
             "JSON object {repo_path: {trigger_mode, pr_review_trigger, \
-             review_prompt, verdict_approved, verdict_changes}} — key \
+             review_prompt, verdict_approved, verdict_changes, \
+             auto_review_untrusted}} — key \
              = repo path (owner/name, gerrit project; short name \
              resolves too); same as TOML \
              [backlog_orchestrator.review.<repo>]; empty = global \
@@ -810,6 +831,7 @@ fn group_of(key: &str) -> Option<&'static str> {
         | "pr_review_max_parallel"
         | "pr_review_timeout"
         | "review_trigger_mode"
+        | "auto_review_untrusted"
         | "review_prompt"
         | "verdict_approved"
         | "verdict_changes"
@@ -901,6 +923,10 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     );
     m.insert("verdict_approved".into(), cfg.verdict_approved.clone());
     m.insert("verdict_changes".into(), cfg.verdict_changes.clone());
+    m.insert(
+        "auto_review_untrusted".into(),
+        cfg.auto_review_untrusted.to_string(),
+    );
     m.insert(
         "review_overrides".into(),
         serde_json::to_string(&cfg.review).unwrap_or_else(|_| "{}".into()),
@@ -1112,7 +1138,8 @@ fn val_label(v: &Value) -> Result<String> {
 
 /// Overrides review par repo — objet JSON `{repo: {trigger_mode,
 /// pr_review_trigger, review_prompt, verdict_approved,
-/// verdict_changes}}` (forme native `component_set_params` ou chaîne
+/// verdict_changes, auto_review_untrusted}}` (forme native
+/// `component_set_params` ou chaîne
 /// JSON via `acctl comp set`). `{}`/`[]`/vide = map vidée (params
 /// globaux seuls). Chaque champ vide/absent hérite du global ;
 /// `trigger_mode` hors vocabulaire et labels invalides sont refusés
@@ -1400,6 +1427,9 @@ pub(crate) fn apply_patch(
                     s
                 }
             }
+            // Filtre de confiance des modes auto — booléen plein
+            // (défaut false = fail-closed).
+            "auto_review_untrusted" => cfg.auto_review_untrusted = val_bool(v)?,
             // Vide → défaut (map vide) ; `{}`/`[]` explicite = map vidée.
             "review_overrides" => {
                 cfg.review = if is_empty(v) {
@@ -1737,6 +1767,22 @@ mod tests {
         assert_eq!(c.review_prompt_for("o/r"), Some("p {SHA}"));
         apply_patch(&mut c, &patch(&[("review_overrides", json!(""))])).unwrap();
         assert!(c.review.is_empty());
+        // `auto_review_untrusted` : booléen global (défaut false =
+        // fail-closed) et override par repo dans review_overrides.
+        assert!(!c.auto_review_untrusted_for("o/r"));
+        apply_patch(&mut c, &patch(&[("auto_review_untrusted", json!("true"))])).unwrap();
+        assert!(c.auto_review_untrusted);
+        assert!(apply_patch(&mut c, &patch(&[("auto_review_untrusted", json!("maybe"))])).is_err());
+        apply_patch(
+            &mut c,
+            &patch(&[(
+                "review_overrides",
+                json!({"o/r": {"auto_review_untrusted": false}}),
+            )]),
+        )
+        .unwrap();
+        assert!(!c.auto_review_untrusted_for("o/r"));
+        assert!(c.auto_review_untrusted_for("a/b"));
     }
 
     #[test]

@@ -193,7 +193,14 @@ hot-settable, default `comment`): what launches a daemon PR review —
 (historical behavior, forge comment scan: PR comments GitHub, MR
 notes GitLab REST, patchset messages Gerrit); `auto_open` = review
 when the change first shows up open; `auto_push` = also re-review on
-every head differing from the reviewed sha; `manual` = only
+every head differing from the reviewed sha — **auto modes only fire
+on trusted changes**: a same-repo source branch or an
+`OWNER`/`MEMBER`/`COLLABORATOR` author (fail-closed: fork/unknown
+authors are remembered `skipped_untrusted` and never re-evaluated
+every tick — `auto_push` rechecks on a new head;
+`auto_review_untrusted` relaxes the filter globally or per repo;
+`comment` and internal requests are untouched — a human asking is
+the validation); `manual` = only
 `acctl pr review <N>` / `agentcontrol_request_review` — **no forge
 scan at all**; `off` = nothing, internal requests refused too
 (in-flight reviews still settle — flip `pr_review` off to abort
@@ -215,7 +222,8 @@ global `agent`/`model`/thought level (`agent_or`/`model_or`/
 `[backlog_orchestrator.review.<repo>]` in config.toml (or the
 `review_overrides` JSON param) accepts `trigger_mode`,
 `pr_review_trigger`, `review_prompt`, `verdict_approved`,
-`verdict_changes` — key = repo path as it appears in
+`verdict_changes`, `auto_review_untrusted` — key = repo path as it
+appears in
 `pr_reviews`/the registry (`owner/name`, gerrit project), a short
 name resolves too; each empty field inherits the global param —
 mixed-forge workspaces can e.g. keep `comment` on GitHub and run

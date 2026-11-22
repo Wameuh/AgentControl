@@ -164,7 +164,10 @@ A few concrete setups — every bullet is something you can do today:
   drains the shared `agentbacklog` queue on its own — one worker session
   per item, an optional plan → review → implementation pipeline, and
   native PR reviews that watch your PRs, spawn read-only reviewers on the
-  exact head and post the verdict as a comment. Worker and review
+  exact head and post the verdict as a comment — automatic triggers
+  only fire on trusted changes (same-repo branch or
+  OWNER/MEMBER/COLLABORATOR author; `auto_review_untrusted` relaxes it).
+  Worker and review
   concurrency, per-role agent profiles and repo routing are all tunable
   live — and sessions stalled on a rate-limited provider are
   automatically migrated to another profile when the role's agent is

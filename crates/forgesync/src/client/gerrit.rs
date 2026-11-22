@@ -22,6 +22,13 @@ fn gerrit_change(v: &Value) -> ChangeInfo {
                 .and_then(|m| m.keys().next().cloned())
         })
         .unwrap_or_default();
+    // Owner — même convention que les commentaires (`gerrit_msg`) :
+    // compte enregistré → MEMBER. Pas de notion de fork sur Gerrit :
+    // un change vit toujours dans son projet → `cross_repo` = false.
+    let owner_id = v["owner"]["_account_id"]
+        .as_u64()
+        .map(|i| i.to_string())
+        .unwrap_or_default();
     ChangeInfo {
         number: v["_number"].as_u64().unwrap_or(0),
         change_id: v["change_id"].as_str().map(String::from),
@@ -34,6 +41,18 @@ fn gerrit_change(v: &Value) -> ChangeInfo {
         base: v["branch"].as_str().unwrap_or("").into(),
         head_sha,
         resolved_repo: v["project"].as_str().map(String::from),
+        author: v["owner"]["username"]
+            .as_str()
+            .or_else(|| v["owner"]["name"].as_str())
+            .unwrap_or("")
+            .into(),
+        author_id: owner_id.clone(),
+        author_assoc: if owner_id.is_empty() {
+            "NONE".into()
+        } else {
+            "MEMBER".into()
+        },
+        cross_repo: Some(false),
         ..Default::default()
     }
 }
