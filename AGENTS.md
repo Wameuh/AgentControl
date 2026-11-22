@@ -4,8 +4,9 @@
 
 Two protected branches (**no direct push**, PR required,
 CI checks: `daemon-linux` ×2, `client` ×2, `client-macos`,
-`client-android` — 6 runs, 5 of them required by the ruleset,
-`client-macos` still to be included):
+`client-android` (build.yml) + `rust`, `js`, `audit` (test.yml)
+— 9 runs, 6 of them required by the ruleset, `client-macos`,
+`js` and `audit` still to be included):
 
 - **`next_release`** = integration branch. **Every feature/fix PR
   targets `next_release`** (`gh pr create --base next_release`)
@@ -109,13 +110,13 @@ check-runs of the head SHA (see **Waiting** — never a blocking
 SHA=$(gh pr view <N> --json headRefOid -q .headRefOid)
 ac-wait --name "checks PR #<N>" --interval 60 --timeout 3600 -- bash -c "
   gh api --paginate 'repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100' --jq '
-    .check_runs[] | select(.name | test(\"^(daemon-linux|client)( |-|\$)\"))
+    .check_runs[] | select(.name | test(\"^(daemon-linux|client|rust)( |-|\$)\"))
       | select(.conclusion != \"skipped\" and .conclusion != \"cancelled\")
       | .status + \" \" + (.conclusion // \"-\") + \" \" + .name'
   R=\$(gh api --paginate 'repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100' --jq '
-    [.check_runs[] | select(.name | test(\"^(daemon-linux|client)( |-|\$)\"))
+    [.check_runs[] | select(.name | test(\"^(daemon-linux|client|rust)( |-|\$)\"))
       | select(.conclusion != \"skipped\" and .conclusion != \"cancelled\")]
-    | if length >= 6
+    | if length >= 7
       then (if all(.status == \"completed\")
             then (if all(.conclusion == \"success\") then \"DONE\" else \"FAIL\" end)
             else \"PENDING\" end)
@@ -124,13 +125,14 @@ ac-wait --name "checks PR #<N>" --interval 60 --timeout 3600 -- bash -c "
 ```
 
 The ping prints each real run's `status conclusion name` plus the
-verdict word: `DONE` = all 6 green → merge; `FAIL` = a real red →
+verdict word: `DONE` = all 7 green → merge; `FAIL` = a real red →
 `gh run view <id> --log-failed`. `TIMEOUT` with no `DONE`/`FAIL` —
 or a stuck `PENDING` — usually means the head got **zero real
 runs** (the late `synchronize` dispatch cancelled the ready run):
 repair with `gh pr ready --undo && sleep 30 && gh pr ready`.
 Run from the clone root (`{owner}/{repo}` = repo of the cwd);
-the name filter must track `build.yml`'s required jobs. Without
+the name filter must track `build.yml`'s and `test.yml`'s required
+jobs (`js`/`audit` stay advisory, outside the filter). Without
 the failure branch, an all-skipped head would come out green after
 ~5 min — the exact case the gate detects.
 
@@ -493,13 +495,18 @@ gh run view <id> --log-failed   # if failure
 
 The `.github/workflows/build.yml` workflow builds: daemon x86_64+aarch64,
 Tauri client Ubuntu+Windows+macOS (arm64 dmg), Android APK, and
-publishes a release on `v*` tags.
+publishes a release on `v*` tags. `.github/workflows/test.yml`
+runs the checks that don't need artifacts: `cargo test --workspace`
+(required `rust` job — fmt/clippy advisory until their warning
+backlog is cleaned), client tests that need no real daemon
+(`js`), and dependency audits (`audit`).
 
 ## Automatic versioning (commit keywords)
 
 PR → **`next_release`** (not `main` directly). CI checks
-(`daemon-linux` ×2, `client` ×2, `client-android`, `client-macos` —
-5 required by the ruleset, `client-macos` to be included). CI builds
+(`daemon-linux` ×2, `client` ×2, `client-android`, `client-macos` +
+test.yml `rust`, `js`, `audit` — 6 required by the ruleset,
+`client-macos`, `js` and `audit` to be included). CI builds
 artifacts on PRs (APK and dmg suffixed `-<sha>`).
 
 **No per-PR bump** — the version only moves at release. The level
@@ -545,6 +552,9 @@ Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
   the Windows target:
   `cd client/src-tauri && PATH="/tmp/zig-shim:$PATH" cargo check --target x86_64-pc-windows-gnu`
   (`windres` stub in /tmp/zig-shim required).
+- **Daemon tests**: `cargo test --workspace --no-fail-fast` — the
+  required `rust` CI job gates merges on it (fmt/clippy stay
+  advisory until their warning backlog is cleaned).
 - **Daemon**: `cargo build --release -p agentcontrol-daemon` (build
   only). **Forbidden to touch the live daemon**: no
   restart/stop/redeploy by an agent (`systemctl`, `supervisorctl`,

@@ -1,0 +1,122 @@
+name: test
+
+# Workflow qualité séparé des builds lourds (build.yml) : tests Rust,
+# tests client (node/sh/python sandbox + puppeteer mocké), audit des
+# dépendances. Même règle « skip si draft » que build.yml — les jobs ne
+# tournent qu'au passage ready (`ready_for_review` figure dans les
+# types de pull_request ci-dessous).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main, next_release]
+  workflow_dispatch:
+
+# Moindre privilège : lecture du dépôt uniquement (l'audit cargo
+# n'écrit rien ; le token sert à rustsec/audit-check pour l'API advisories).
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -----------------------------------------------------------------
+  # Tests Rust du workspace racine (crates/* — client/src-tauri a son
+  # propre workspace et des deps système, il reste à build.yml).
+  # `cargo test` est le seul check bloquant pour l'instant : fmt et
+  # clippy ont un backlog d'avertissements pré-existants → advisory
+  # (continue-on-error) jusqu'à la PR de nettoyage, puis -D/-W strict.
+  # -----------------------------------------------------------------
+  rust:
+    if: github.event.pull_request.draft != true
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: "clippy, rustfmt"
+      - uses: Swatinem/rust-cache@v2
+      # Advisory : ~110 diffs rustfmt pré-existants — le jour où la base
+      # est propre, retirer continue-on-error pour rendre le check bloquant.
+      - name: cargo fmt (advisory)
+        continue-on-error: true
+        run: cargo fmt --all --check
+      - name: cargo test
+        run: cargo test --workspace --no-fail-fast
+      # Advisory : backlog de warnings clippy pré-existants — même
+      # traitement que fmt.
+      - name: cargo clippy (advisory)
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # -----------------------------------------------------------------
+  # Tests client : tout ce qui tourne sans vrai démon.
+  #   - *.mjs « node pur » (imports .ts via type stripping, Node ≥ 22.18)
+  #   - pair-sh-test.sh (ssh-keygen + flock — présents sur le runner)
+  #   - ensure-daemon-e2e.py (PATH/HOME factices, jamais de vrai démon)
+  #   - smoke puppeteer (vite preview + mock tauri, chrome headless)
+  # Les *-e2e.py bootant un vrai binaire démon et les *-e2e.mjs / shots
+  # restent à ajouter une fois fiabilisés — cf. liste d'exclusion dans
+  # le step puppeteer.
+  # -----------------------------------------------------------------
+  js:
+    if: github.event.pull_request.draft != true
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    env:
+      # Chrome préinstallé sur les runners ubuntu (puppeteer-core n'a
+      # pas de navigateur embarqué — les tests lisent ces variables,
+      # défaut /usr/bin/chromium).
+      CHROMIUM: /usr/bin/google-chrome
+      CHROME_BIN: /usr/bin/google-chrome
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+        working-directory: client
+      - name: Tests sans démon (node + sh + python sandbox)
+        working-directory: client
+        run: |
+          node tests/cmpver-test.mjs
+          node tests/pair-parse-test.mjs
+          sh tests/pair-sh-test.sh
+          python3 tests/ensure-daemon-e2e.py
+      - name: Build client (vite preview des tests puppeteer)
+        working-directory: client
+        run: npm run build
+      # Seuls les smoke verts à l'introduction du workflow sont
+      # exécutés — exclus (échecs pré-existants à investiguer, pas des
+      # erreurs d'environnement) : conn-view-smoke (H3), grptree-smoke,
+      # multi-inst-smoke, sounds-smoke ; les *-e2e.mjs (mockés mais non
+      # audités) et les *-shots.mjs / android-audit.mjs (outils, pas des
+      # pass/fail) restent hors CI pour l'instant.
+      - name: Smoke puppeteer (chrome headless + mock tauri)
+        working-directory: client
+        run: |
+          for t in tests/att-dnd-smoke.mjs tests/backlog-metrics-smoke.mjs tests/input-expand-test.mjs; do
+            echo "=== $t"
+            node "$t"
+          done
+
+  # -----------------------------------------------------------------
+  # Audit des dépendances : advisories Rust (Cargo.lock) + npm
+  # (client/package-lock.json, prod uniquement, sévérité high+).
+  # -----------------------------------------------------------------
+  audit:
+    if: github.event.pull_request.draft != true
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm ci && npm audit --omit=dev --audit-level=high
+        working-directory: client
