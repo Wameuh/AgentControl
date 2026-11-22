@@ -78,6 +78,7 @@ export const en = {
   host_ph: "user@server.local or 127.0.0.1:7331", port_label: "Remote daemon port",
   ssh_args_label: "SSH args", ssh_args_ph: "-i ~/.ssh/key -p 22", logs: "Logs",
   tcp_token_label: "Daemon token", tcp_token_ph: "(daemon.token — leave blank for older daemons)",
+  tcp_loop_warn: "Not a loopback address — direct TCP is unencrypted and the remote daemon only accepts it with allow_non_loopback_tcp = true. Prefer SSH.",
   log_level: "Minimum level",
   ssh_native_label: "Native SSH (in-app key, russh)", ssh_port_label: "SSH port",
   user_label: "User", user_ph: "(or user@host)", password_label: "Password",

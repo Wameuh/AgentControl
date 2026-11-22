@@ -81,6 +81,7 @@ export const es: Record<Key, string> = {
   host_ph: "usuario@servidor.local o 127.0.0.1:7331", port_label: "Puerto del daemon remoto",
   ssh_args_label: "Args SSH", ssh_args_ph: "-i ~/.ssh/key -p 22", logs: "Logs",
   tcp_token_label: "Token del daemon", tcp_token_ph: "(daemon.token — vacío para daemons antiguos)",
+  tcp_loop_warn: "La dirección no es loopback — el TCP directo no está cifrado y el daemon remoto solo lo acepta con allow_non_loopback_tcp = true. Prefiera SSH.",
   log_level: "Nivel mínimo",
   ssh_native_label: "SSH nativo (clave en la app, russh)", ssh_port_label: "Puerto SSH",
   user_label: "Usuario", user_ph: "(o usuario@host)", password_label: "Contraseña",

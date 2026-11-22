@@ -591,7 +591,9 @@ mode    = "agent"   # empty = global `mode`
    proto+daemon PR (client↔daemon incompat = auto-update).
 3. **Security**: the daemon binds loopback only — unix socket 0600 and
    both `bind_http`/`bind_tcp` enforced loopback at startup (a daemon
-   refusing to start on a non-loopback address) — component RPC
+   refusing to start on a non-loopback address — `bind_tcp` alone has an
+   explicit `allow_non_loopback_tcp` escape, warned at every boot with
+   TCP conns still authenticated by `daemon.token`) — component RPC
    trust amounts to "whoever talks to the socket drives the agents"
    (`NewSession` can already spawn processes; `ComponentInstall` only
    runs **embedded declarative recipes**, never arbitrary shell sent by
