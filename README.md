@@ -257,7 +257,7 @@ A few concrete setups — every bullet is something you can do today:
 - **Search and replay everything**: the daemon journals every event, so
   history is never lost.
 - **Tune the feel**: dark & light themes, accent colors, animated
-  background, sound alerts, English or French UI.
+  background, sound alerts, UI in English, French, German or Spanish.
 - **Stay up to date effortlessly**: the desktop app updates itself in
   place, upgrades the daemon on your server over SSH, and an opt-in
   channel serves release candidates.
