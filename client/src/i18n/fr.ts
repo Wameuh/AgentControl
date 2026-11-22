@@ -79,6 +79,7 @@ export const fr: Record<Key, string> = {
   host_ph: "user@serveur.local ou 127.0.0.1:7331", port_label: "Port démon distant",
   ssh_args_label: "Args SSH", ssh_args_ph: "-i ~/.ssh/key -p 22", logs: "Logs",
   tcp_token_label: "Jeton du démon", tcp_token_ph: "(daemon.token — vide pour les anciens démons)",
+  tcp_loop_warn: "Adresse hors loopback — le TCP direct n'est pas chiffré et le démon distant ne l'accepte qu'avec allow_non_loopback_tcp = true. Préférez SSH.",
   log_level: "Niveau minimum",
   ssh_native_label: "SSH natif (clé dans l'app, russh)", ssh_port_label: "Port SSH",
   user_label: "Utilisateur", user_ph: "(ou user@hôte)", password_label: "Mot de passe",

@@ -36,6 +36,25 @@ const SELF_STEPS = ["send", "restart"];
 const CONNECT_FAIL_RE =
   /^connect-failed:(transport|daemon-absent|daemon-unresponsive|auth):([\s\S]*)$/;
 
+/// « addr » d'une conn TCP directe en loopback ? Mêmes critères que
+/// check_loopback côté démon : 127.0.0.0/8, ::1 ou localhost (brackets
+/// IPv6 et « host:port » acceptés ; pas de résolution DNS ici).
+function isLoopbackAddr(addr: string): boolean {
+  let h = addr.trim();
+  if (h.startsWith("[")) {
+    const end = h.indexOf("]");
+    if (end > 0) h = h.slice(1, end);
+  } else if ((h.match(/:/g) ?? []).length === 1) {
+    h = h.slice(0, h.indexOf(":"));
+  }
+  const v4 = h.split(".");
+  return (
+    h === "localhost" ||
+    h === "::1" ||
+    (v4.length === 4 && v4.every((p) => /^\d{1,3}$/.test(p)) && v4[0] === "127")
+  );
+}
+
 /** Signature reconnaissable dans le détail d'un échec → clé i18n du
  *  message (cause + hint d'action) ; repli = libellé générique, le détail
  *  brut suit toujours le message. */
@@ -550,7 +569,18 @@ export class ConnView {
     // Jeton daemon.token : TCP direct seulement (SSH le relit sur le
     // canal authentifié — rien à saisir ni à persister pour lui).
     ($("c-token-wrap") as HTMLElement).style.display = kind === "tcp" ? "" : "none";
+    this.syncTcpWarn();
     if (ssh && nat) void this.showPubkey();
+  }
+
+  /** TCP direct vers une adresse non-loopback : avertir — transport non
+   *  chiffré, et le démon distant refuse le bind sans
+   *  `allow_non_loopback_tcp = true`. Consultatif (le démon tranche via
+   *  check_loopback), n'empêche pas la connexion. */
+  private syncTcpWarn() {
+    const kind = ($("c-kind") as HTMLSelectElement).value;
+    const addr = ($("c-host") as HTMLInputElement).value.trim();
+    $("c-tcp-warn").hidden = kind !== "tcp" || addr === "" || isLoopbackAddr(addr);
   }
 
   private async showPubkey() {
@@ -865,6 +895,7 @@ export class ConnView {
     };
     ($("c-kind") as HTMLSelectElement).onchange = () => this.syncSshFields();
     ($("c-native") as HTMLInputElement).onchange = () => this.syncSshFields();
+    ($("c-host") as HTMLInputElement).oninput = () => this.syncTcpWarn();
     $("cv-form-reset").onclick = () => this.resetForm();
     bindLogView($("cv-logs") as HTMLDetailsElement);
     initPairing();

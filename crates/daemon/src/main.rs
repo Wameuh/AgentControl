@@ -25,6 +25,12 @@ use std::path::PathBuf;
 struct Config {
     #[serde(default = "default_tcp")]
     bind_tcp: String,
+    /// Échappatoire explicite au garde loopback de `bind_tcp` : à true le
+    /// bind est accepté hors loopback (conteneur, réseau privé isolé) et
+    /// un warn est journalisé à chaque démarrage — l'auth `daemon.token`
+    /// reste exigée sur chaque connexion TCP.
+    #[serde(default)]
+    allow_non_loopback_tcp: bool,
     /// Interface web servie par le démon (AC#14) — loopback uniquement,
     /// accès distant via `ssh -L`. Absent = désactivé.
     #[serde(default)]
@@ -91,6 +97,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             bind_tcp: default_tcp(),
+            allow_non_loopback_tcp: false,
             bind_http: None,
             web_dir: None,
             auto_resume: true,
@@ -136,17 +143,28 @@ fn parse_cli() -> Result<Cli> {
 
 /// Les listeners du démon ne doivent JAMAIS exposer le démon sur le
 /// réseau : loopback strict, l'accès distant passe par le tunnel SSH
-/// (`ssh -L`). `name` = la clé de config fautive, pour un message qui
-/// indique exactement quoi corriger.
-fn check_loopback(name: &str, addr: &str) -> Result<()> {
-    let host = addr
-        .rsplit_once(':')
-        .map(|(h, _)| h.trim_matches(['[', ']']))
-        .unwrap_or_default();
+/// (`ssh -L`). `name` = la clé de config fautive, `escape` = la clé
+/// d'échappatoire éventuelle citée par l'erreur (`bind_tcp` en a une,
+/// la web UI non) — le message indique exactement quoi corriger.
+/// L'adresse est résolue comme le fera le bind (littéral IP ou nom —
+/// `localhost` reste admis) et n'est acceptée que si TOUTES les
+/// SocketAddr résolues sont loopback (127.0.0.0/8 ou ::1) : un
+/// enregistrement mixte loopback+externe exposerait le port.
+async fn check_loopback(name: &str, addr: &str, escape: Option<&str>) -> Result<()> {
+    let loopback = match tokio::net::lookup_host(addr).await {
+        Ok(it) => {
+            let addrs: Vec<_> = it.collect();
+            !addrs.is_empty() && addrs.iter().all(|sa| sa.ip().is_loopback())
+        }
+        Err(_) => false,
+    };
     anyhow::ensure!(
-        matches!(host, "127.0.0.1" | "localhost" | "::1"),
+        loopback,
         "{name} « {addr} » is not loopback — use 127.0.0.1 / ::1 \
-         (remote access goes through ssh -L, never network exposure)"
+         (remote access goes through `ssh -L`, never network exposure){}",
+        escape
+            .map(|k| format!(", or set `{k} = true` to expose anyway"))
+            .unwrap_or_default()
     );
     Ok(())
 }
@@ -428,8 +446,18 @@ async fn serve(root: &std::path::Path) -> Result<()> {
 
     // TCP loopback (pour tunnel SSH `ssh -L`) — même garde que
     // bind_http : un bind_tcp hors loopback exposerait le démon sur le
-    // réseau sans authentification.
-    check_loopback("bind_tcp", &cfg.bind_tcp)?;
+    // réseau. `allow_non_loopback_tcp` est l'échappatoire explicite
+    // (conteneur, réseau privé isolé), tracée par un warn à chaque
+    // démarrage — l'auth daemon.token reste exigée sur chaque connexion.
+    if cfg.allow_non_loopback_tcp {
+        tracing::warn!(
+            "allow_non_loopback_tcp — bind_tcp « {} » is exposed outside \
+             loopback; every TCP connection still requires daemon.token",
+            cfg.bind_tcp
+        );
+    } else {
+        check_loopback("bind_tcp", &cfg.bind_tcp, Some("allow_non_loopback_tcp")).await?;
+    }
     let tcp_listener = tokio::net::TcpListener::bind(&cfg.bind_tcp)
         .await
         .with_context(|| format!("bind {}", cfg.bind_tcp))?;
@@ -438,7 +466,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // web.token. Une panne/erreur de ce listener ne doit pas abattre le
     // démon → tâche séparée, hors du select de shutdown.
     if let Some(addr) = &bind_http {
-        check_loopback("bind_http", addr)?;
+        check_loopback("bind_http", addr, None).await?;
         let token = gen_web_token(root)?;
         let assets = resolve_assets(web_dir_cfg.as_deref(), root);
         match &assets {
@@ -620,6 +648,29 @@ async fn shutdown_signal() -> &'static str {
             tracing::warn!("SIGTERM handler unavailable: {e}");
             let _ = tokio::signal::ctrl_c().await;
             "SIGINT"
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Le garde n'admet que du loopback résolu — 127.0.0.0/8 entier,
+    // ::1 et les noms (`localhost`) — et refuse jokers et adresses
+    // externes, SocketAddr par SocketAddr.
+    #[tokio::test]
+    async fn loopback_only() {
+        for a in [
+            "127.0.0.1:7331",
+            "127.0.0.2:7331",
+            "[::1]:7331",
+            "localhost:7331",
+        ] {
+            assert!(check_loopback("t", a, None).await.is_ok(), "{a} should pass");
+        }
+        for a in ["0.0.0.0:7331", "192.168.1.10:7331", "[::]:7331"] {
+            assert!(check_loopback("t", a, None).await.is_err(), "{a} should fail");
         }
     }
 }

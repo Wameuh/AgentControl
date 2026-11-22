@@ -81,6 +81,7 @@ export const de: Record<Key, string> = {
   host_ph: "user@server.local oder 127.0.0.1:7331", port_label: "Port des entfernten Daemons",
   ssh_args_label: "SSH-Args", ssh_args_ph: "-i ~/.ssh/key -p 22", logs: "Logs",
   tcp_token_label: "Daemon-Token", tcp_token_ph: "(daemon.token — leer für ältere Daemons)",
+  tcp_loop_warn: "Keine Loopback-Adresse — direktes TCP ist unverschlüsselt und der entfernte Daemon akzeptiert es nur mit allow_non_loopback_tcp = true. SSH bevorzugen.",
   log_level: "Mindestlevel",
   ssh_native_label: "Natives SSH (In-App-Schlüssel, russh)", ssh_port_label: "SSH-Port",
   user_label: "Benutzer", user_ph: "(oder user@host)", password_label: "Passwort",
