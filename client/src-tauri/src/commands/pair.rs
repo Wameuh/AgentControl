@@ -115,17 +115,17 @@ async fn exec_via_cfg(cfg: &Value, script: &str) -> Result<(i32, String, String)
             host_raw,
             cfg.get("user").and_then(Value::as_str),
         )?;
+        let port = cfg.get("port").and_then(Value::as_u64).unwrap_or(22) as u16;
+        let host_keys: Option<Vec<String>> = cfg
+            .get("host_keys")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            });
         let opts = client_core::ssh_native::Opts {
-            expected_hk: cfg
-                .get("host_keys")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect::<HashSet<_>>()
-                })
-                .filter(|s| !s.is_empty())
-                .map(Arc::new),
+            expected_hk: effective_hk(host_keys, &host, port).await.map(Arc::new),
             ..Default::default()
         };
         let key_path = cfg
@@ -134,7 +134,7 @@ async fn exec_via_cfg(cfg: &Value, script: &str) -> Result<(i32, String, String)
             .map(|k| expand_home(k));
         return client_core::ssh_native::ssh_exec(
             &host,
-            cfg.get("port").and_then(Value::as_u64).unwrap_or(22) as u16,
+            port,
             &user,
             cfg.get("password").and_then(Value::as_str),
             key_path.as_deref(),
@@ -509,13 +509,43 @@ fn check_nonce(n: &str) -> Result<(), String> {
     }
 }
 
-/// Empreintes des host keys connues du desktop pour `host`
-/// (`ssh-keygen -l -F <host>` — couvre les entrées hashées) : le
+/// Empreintes des host keys connues du desktop pour `host:port`
+/// (`ssh-keygen -l -F <nom>` — couvre les entrées hashées) : le
 /// cross-check contre les fps collectées serveur est best-effort.
-async fn known_hosts_fps(host: String) -> HashSet<String> {
-    tokio::task::spawn_blocking(move || known_hosts_fps_sync(&host))
+/// `nom` = `host` si port 22, `[host]:port` sinon — le format que
+/// known_hosts utilise réellement pour les ports non standard.
+pub(crate) async fn known_hosts_fps(host: &str, port: u16) -> HashSet<String> {
+    // Pas d'OpenSSH embarqué sous Android — le spawn échouerait à
+    // chaque connexion native (coût silencieux pour rien).
+    if cfg!(target_os = "android") {
+        return HashSet::new();
+    }
+    let nom = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    };
+    tokio::task::spawn_blocking(move || known_hosts_fps_sync(&nom))
         .await
         .unwrap_or_default()
+}
+
+/// Épinglage effectif d'une connexion native : les `host_keys` du
+/// profil, sinon — desktop — les empreintes déjà présentes dans
+/// ~/.ssh/known_hosts (l'utilisateur les a validées hors de l'app —
+/// TOFU silencieux, sans dialogue). `None` = encore inconnue → le
+/// transport refusera en `hostkey-unknown:<fp>` (dialogue côté UI).
+pub(crate) async fn effective_hk(
+    host_keys: Option<Vec<String>>,
+    host: &str,
+    port: u16,
+) -> Option<HashSet<String>> {
+    let pinned: HashSet<String> = host_keys.unwrap_or_default().into_iter().collect();
+    if !pinned.is_empty() {
+        return Some(pinned);
+    }
+    let kh = known_hosts_fps(host, port).await;
+    (!kh.is_empty()).then_some(kh)
 }
 
 fn known_hosts_fps_sync(host: &str) -> HashSet<String> {
@@ -616,7 +646,7 @@ pub(crate) async fn pair_begin(
     check_nonce(&nonce)?;
     // Cross-check best-effort : les fps lues côté serveur vs le
     // known_hosts du desktop — divergence = avertissement, pas un refus.
-    let known = known_hosts_fps(host.clone()).await;
+    let known = known_hosts_fps(&host, port).await;
     let warn = if !known.is_empty() && !hk.iter().any(|f| known.contains(f)) {
         Some("les empreintes du serveur diffèrent de votre known_hosts — vérifiez hors-bande".to_string())
     } else {

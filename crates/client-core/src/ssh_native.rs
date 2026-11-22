@@ -164,10 +164,16 @@ fn write_secret(path: &Path, data: &[u8]) -> std::io::Result<()> {
 pub struct Opts {
     /// Empreintes `SHA256:…` épinglées — la clé présentée par le
     /// serveur doit en faire partie (certificats refusés). `None` =
-    /// accept-all historique (log seul). Un set vide est traité
-    /// comme `None` : jamais produit par le pairing, et refuser tout
-    /// serait un échec muet.
+    /// clé inconnue : refusée (TOFU — l'erreur `hostkey-unknown:<fp>`
+    /// déclenche la confirmation côté UI, qui épingle ensuite). Un
+    /// set vide est traité comme `None` : jamais produit par le
+    /// pairing, et refuser tout serait un échec muet.
     pub expected_hk: Option<Arc<HashSet<String>>>,
+    /// Porte de sortie pour les tests et outils non interactifs :
+    /// accepte une host key inconnue quand `expected_hk` est absent
+    /// (comportement accept-all historique). L'UI ne le pose jamais —
+    /// l'utilisateur confirme l'empreinte, qui est épinglée.
+    pub accept_unknown_hostkey: bool,
     /// Clé privée en mémoire (K jetable du pairing — jamais écrite
     /// sur disque). Prioritaire sur `key_path` quand présente.
     pub key: Option<Arc<russh::keys::PrivateKey>>,
@@ -185,6 +191,10 @@ struct Handler {
     /// pas remonter la clé vue). Partagée Arc<Mutex> : le Handler
     /// est consommé par client::connect.
     seen_fp: Arc<std::sync::Mutex<Option<String>>>,
+    /// `Opts.accept_unknown_hostkey` recopié : sans épinglage, la clé
+    /// inconnue n'est acceptée que si l'appelant a demandé le repli
+    /// non interactif.
+    accept_unknown: bool,
     /// Raison de déconnexion capturée par `disconnected` — lue au
     /// post-mortem par le guard pour classer la mort du transport.
     disc: Arc<std::sync::Mutex<Option<String>>>,
@@ -218,31 +228,47 @@ impl client::Handler for Handler {
                         );
                         Ok(ok)
                     }
-                    // accept-all historique : la clé vue est loggée
-                    // (TOFU implicite v1) — les profils appairés ont
-                    // expected_hk et sortent de ce repli.
+                    // Pas d'épinglage : TOFU — la clé inconnue est
+                    // refusée (connect_auth la remonte en
+                    // `hostkey-unknown:<fp>` pour confirmation UI),
+                    // sauf repli non interactif demandé explicitement.
                     None => {
-                        log(Level::Info, format!("ssh host key: {fp}"));
-                        Ok(true)
+                        log(
+                            if self.accept_unknown {
+                                Level::Info
+                            } else {
+                                Level::Warn
+                            },
+                            format!(
+                                "ssh host key: {fp}{}",
+                                if self.accept_unknown {
+                                    ""
+                                } else {
+                                    " — REFUSED (unknown, unpinned)"
+                                }
+                            ),
+                        );
+                        Ok(self.accept_unknown)
                     }
                 }
             }
             PublicKeyOrCertificate::Certificate(_) => {
                 // Un profil épinglé n'attend que des host keys nues :
-                // un certificat ne peut pas correspondre à `hk`.
+                // un certificat ne peut pas correspondre à `hk`. Sans
+                // épinglage il suit le même sort qu'une clé inconnue —
+                // refusé sauf repli explicite (seen_fp reste vide : un
+                // fp de cert ne se vérifie pas comme une clé nue →
+                // l'erreur connect reste générique, le log dit le refus).
                 let pinned = self.expected_hk.is_some();
+                let refused = pinned || !self.accept_unknown;
                 log(
-                    if pinned { Level::Warn } else { Level::Info },
+                    if refused { Level::Warn } else { Level::Info },
                     format!(
                         "ssh host key: certificate{}",
-                        if pinned {
-                            " — refused (pinning active)"
-                        } else {
-                            ""
-                        }
+                        if refused { " — refused" } else { "" }
                     ),
                 );
-                Ok(!pinned)
+                Ok(!pinned && self.accept_unknown)
             }
         }
     }
@@ -330,6 +356,7 @@ async fn connect_auth(
     let handler = Handler {
         expected_hk: opts.expected_hk.clone().filter(|s| !s.is_empty()),
         seen_fp: seen_fp.clone(),
+        accept_unknown: opts.accept_unknown_hostkey,
         disc: opts.disc.clone().unwrap_or_default(),
     };
     let mut h = match tokio::time::timeout(
@@ -340,16 +367,22 @@ async fn connect_auth(
     {
         Ok(Ok(h)) => h,
         Ok(Err(e)) => {
-            // Pinning actif + clé vue hors liste → erreur dédiée : le
-            // frontend propose la re-confirmation explicite (TOFU),
-            // jamais un accept silencieux.
+            // Clé vue au handshake refusée par check_server_key →
+            // erreur dédiée : épinglage hors liste = `hostkey-mismatch`
+            // (re-confirmation), aucun épinglage = `hostkey-unknown`
+            // (première connexion — TOFU). Le frontend confirme puis
+            // épingle l'empreinte, jamais un accept silencieux.
             let fp = seen_fp.lock().ok().and_then(|g| g.clone());
-            if let (Some(hk), Some(fp)) = (&opts.expected_hk, fp) {
-                if !hk.is_empty() && !hk.contains(&fp) {
-                    bail!("hostkey-mismatch:{fp}");
+            let pinned = opts.expected_hk.as_ref().filter(|s| !s.is_empty());
+            match (pinned, fp) {
+                (Some(hk), Some(fp)) if !hk.contains(&fp) => {
+                    bail!("hostkey-mismatch:{fp}")
                 }
+                (None, Some(fp)) if !opts.accept_unknown_hostkey => {
+                    bail!("hostkey-unknown:{fp}")
+                }
+                _ => return Err(e).context("ssh connect"),
             }
-            return Err(e).context("ssh connect");
         }
         Err(_) => bail!("ssh connect timeout"),
     };
@@ -546,4 +579,113 @@ pub async fn pair_attempt(
         bail!("inconsistent pair-ok — the installed key is not ours");
     }
     Ok(fp.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use russh::client::Handler as _;
+    use russh::server;
+
+    // Serveur SSH in-process : handshake réel (la négociation de la
+    // host key est la seule chose qui compte pour le TOFU) + auth
+    // acceptée pour vérifier qu'une connexion épinglée/acceptée va
+    // jusqu'au bout.
+    struct TestServer;
+    impl server::Handler for TestServer {
+        type Error = russh::Error;
+        async fn auth_publickey(
+            &mut self,
+            _user: &str,
+            _key: &ssh_key::PublicKey,
+        ) -> Result<server::Auth, Self::Error> {
+            Ok(server::Auth::Accept)
+        }
+        async fn auth_password(
+            &mut self,
+            _user: &str,
+            _password: &str,
+        ) -> Result<server::Auth, Self::Error> {
+            Ok(server::Auth::Accept)
+        }
+    }
+
+    /// (port, empreinte SHA256 de la host key du serveur).
+    async fn fake_server() -> (u16, String) {
+        let key = gen_ed25519().expect("server key");
+        let fp = key
+            .public_key()
+            .fingerprint(russh::keys::HashAlg::Sha256)
+            .to_string();
+        let mut cfg = server::Config::default();
+        cfg.keys.push(key);
+        let cfg = Arc::new(cfg);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((s, _)) = listener.accept().await {
+                let cfg = cfg.clone();
+                tokio::spawn(async move {
+                    let _ = server::run_stream(cfg, s, TestServer).await;
+                });
+            }
+        });
+        (port, fp)
+    }
+
+    /// Handler sans épinglage : la clé inconnue est refusée, sauf repli
+    /// non interactif — et l'empreinte vue est mémorisée pour
+    /// `hostkey-unknown`.
+    #[tokio::test]
+    async fn handler_tofu() {
+        let key = gen_ed25519().expect("key").public_key().clone();
+        let koc = PublicKeyOrCertificate::PublicKey {
+            key: key.clone(),
+            hash_alg: None,
+        };
+        let fp = key.fingerprint(russh::keys::HashAlg::Sha256).to_string();
+        let mk = |accept: bool| Handler {
+            expected_hk: None,
+            seen_fp: Arc::new(std::sync::Mutex::new(None)),
+            accept_unknown: accept,
+            disc: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let mut h = mk(false);
+        assert!(!h.check_server_key(&koc).await.unwrap());
+        assert_eq!(*h.seen_fp.lock().unwrap(), Some(fp));
+        let mut h = mk(true);
+        assert!(h.check_server_key(&koc).await.unwrap());
+    }
+
+    /// Sans épinglage ni repli : connect_auth refuse et l'erreur typée
+    /// `hostkey-unknown:<fp>` porte l'empreinte réelle du serveur ; le
+    /// repli `accept_unknown_hostkey` passe, l'épinglage exact aussi.
+    #[tokio::test]
+    async fn connect_unknown_hostkey() {
+        let (port, fp) = fake_server().await;
+        let r = connect_auth("127.0.0.1", port, "u", None, None, &Opts::default()).await;
+        let e = match r {
+            Err(e) => format!("{:#}", e),
+            Ok(_) => panic!("connexion inattendue sans épinglage"),
+        };
+        assert_eq!(e, format!("hostkey-unknown:{fp}"));
+
+        let opts = Opts {
+            accept_unknown_hostkey: true,
+            ..Default::default()
+        };
+        connect_auth("127.0.0.1", port, "u", Some("pw"), None, &opts)
+            .await
+            .expect("accept_unknown doit connecter");
+
+        let opts = Opts {
+            expected_hk: Some(Arc::new(HashSet::from([fp]))),
+            ..Default::default()
+        };
+        connect_auth("127.0.0.1", port, "u", Some("pw"), None, &opts)
+            .await
+            .expect("épinglage exact doit connecter");
+    }
 }

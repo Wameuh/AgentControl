@@ -29,6 +29,8 @@ async fn main() -> anyhow::Result<()> {
         password: None,
         key_path: None,
         expected_hk: None,
+        // Outil de diagnostic non interactif — pas de dialogue TOFU.
+        accept_unknown_hostkey: true,
     })
     .await?;
     let r = c.call(ReqKind::DaemonStatus).await?;
@@ -42,7 +44,10 @@ async fn main() -> anyhow::Result<()> {
         None,
         "echo native-exec-ok && uname -m && echo warn >&2",
         Some(&mut |l: &str| eprintln!("[stderr] {l}")),
-        &ssh_native::Opts::default(),
+        &ssh_native::Opts {
+            accept_unknown_hostkey: true,
+            ..Default::default()
+        },
     )
     .await?;
     println!("exec[{code}]: {out} (stderr: {err})");

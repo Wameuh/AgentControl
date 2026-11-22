@@ -63,6 +63,8 @@ async fn main() -> Result<()> {
                 password: None,
                 key_path,
                 expected_hk: None,
+                // Sonde non interactive — pas de dialogue TOFU.
+                accept_unknown_hostkey: true,
             }
         }
         "tcp" | "close" => Transport::Tcp {
