@@ -35,7 +35,7 @@ const PATCH = `(() => {
   const inv = window.__TAURI_INTERNALS__.invoke;
   const keyOf = (c) => !c ? "" : c.kind === "ssh" ? \`\${c.native ? "ssh-native" : "ssh"}:\${c.host}:\${c.port ?? 22}\`
     : c.kind === "tcp" ? \`tcp:\${c.addr}\` : c.kind === "web" ? "web" : "local";
-  window.__saved = window.__saved ?? []; window.__calls = { save: [], remove: [], connect: [] };
+  window.__saved = window.__saved ?? []; window.__calls = { save: [], remove: [], connect: [], pair_begin: [] };
   window.__TAURI_INTERNALS__.invoke = (cmd, args) => {
     if (cmd === "saved_connections") return Promise.resolve(window.__saved);
     if (cmd === "cli_conn") return Promise.resolve(null);
@@ -56,6 +56,14 @@ const PATCH = `(() => {
       if (window.__connectReject) {
         const e = window.__connectReject;
         window.__connectReject = null;
+        return Promise.reject(e);
+      }
+    }
+    if (cmd === "pair_begin") {
+      window.__calls.pair_begin.push(args);
+      if (window.__pairBeginReject) {
+        const e = window.__pairBeginReject;
+        window.__pairBeginReject = null;
         return Promise.reject(e);
       }
     }
@@ -244,6 +252,33 @@ ok(callsK.save.some((c) => JSON.stringify(c?.host_keys) === '["SHA256:abc"]'),
   "K4 empreinte persistée via save_connection");
 ok(await pK.evaluate(() => !document.getElementById("dlg-pair").open),
   "K5 dialogue refermé après confirmation");
+
+// ---------- L : TOFU pair_begin — hôte frais → dialogue → pin + retry ----------
+// Même besoin côté appairage : l'install exec échoue en hostkey-unknown
+// → le dialogue confirme, le profil est épinglé, l'appairage repart.
+const pL = await initPage(SAVED_K, "#desktop",
+  `localStorage.setItem("ac-autoconnect", "0");
+   window.__pairBeginReject = "hostkey-unknown:SHA256:pair42";`);
+await sleep(300);
+await pL.evaluate(() => document.querySelector("#cv-saved .cv-qr").click());
+await sleep(400);
+await pL.evaluate(() => document.getElementById("qr-gen").click());
+await sleep(700);
+ok(await pL.evaluate(() => {
+  const d = document.getElementById("dlg-pair");
+  return d.open &&
+    document.getElementById("pair-msg").textContent.includes("SHA256:pair42");
+}), "L1 pair_begin hostkey-unknown → dialogue TOFU sur la modale QR");
+await pL.evaluate(() => document.getElementById("pair-go").click());
+await sleep(1200);
+const callsL = await pL.evaluate(() => window.__calls);
+ok(callsL.pair_begin.length === 2, "L2 pair_begin réessayé après confirmation");
+ok(JSON.stringify(callsL.pair_begin[1]?.cfg?.host_keys) === '["SHA256:pair42"]',
+  "L3 retry pair_begin avec host_keys épinglé");
+ok(callsL.save.some((c) => JSON.stringify(c?.host_keys) === '["SHA256:pair42"]'),
+  "L4 empreinte persistée via save_connection");
+ok(await pL.evaluate(() => document.getElementById("dlg-pair").open === false),
+  "L5 dialogue TOFU refermé — appairage poursuivi");
 
 console.log(`\n${fails === 0 ? "SMOKE OK" : "SMOKE FAIL"} — ${fails} échec(s)`);
 await b.close();

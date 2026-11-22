@@ -296,6 +296,27 @@ async function beginPair(s: PairSession) {
     startCountdown(s);
     startPolling(s);
   } catch (e) {
+    // Hôte encore inconnu du profil (première connexion native — hôte
+    // frais absent du known_hosts) : même TOFU que le flux de connexion —
+    // confirmation explicite, épinglage persisté, puis l'install repart
+    // épinglée. Sans ça l'appairage d'un serveur jamais joint échouerait.
+    const u = /hostkey-unknown:(\S+)/.exec(String(e));
+    if (u) {
+      const c = s.cfg;
+      const where =
+        `${c.user ? c.user + "@" : ""}${c.host ?? host}:${c.port ?? 22}`;
+      const ok = await confirmPair(
+        t("hk_new_h"),
+        t("hk_new_msg", { where, fp: u[1] }),
+        t("hk_new_go"),
+      );
+      if (ok) {
+        c.host_keys = [u[1]];
+        await invoke("save_connection", { cfg: c }).catch(() => {});
+        await beginPair(s);
+        return;
+      }
+    }
     qrStatus(String(e), true);
   } finally {
     ($("qr-gen") as HTMLButtonElement).disabled = false;

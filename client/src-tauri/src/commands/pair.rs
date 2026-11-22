@@ -515,6 +515,11 @@ fn check_nonce(n: &str) -> Result<(), String> {
 /// `nom` = `host` si port 22, `[host]:port` sinon — le format que
 /// known_hosts utilise réellement pour les ports non standard.
 pub(crate) async fn known_hosts_fps(host: &str, port: u16) -> HashSet<String> {
+    // Pas d'OpenSSH embarqué sous Android — le spawn échouerait à
+    // chaque connexion native (coût silencieux pour rien).
+    if cfg!(target_os = "android") {
+        return HashSet::new();
+    }
     let nom = if port == 22 {
         host.to_string()
     } else {

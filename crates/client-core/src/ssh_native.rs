@@ -255,17 +255,17 @@ impl client::Handler for Handler {
             PublicKeyOrCertificate::Certificate(_) => {
                 // Un profil épinglé n'attend que des host keys nues :
                 // un certificat ne peut pas correspondre à `hk`. Sans
-                // épinglage il suit le même sort qu'une clé inconnue.
+                // épinglage il suit le même sort qu'une clé inconnue —
+                // refusé sauf repli explicite (seen_fp reste vide : un
+                // fp de cert ne se vérifie pas comme une clé nue →
+                // l'erreur connect reste générique, le log dit le refus).
                 let pinned = self.expected_hk.is_some();
+                let refused = pinned || !self.accept_unknown;
                 log(
-                    if pinned { Level::Warn } else { Level::Info },
+                    if refused { Level::Warn } else { Level::Info },
                     format!(
                         "ssh host key: certificate{}",
-                        if pinned {
-                            " — refused (pinning active)"
-                        } else {
-                            ""
-                        }
+                        if refused { " — refused" } else { "" }
                     ),
                 );
                 Ok(!pinned && self.accept_unknown)
