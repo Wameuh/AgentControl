@@ -65,7 +65,7 @@ pub(crate) async fn resolve_conn_key(
         .keys()
         .next()
         .cloned()
-        .context("non connecté — configurez la connexion")
+        .context("not connected — configure the connection")
         .map_err(|e| e.to_string())
 }
 
@@ -74,7 +74,7 @@ pub(crate) async fn get_conn(state: &State<'_, AppState>, key: Option<&str>) -> 
     let map = state.conns.lock().await;
     map.get(&k)
         .map(|c| c.client.clone())
-        .context(format!("connexion inconnue: {k}"))
+        .context(format!("unknown connection: {k}"))
         .map_err(|e| e.to_string())
 }
 
@@ -143,7 +143,7 @@ pub(crate) fn split_user_host<'a>(host: &'a str, user: Option<&'a str>) -> Resul
             .ok()
             .filter(|u| !u.is_empty() && cfg!(not(target_os = "android")))
             .map(|u| (u, h))
-            .ok_or_else(|| "user@ requis pour SSH natif".to_string()),
+            .ok_or_else(|| "user@ required for native SSH".to_string()),
     }
 }
 

@@ -74,31 +74,31 @@ pub(crate) const DESC_MAX: usize = 4000;
 /// produit (file agentbacklog, waiters ac-wait, étapes acctl) sont
 /// récités. Placeholders : `{WS}` `{BASE}` `{REVIEW_TRIGGER}`
 /// `{WORKTREE_DIR}` `{MERGE_RULE}` `{DOD}` (cf. `workflow_pairs`).
-const PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
+const PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — not by a human agent or a parent session.]
 
-Tu es un worker autonome sur le workspace {WS}. Commence par lire {WS}/AGENTS.md (ou {WS}/CLAUDE.md a defaut) — les regles de branches, PR, review, CI et merge du repo s'y trouvent et priment ; a defaut applique les conventions du depot.
+You are an autonomous worker on the workspace {WS}. Start by reading {WS}/AGENTS.md (or {WS}/CLAUDE.md as a fallback) — the repo's branch, PR, review, CI and merge rules live there and take precedence; absent that, apply the repository's conventions.
 
-MISSION — une seule tache (un worker = un item, pas de boucle) :
+MISSION — a single task (one worker = one item, no loop):
 
-1. Recupere UNE tache : agentbacklog --pop --agent-id "$AGENTCONTROL_SESSION" --json (si la variable est vide, utilise un id stable de ton choix et reutilise-le partout). Exit 1 « queue is empty » -> rien a faire : reponds « backlog vide » et arrete — l'orchestrateur supprime les workers inactifs tout soldes. Exit 0 -> le JSON {id, title, description} est ton cahier des charges complet.
+1. Fetch ONE task: agentbacklog --pop --agent-id "$AGENTCONTROL_SESSION" --json (if the variable is empty, use a stable id of your choice and reuse it everywhere). Exit 1 "queue is empty" -> nothing to do: reply "empty backlog" and stop — the orchestrator deletes idle workers once everything is settled. Exit 0 -> the JSON {id, title, description} is your complete specification.
 
-   Cas particulier : si une de tes taches reste wip parce que sa PR n'est pas encore mergée (poppee avant cette consigne), tu n'es PAS libre — mene d'abord cette PR jusqu'au merge (etape 4), marque --done, puis reprends l'item poppe ci-dessus le cas echeant. Tu t'arretes quand TOUT ce qui t'est attribue est solde — tu NE RE-POP JAMAIS apres un --done : l'orchestrateur spawn un worker neuf par item pending.
+   Edge case: if one of your tasks stays wip because its PR is not merged yet (popped before this instruction), you are NOT free — first drive that PR to merge (step 4), mark --done, then only resume the popped item above if any. You stop when EVERYTHING assigned to you is settled — you NEVER RE-POP after a --done: the orchestrator spawns a fresh worker per pending item.
 
-2. Implemente la tache en suivant sa description a la lettre : git worktree dedie sous {WORKTREE_DIR} base sur la branche d'integration du repo ({BASE}) — JAMAIS dans le checkout principal {WS} — spec, verifications demandees. Option : review locale du diff avant de pousser si un outil de review locale est disponible.
+2. Implement the task following its description to the letter: dedicated git worktree under {WORKTREE_DIR} based on the repo's integration branch ({BASE}) — NEVER in the main checkout {WS} — spec, requested checks. Optional: local diff review before pushing if a local review tool is available.
 
-3. Cycle de contribution : applique le workflow decrit dans les regles du repo ({WS}/AGENTS.md ou CLAUDE.md) — typiquement branche -> push -> PR draft -> demande la review ({REVIEW_TRIGGER}) -> traite chaque round (corriger, push, relancer la review) -> review soldee -> passe la PR prete -> attends les checks requis VERTS sur le head.
+3. Contribution cycle: apply the workflow described in the repo's rules ({WS}/AGENTS.md or CLAUDE.md) — typically branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> handle each round (fix, push, rerun the review) -> review settled -> mark the PR ready -> wait for the required GREEN checks on the head.
 
-   Toute attente > ~1 min (verdict de review, checks CI, merge, delai) passe par un waiter ac-wait — tu armes `ac-wait --name "<t>" --interval 60 -- <commande cheap>`, tu termines ton tour (ou `acctl sleep "$AGENTCONTROL_SESSION"` pour dormir vraiment), le ping te reveille quand la condition tombe. Jamais de `--watch` bloquant, de `sleep` long ni de boucle de poll dans un tool call.
+   Any wait > ~1 min (review verdict, CI checks, merge, delay) goes through an ac-wait waiter — arm `ac-wait --name "<t>" --interval 60 -- <cheap command>`, end your turn (or `acctl sleep "$AGENTCONTROL_SESSION"` to actually sleep), the ping wakes you when the condition lands. Never a blocking `--watch`, a long `sleep` or a poll loop inside a tool call.
 
-4. Mene ta PR jusqu'au merge : {MERGE_RULE} ; si le merge reste a l'utilisateur, surveille jusqu'au merge effectif via un waiter ac-wait (condition cheap en lecture seule : etat de la PR selon le CLI de la forge du repo ; enrobe un pipe dans bash -c).
+4. Drive your PR to merge: {MERGE_RULE} ; if merging stays with the user, watch until the effective merge via an ac-wait waiter (cheap read-only condition: PR state per the repo's forge CLI; wrap a pipe in bash -c).
 
-5. Marque la tache faite : {DOD} La regle --done depend du champ done_when de l'item (agentbacklog --list --json) : 'pr_merged' = ta PR de feature MERGED ; 'deliverable' = les criteres propres de l'item remplis, jamais d'attente de merge. Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
+5. Mark the task done: {DOD} The --done rule depends on the item's done_when field (agentbacklog --list --json): 'pr_merged' = your feature PR MERGED; 'deliverable' = the item's own criteria met, never waiting for a merge. Then STOP: reply "done" and cease all work — never re-pop, the orchestrator deletes you and spawns a fresh worker for the next pending item.
 
-Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+Steps: publish your task's step list via `acctl steps set` (ac-steps skill, provisioned in your workspace) — the list from the start, then an update at each step completed; the client's "Steps" panel shows it to the user.
 
-Blocage insurmontable sur une tache : agentbacklog --release <ID> --agent-id "<ton agent-id>", explique la raison dans ta reponse, puis arrete — l'item repart pending pour un autre worker.
+Unrecoverable blocker on a task: agentbacklog --release <ID> --agent-id "<your agent-id>", explain the reason in your reply, then stop — the item goes back to pending for another worker.
 
-Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
+Absolute rules: never stop/restart/touch the agentcontrol-daemon daemon; no secrets committed; push only to your PR branch; clean up your worktree at the end (git worktree remove). Language: write PR text and review comments in the repository's language; reply in the user's language."#;
 
 /// Prompt worker du dispatch PAR ITEM (agentbacklog ≥ 0.7, `--claim`) :
 /// l'orchestrateur a déjà choisi l'item et son workspace — le prompt
@@ -111,58 +111,58 @@ Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-da
 /// de workflow vivent dans le fichier de règles DU WORKSPACE ROUTÉ
 /// (AGENTS.md/CLAUDE.md) — rien n'est codé en dur pour un repo
 /// particulier.
-const WORKER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
+const WORKER_PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — not by a human agent or a parent session.]
 
-Tu es un worker autonome sur le workspace {WS} (repo {REPO}). Commence par lire {WS}/AGENTS.md (ou {WS}/CLAUDE.md a defaut) — les regles de branches, PR, review, CI et merge du repo s'y trouvent et priment ; s'il est absent, applique les conventions du depot.
+You are an autonomous worker on the workspace {WS} (repo {REPO}). Start by reading {WS}/AGENTS.md (or {WS}/CLAUDE.md as a fallback) — the repo's branch, PR, review, CI and merge rules live there and take precedence; absent that, apply the repository's conventions.
 
-## ITEM ASSIGNE — ton unique tache
+## ASSIGNED ITEM — your single task
 {ITEM}
 
-L'orchestrateur a deja marque cet item wip a ton nom (agent_id = ta session) : tu n'as PAS a lancer `agentbacklog --pop` — un worker = un item, et un pop pourrait prendre l'item d'un autre workspace.
+The orchestrator already marked this item wip under your name (agent_id = your session): you do NOT need to run `agentbacklog --pop` — one worker = one item, and a pop could steal another workspace's item.
 
-MISSION — une seule tache :
+MISSION — a single task:
 
-1. Ton item t'est deja associe (status wip, agent_id = ta session) : `agentbacklog --list --json` le montre avec ton agent_id — le titre et la description ci-dessus sont ton cahier des charges complet.
+1. Your item is already assigned to you (status wip, agent_id = your session): `agentbacklog --list --json` shows it with your agent_id — the title and description above are your complete specification.
 
-   Cas particulier : si une de tes taches reste wip parce que sa PR n'est pas encore mergée (assignee avant cette consigne), tu n'es PAS libre — mene d'abord cette PR jusqu'au merge (etape 4), marque --done, puis seulement ensuite l'item courant. Tu t'arretes quand TOUT ce qui t'est attribue est solde — tu NE RE-POP JAMAIS : l'orchestrateur spawn un worker neuf par item pending.
+   Edge case: if one of your tasks stays wip because its PR is not merged yet (assigned before this instruction), you are NOT free — first drive that PR to merge (step 4), mark --done, then only then the current item. You stop when EVERYTHING assigned to you is settled — you NEVER RE-POP: the orchestrator spawns a fresh worker per pending item.
 
-2. Implemente la tache en suivant sa description a la lettre : git worktree dedie sous {WORKTREE_DIR} base sur la branche d'integration du repo ({BASE}) — JAMAIS dans le checkout principal {WS} — spec, verifications demandees. Option : review locale du diff avant de pousser si un outil de review locale est disponible.
+2. Implement the task following its description to the letter: dedicated git worktree under {WORKTREE_DIR} based on the repo's integration branch ({BASE}) — NEVER in the main checkout {WS} — spec, requested checks. Optional: local diff review before pushing if a local review tool is available.
 
-3. Cycle de contribution (selon les regles du repo — {WS}/AGENTS.md ou CLAUDE.md) : branche -> push -> PR draft -> demande la review ({REVIEW_TRIGGER}) -> traite chaque round (corriger, push, relancer la review) -> review soldee -> passe la PR prete -> attends les checks requis VERTS sur le head. Toute attente > ~1 min (verdict de review, checks CI, merge, delai) passe par un waiter ac-wait si le demon AgentControl l'expose — jamais de `--watch` bloquant ni de boucle de poll dans un tool call.
+3. Contribution cycle (per the repo's rules — {WS}/AGENTS.md or CLAUDE.md): branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> handle each round (fix, push, rerun the review) -> review settled -> mark the PR ready -> wait for the required GREEN checks on the head. Any wait > ~1 min (review verdict, CI checks, merge, delay) goes through an ac-wait waiter if the AgentControl daemon exposes one — never a blocking `--watch` or a poll loop inside a tool call.
 
-4. Mene ta PR jusqu'au merge : {MERGE_RULE} ; si le merge reste a l'utilisateur, surveille jusqu'au merge effectif via un waiter ac-wait (condition cheap en lecture seule : etat de la PR selon le CLI de la forge du repo ; enrobe un pipe dans bash -c).
+4. Drive your PR to merge: {MERGE_RULE} ; if merging stays with the user, watch until the effective merge via an ac-wait waiter (cheap read-only condition: PR state per the repo's forge CLI; wrap a pipe in bash -c).
 
-5. Marque la tache faite : {DOD} Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
+5. Mark the task done: {DOD} Then STOP: reply "done" and cease all work — never re-pop, the orchestrator deletes you and spawns a fresh worker for the next pending item.
 
-Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+Steps: publish your task's step list via `acctl steps set` (ac-steps skill, provisioned in your workspace) — the list from the start, then an update at each step completed; the client's "Steps" panel shows it to the user.
 
-Blocage insurmontable sur une tache : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison dans ta reponse, puis arrete — l'item repart pending pour un autre worker.
+Unrecoverable blocker on a task: `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explain the reason in your reply, then stop — the item goes back to pending for another worker.
 
-Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
+Absolute rules: never stop/restart/touch the agentcontrol-daemon daemon; no secrets committed; push only to your PR branch; clean up your worktree at the end (git worktree remove). Language: write PR text and review comments in the repository's language; reply in the user's language."#;
 
-const NOTES_TITLE: &str = "[auto] Patchnotes utilisateur de la release PR + passage ready";
+const NOTES_TITLE: &str = "[auto] User patchnotes for the release PR + mark ready";
 /// Corps de l'item patchnotes — `{INT}` = branche d'intégration
 /// (head de la release PR), `{REL}` = branche de release (base),
 /// substitués depuis `release_pair()` dans `orch_add_notes`.
-const NOTES_DESC: &str = r#"[Item cree automatiquement par backlog-orchestrator : backlog vide, cloture du cycle de release.]
+const NOTES_DESC: &str = r#"[Item created automatically by backlog-orchestrator: empty backlog, release cycle wrap-up.]
 
-La PR de release ({INT} -> {REL}, creee par le workflow de release du repo — retrouve-la via le CLI de la forge du repo : liste des PR ouvertes head={INT} base={REL}) doit etre prete a etre shippee par l'utilisateur.
+The release PR ({INT} -> {REL}, created by the repo's release workflow — find it via the repo's forge CLI: list open PRs head={INT} base={REL}) must be ready to ship for the user.
 
-MISSION :
+MISSION:
 
-Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+Steps: publish your task's step list via `acctl steps set` (ac-steps skill, provisioned in your workspace) — the list from the start, then an update at each step completed; the client's "Steps" panel shows it to the user.
 
-1. Body = patchnotes utilisateur EN ANGLAIS couvrant TOUTES les PR mergees dans {INT} sur le cycle (inventaire : git fetch origin && git log origin/{REL}..origin/{INT} --oneline, ou les commits de la PR). Le generateur automatique du repo regenere le body a chaque push sur {INT} : verifie qu'il est a jour vis-a-vis du head courant, EN ANGLAIS, et lisible par un utilisateur (fonctionnalites visibles, pas le detail technique interne). JAMAIS de reference interne dans le texte : pas de (#NNN), pas de lien PR, pas d'id backlog — uniquement des changements vecus par l'utilisateur ; les noms de fonctionnalites visibles restent OK. S'il est stale ou non anglophone, declenche la regeneration via le mecanisme du workflow ; a defaut reecris le body toi-meme via le CLI de la forge du repo (edition du body de la PR). Si le generateur doit produire de l'anglais durablement, corrige-le via le cycle de contribution normal plutot qu'une edition manuelle.
-2. Passe la PR en non-draft (« ready ») selon le mecanisme du repo — cela declenche la mecanique de release du repo (bump de version sur {INT}), c'est voulu. Ne merge JAMAIS la release PR vers {REL} : le merge reste a l'utilisateur.
-3. Si le generateur produit un body defectueux, corrige-le via le cycle de contribution normal dans un worktree separe (base origin/{INT}).
-4. Quand la release PR est ready avec un body a jour : agentbacklog --done <ID> --agent-id "<ton agent-id>". La release PR {INT} -> {REL} n'est pas ta PR — son merge est reserve a l'utilisateur ; ton critere de fin est « release PR ready + body a jour », jamais l'attente du merge (item cree avec done_when=deliverable).
-5. Apres ton --done, si du nouveau travail arrive dans le backlog, l'orchestrateur repasse lui-meme la release PR en draft (garde open_any / notes_cycle_done se reinitialise en presence de travail) et un nouvel item patchnotes sera cree au prochain cycle vide — rien a faire de ton cote."#;
+1. Body = user patchnotes IN ENGLISH covering ALL the PRs merged into {INT} over the cycle (inventory: git fetch origin && git log origin/{REL}..origin/{INT} --oneline, or the PR's commits). The repo's automatic generator rewrites the body on every push to {INT}: check it is up to date against the current head, IN ENGLISH, and readable by a user (visible features, not internal technical detail). NEVER an internal reference in the text: no (#NNN), no PR links, no backlog ids — only user-visible changes; visible feature names stay OK. If it is stale or non-English, trigger the regeneration through the workflow's mechanism; failing that, rewrite the body yourself via the repo's forge CLI (PR body edit). If the generator must keep producing English, fix it through the normal contribution cycle rather than a manual edit.
+2. Switch the PR to non-draft ("ready") per the repo's mechanism — that triggers the repo's release machinery (version bump on {INT}), on purpose. NEVER merge the release PR to {REL}: merging stays with the user.
+3. If the generator produces a defective body, fix it through the normal contribution cycle in a separate worktree (base origin/{INT}).
+4. Once the release PR is ready with an up-to-date body: agentbacklog --done <ID> --agent-id "<your agent-id>". The release PR {INT} -> {REL} is not your PR — its merge is reserved for the user; your end criterion is "release PR ready + body up to date", never waiting for the merge (item created with done_when=deliverable).
+5. After your --done, if new work lands in the backlog, the orchestrator itself switches the release PR back to draft (open_any guard / notes_cycle_done resets when work exists) and a new patchnotes item will be created on the next empty cycle — nothing to do on your side."#;
 
 /// Variante {DOD} du prompt self-pop legacy : l'item poppé n'est pas
 /// connu au spawn, la règle renvoie au champ `done_when` lu via
 /// `--list --json` (deliverable = critères propres, jamais d'attente
 /// de merge ; pr_merged = PR mergée).
-const LEGACY_DOD: &str = "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" selon le done_when de l'item (regle detaillee ci-dessous)";
+const LEGACY_DOD: &str = "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" per the item's done_when (detailed rule below)";
 
 /// `origin` des sessions Manager — rôle d'intendance backlog proposé
 /// par le client (un par workspace routé), distinct des workers : le
@@ -181,25 +181,25 @@ const MANAGER_TITLE_PREFIX: &str = "Manager · ";
 /// `[backlog_orchestrator] manager_prompt` (mêmes placeholders :
 /// `{REPO}` `{WS}` `{BASE}` `{REVIEW_TRIGGER}` `{WORKTREE_DIR}`
 /// `{MERGE_RULE}`).
-const MANAGER_PROMPT: &str = r#"[Session creee automatiquement par la feature « Manager » d'AgentControl — pas par un agent humain ou une session parente.]
+const MANAGER_PROMPT: &str = r#"[Session created automatically by AgentControl's "Manager" feature — not by a human agent or a parent session.]
 
-Tu es le Manager du workspace {REPO} (cwd {WS}) : l'intendance de la file AgentBacklog partagee. On te donne des demandes en langage naturel ; tu les transformes en items backlog exploitables par les workers autonomes (sessions « Backlog-W* » pilotees par l'orchestrateur).
+You are the Manager of the {REPO} workspace (cwd {WS}): the steward of the shared AgentBacklog queue. You are given natural-language requests; you turn them into backlog items the autonomous workers (orchestrator-driven "Backlog-W*" sessions) can execute.
 
-MISSIONS :
+MISSIONS:
 
-1. DEPOSER UN ITEM — pour chaque demande de feature/fix :
-   agentbacklog --add "<titre concis>" --desc "<description>" --repo {REPO}
-   Le titre : une ligne, actionnable (convention : [bug]/[feature] + objet). La description est le cahier des charges du worker — donne : le contexte (symptomes, fichiers/modules/pistes d'investigation dans {WS}), les verifications demandees (build/tests precis), et le rappel du cycle de contribution du repo — ses regles sont dans {WS}/AGENTS.md (ou CLAUDE.md) : worktree dedie sous {WORKTREE_DIR} base {BASE}, review ({REVIEW_TRIGGER}), merge ({MERGE_RULE}).
-   Une demande qui enchaine des etapes ou depend d'un item existant : decoupe en sous-items ordonnes via --depends-on <ID> (et --depend ID DEP a posteriori). Une grosse demande floue : item d'exploration/decoupage d'abord.
-   Ne duplique pas : agentbacklog --list --json avant d'ajouter.
+1. FILE AN ITEM — for each feature/fix request:
+   agentbacklog --add "<concise title>" --desc "<description>" --repo {REPO}
+   Title: one actionable line (convention: [bug]/[feature] + object). The description is the worker's specification — provide: context (symptoms, files/modules/investigation leads inside {WS}), the requested checks (precise builds/tests), and a reminder of the repo's contribution cycle — its rules are in {WS}/AGENTS.md (or CLAUDE.md): dedicated worktree under {WORKTREE_DIR} based on {BASE}, review ({REVIEW_TRIGGER}), merge ({MERGE_RULE}).
+   A request that chains steps or depends on an existing item: split into ordered sub-items via --depends-on <ID> (and --depend ID DEP afterwards). A big vague request: an exploration/breakdown item first.
+   Do not duplicate: agentbacklog --list --json before adding.
 
-2. REPONDRE AUX QUESTIONS D'ETAT — file (agentbacklog --list --json, --all pour l'historique), items wip/pending/bloques, workers actifs (acctl list), PRs en cours (acctl pr ls --all). Reponses concises, en francais.
+2. ANSWER STATUS QUESTIONS — queue (agentbacklog --list --json, --all for history), wip/pending/blocked items, active workers (acctl list), open PRs (acctl pr ls --all). Concise answers.
 
-3. AJUSTER LA FILE SUR DEMANDE — priorite : agentbacklog --bump <ID> ; dependance : agentbacklog --depend <ID> <DEP> (DEP=0 retire) ; rendre un item wip abandonne : agentbacklog --release <ID> --force. Refuse toute demande qui depasse ton role.
+3. ADJUST THE QUEUE ON REQUEST — priority: agentbacklog --bump <ID> ; dependency: agentbacklog --depend <ID> <DEP> (DEP=0 removes); hand back an abandoned wip item: agentbacklog --release <ID> --force. Refuse any request beyond your role.
 
-4. ETAPES : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+4. STEPS: publish your task's step list via `acctl steps set` (ac-steps skill, provisioned in your workspace) — the list from the start, then an update at each step completed; the client's "Steps" panel shows it to the user.
 
-JAMAIS : --pop (tu n'implementes pas), --done (sauf item que TU as toi-meme cree par erreur et qu'il faut retirer — prefere --release + --depend sinon), pas de code a ecrire, pas de PR a mener. Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; reponds en francais."#;
+NEVER: --pop (you do not implement), --done (except an item YOU created by mistake that must be removed — prefer --release + --depend otherwise), no code to write, no PR to drive. Absolute rules: never stop/restart/touch the agentcontrol-daemon daemon; no secrets committed. Language: write PR text and review comments in the repository's language; reply in the user's language."#;
 
 /// Phase courante de l'orchestrateur — exposée dans le statut
 /// `list_components`/`component_info` et l'état `component_state`.
@@ -1308,14 +1308,13 @@ pub(crate) fn task_done_when(t: &Task) -> &'static str {
 pub(crate) fn task_dod(t: &Task) -> &'static str {
     if task_done_when(t) == "deliverable" {
         "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" \
-         des que les criteres propres de l'item sont remplis \
-         (done_when=deliverable) — jamais d'attente de merge."
+         as soon as the item's own criteria are met \
+         (done_when=deliverable) — never waiting for a merge."
     } else {
         "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" \
-         UNIQUEMENT quand ta PR est effectivement MERGED (verifie \
-         l'etat de la PR via le CLI de la forge du repo, pas seulement \
-         ready+checks) — ou quand les criteres propres de la tache \
-         sont remplis si elle n'a pas de PR."
+         ONLY once your PR is actually MERGED (check the PR state via \
+         the repo's forge CLI, not just ready+checks) — or once the \
+         task's own criteria are met if it has no PR."
     }
 }
 /// Un item `pending` est « poppable » : sans dépendance ou dépendances
@@ -2673,9 +2672,9 @@ impl Daemon {
         let mut parts: Vec<String> = Vec::new();
         if !open_prs.is_empty() {
             parts.push(format!(
-                "Tes PR encore ouvertes : {}. Ta mission continue jusqu'au \
-                 merge — {} ; si le merge reste a l'utilisateur, surveille \
-                 jusqu'au merge effectif via un waiter ac-wait.",
+                "Your still-open PRs: {}. Your mission continues until \
+                 merge — {} ; if merging stays with the user, watch until \
+                 the effective merge via an ac-wait waiter.",
                 open_prs
                     .iter()
                     .map(|p| format!("#{p}"))
@@ -2686,9 +2685,9 @@ impl Daemon {
         }
         if !wip.is_empty() {
             parts.push(format!(
-                "Tes taches encore wip : {}. Si tu les as abandonnees, \
-                 release-les : agentbacklog --release <ID> --agent-id \
-                 \"$AGENTCONTROL_SESSION\". Sinon reprends le travail dessus.",
+                "Your still-wip tasks: {}. If you abandoned them, release \
+                 them: agentbacklog --release <ID> --agent-id \
+                 \"$AGENTCONTROL_SESSION\". Otherwise resume work on them.",
                 wip.iter()
                     .map(|t| format!("#{t}"))
                     .collect::<Vec<_>>()
@@ -2696,10 +2695,10 @@ impl Daemon {
             ));
         }
         parts.push(
-            "Quand tout est solde : reponds « termine » et arrete — \
-             l'orchestrateur supprime les workers inactifs tout soldes et \
-             spawn un worker neuf par item pending (un worker = un item, \
-             pas de re-pop)."
+            "When everything is settled: reply \"done\" and stop — \
+             the orchestrator deletes idle workers once everything is \
+             settled and spawns a fresh worker per pending item (one \
+             worker = one item, no re-pop)."
                 .into(),
         );
         let msg = parts.join(" ");
@@ -3456,7 +3455,7 @@ mod tests {
         }
         // Le prompt worker ne doit plus imposer le self-pop : le dispatch
         // claim pré-assigne l'item.
-        assert!(p.contains("PAS a lancer `agentbacklog --pop`"));
+        assert!(p.contains("do NOT need to run `agentbacklog --pop`"));
     }
 
     #[test]

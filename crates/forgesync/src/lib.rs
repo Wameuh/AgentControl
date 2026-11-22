@@ -734,7 +734,7 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: &(dyn Fn(&T) -> R + Sync)) -> Vec<R
     });
     slots
         .into_iter()
-        .map(|p| p.expect("par_map: slot vide"))
+        .map(|p| p.expect("par_map: empty slot"))
         .collect()
 }
 
@@ -813,7 +813,7 @@ fn group_sync(set: &[Value], g: &SyncGroup) -> SyncPartial {
     };
     let Some(client) = client_for(set, g.kind, &g.host, g.repo, Path::new(".")) else {
         p.notes.push(format!(
-            "{} {} {}: hôte non déclaré — statuts inchangés",
+            "{} {} {}: undeclared host — statuses unchanged",
             g.kind, g.host, g.repo
         ));
         fail_all(&mut p);
@@ -825,7 +825,7 @@ fn group_sync(set: &[Value], g: &SyncGroup) -> SyncPartial {
         // « non résoluble » au bout de 3 passes alors que le statut
         // stocké fait foi).
         p.notes.push(format!(
-            "{} {} {}: pas de lecture automatique (git nu) — statuts inchangés",
+            "{} {} {}: no automatic read (plain git) — statuses unchanged",
             g.kind, g.host, g.repo
         ));
         return p;
@@ -834,7 +834,7 @@ fn group_sync(set: &[Value], g: &SyncGroup) -> SyncPartial {
         // Transport CLI absent/non authentifié : jamais un échec
         // d'entrée (cas nominal d'un démon minimal sans gh/glab).
         p.notes.push(format!(
-            "{} {} {}: transport indisponible — statuts inchangés",
+            "{} {} {}: transport unavailable — statuses unchanged",
             g.kind, g.host, g.repo
         ));
         return p;
@@ -843,7 +843,7 @@ fn group_sync(set: &[Value], g: &SyncGroup) -> SyncPartial {
         // Le transport sert mais le repo ne répond pas →
         // fantôme/privé → compté en échec.
         p.notes.push(format!(
-            "{} {} {}: repo absent ou inaccessible — statuts inchangés",
+            "{} {} {}: repo missing or unreachable — statuses unchanged",
             g.kind, g.host, g.repo
         ));
         fail_all(&mut p);
@@ -1176,6 +1176,6 @@ mod tests {
         assert!(out
             .notes
             .iter()
-            .all(|n| n.contains("non déclaré") || n.contains("non géré")));
+            .all(|n| n.contains("undeclared") || n.contains("not managed")));
     }
 }

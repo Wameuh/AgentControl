@@ -86,6 +86,7 @@ jobs:
         run: |
           node tests/cmpver-test.mjs
           node tests/pair-parse-test.mjs
+          node tests/errcode-test.mjs
           sh tests/pair-sh-test.sh
           python3 tests/ensure-daemon-e2e.py
       - name: Build client (vite preview des tests puppeteer)

@@ -44,12 +44,12 @@ const CLIP_READ_CAP: u64 = 8 * 1024 * 1024;
 
 /// URI `file://` → chemin local. Refuse tout autre scheme.
 fn clipboard_path(uri: &str) -> Result<PathBuf, String> {
-    let u = url::Url::parse(uri).map_err(|e| format!("URI invalide: {e}"))?;
+    let u = url::Url::parse(uri).map_err(|e| format!("invalid URI: {e}"))?;
     if u.scheme() != "file" {
-        return Err("URI non-file:// refusée".into());
+        return Err("non-file:// URI refused".into());
     }
     u.to_file_path()
-        .map_err(|_| "URI file:// invalide".to_string())
+        .map_err(|_| "invalid file:// URI".to_string())
 }
 
 /// Métadonnées (nom, taille) du fichier visé par une URI clipboard —
@@ -65,13 +65,13 @@ pub(crate) fn clipboard_file_stat(uri: String) -> Result<ClipFileStat, String> {
     let p = clipboard_path(&uri)?;
     let md = std::fs::metadata(&p).map_err(|e| e.to_string())?;
     if !md.is_file() {
-        return Err("pas un fichier régulier".into());
+        return Err("not a regular file".into());
     }
     let name = p
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "fichier".into());
+        .unwrap_or_else(|| "file".into());
     Ok(ClipFileStat {
         name,
         size: md.len(),
@@ -88,7 +88,7 @@ pub(crate) fn clipboard_file_read(uri: String, offset: u64, limit: u64) -> Resul
     // is_file comme stat : une URI vers une FIFO bloquerait open() en
     // attente d'un writer — le check avant open évite le blocage.
     if !std::fs::metadata(&p).map(|m| m.is_file()).unwrap_or(false) {
-        return Err("pas un fichier régulier".into());
+        return Err("not a regular file".into());
     }
     let mut f = std::fs::File::open(&p).map_err(|e| e.to_string())?;
     f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;

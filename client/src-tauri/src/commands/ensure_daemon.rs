@@ -59,7 +59,7 @@ const RELEASES: &str = "https://github.com/Wameuh/AgentControl/releases";
 /// `echo step:<id> >&2` : marqueurs streamés → events `daemon-step`
 /// (stdout garde le résultat métier en dernière ligne).
 const PROBE_SCRIPT: &str = "set -e; echo step:check >&2; arch=$(uname -m); \
-    case $arch in x86_64|aarch64) ;; *) echo \"arch non supportée: $arch\" >&2; exit 1;; esac; \
+    case $arch in x86_64|aarch64) ;; *) echo \"unsupported arch: $arch\" >&2; exit 1;; esac; \
     bin=$HOME/.local/bin/agentcontrol-daemon; \
     ac=$(command -v acctl 2>/dev/null || true); [ -z \"$ac\" ] && [ -x \"$HOME/.local/bin/acctl\" ] && ac=\"$HOME/.local/bin/acctl\"; \
     ver=$({ [ -n \"$ac\" ] && \"$ac\" status 2>/dev/null || true; } | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
@@ -246,7 +246,7 @@ async fn run_script(
                                             "ensure_daemon {host2}: drain stderr interrompu: {e}"
                                         ),
                                     );
-                                    buf.push_str(&format!("(stderr illisible: {e})\n"));
+                                    buf.push_str(&format!("(stderr unreadable: {e})\n"));
                                     break;
                                 }
                             }
@@ -368,12 +368,12 @@ fn fetch_release_file(tag: &str, name: &str, dest: &Path) -> Result<(), String> 
             let mut r = resp.into_reader().take(CAP + 1);
             std::io::copy(&mut r, &mut f).map_err(|e| e.to_string())?;
             if f.metadata().map_err(|e| e.to_string())?.len() > CAP {
-                return Err(format!("{name} dépasse {CAP} o — artefact anormal"));
+                return Err(format!("{name} exceeds {CAP} bytes — abnormal artifact"));
             }
             return Ok(());
         }
     }
-    Err(format!("{name} absent de la release v{tag} (et de latest)"))
+    Err(format!("{name} missing from release v{tag} (and latest)"))
 }
 
 /// Texte d'un asset release — `Ok(None)` s'il n'existe sur aucune des
@@ -415,7 +415,7 @@ async fn fetch_verified_daemon(
             (Some(s), Some(g)) => {
                 let f = std::fs::File::open(&tgz_c).map_err(|e| e.to_string())?;
                 release_verify::verify(&name, f, &s, &g)
-                    .map_err(|e| format!("{name} rejeté à la vérif d'intégrité — {e}"))?;
+                    .map_err(|e| format!("{name} failed integrity check — {e}"))?;
                 client_core::log(
                     Level::Info,
                     format!("ensure_daemon {host}: {name} signature minisign + sha256 vérifiés"),
@@ -432,16 +432,16 @@ async fn fetch_verified_daemon(
             }
             (None, None) => {
                 return Err(format!(
-                    "release v{tag} non signée — {} et {} absents (anciennes releases : \
-                     AGENTCONTROL_ALLOW_UNSIGNED=1 pour forcer, non recommandé)",
+                    "unsigned release v{tag} — {} and {} missing (older releases: \
+                     AGENTCONTROL_ALLOW_UNSIGNED=1 to force, not recommended)",
                     release_verify::SUMS_NAME,
                     release_verify::SIG_NAME
                 ));
             }
             _ => {
                 return Err(format!(
-                    "manifeste d'intégrité incomplet — un seul de {}/{} publié \
-                     (release trafiquée ?)",
+                    "incomplete integrity manifest — only one of {}/{} published \
+                     (tampered release?)",
                     release_verify::SUMS_NAME,
                     release_verify::SIG_NAME
                 ));
@@ -486,7 +486,7 @@ pub(crate) async fn ensure_daemon(
     // interpolation shell dans PROBE_SCRIPT exécuté AVANT toute
     // signature, et en URL — whitelist semver stricte en premier.
     if !release_verify::valid_tag(&tag) {
-        return Err(format!("tag de release invalide : {tag:?}"));
+        return Err(format!("invalid release tag {tag:?}"));
     }
     let native = native.unwrap_or(false) || cfg!(target_os = "android");
     let run = if native {

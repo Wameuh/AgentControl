@@ -35,7 +35,7 @@ fn parse_ref_arg(s: &str) -> Result<(u64, Option<String>)> {
     {
         return Ok((0, Some(s.to_string())));
     }
-    Ok((s.parse().context("numéro de référence invalide (ou I<Change-Id>)")?, None))
+    Ok((s.parse().context("invalid reference number (or I<Change-Id>)")?, None))
 }
 
 /// Découpe une valeur `--repo` : URL complète → (host, repo) ; forme
@@ -210,7 +210,7 @@ fn resolve_in(entries: &[Value], sel: &PrSel) -> Result<Option<Value>> {
         0 => Ok(None),
         1 => Ok(Some(cands[0].clone())),
         _ => anyhow::bail!(
-            "{} entrées correspondent — précisez --forge/--host/--repo :\n  {}",
+            "{} entries match — narrow with --forge/--host/--repo:\n  {}",
             cands.len(),
             cands.iter().map(|e| entry_label(e)).collect::<Vec<_>>().join("\n  ")
         ),
@@ -389,13 +389,13 @@ async fn detect_target(args: &[String], c: &mut Conn, from: usize) -> Result<PrT
                 None
             }
         })
-        .context("repo introuvable — passez --repo <path> [--forge F] [--host H] (ou lancez depuis le clone)")?;
+        .context("repo not found — pass --repo <path> [--forge F] [--host H] (or run from the clone)")?;
     }
     anyhow::ensure!(
         matches!(forge.as_str(), "github" | "gitlab" | "gerrit" | "git"),
         "--forge github|gitlab|gerrit|git"
     );
-    anyhow::ensure!(!host.is_empty(), "--host requis pour la forge {forge}");
+    anyhow::ensure!(!host.is_empty(), "--host required for the forge {forge}");
     Ok(PrTarget {
         forge,
         host,
@@ -519,7 +519,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             let session = flag_val(args, "--session")
                 .map(String::from)
                 .or_else(|| std::env::var("AGENTCONTROL_SESSION").ok())
-                .context("--session requis hors session agent")?;
+                .context("--session required outside an agent session")?;
             // Métadonnées live par forge (tolère l'échec).
             let set = forge_set(c).await;
             let info = forgesync::live_ref(
@@ -589,14 +589,14 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 .take_while(|a| !a.starts_with("--"))
                 .cloned()
                 .collect();
-            anyhow::ensure!(!words.is_empty(), "pr note <N|I<cid>> <txt…> — texte vide");
+            anyhow::ensure!(!words.is_empty(), "pr note <N|I<cid>> <txt…> — empty text");
             let v = c
                 .call(proto::ReqKind::PrList { session: None })
                 .await
-                .context("registre illisible (démon trop ancien pour pr_list ?)")?;
+                .context("registry unreadable (daemon too old for pr_list?)")?;
             let entries = v.as_array().cloned().unwrap_or_default();
             let e = resolve_in(&entries, &sel)?
-                .context("aucune entrée ne correspond (cf. acctl pr ls --all)")?;
+                .context("no matching entry (cf. acctl pr ls --all)")?;
             c.call(proto::ReqKind::PrTrack {
                 session: None,
                 repo: e["repo"].as_str().unwrap_or("").to_string(),
@@ -614,7 +614,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 ci: None,
             })
             .await?;
-            println!("{}: note maj", badge_of(&e));
+            println!("{}: note updated", badge_of(&e));
         }
         "rm" => {
             let sel = select_ref(args, 2)?;
@@ -625,7 +625,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             let v = c
                 .call(proto::ReqKind::PrList { session: None })
                 .await
-                .context("registre illisible (démon trop ancien pour pr_list ?)")?;
+                .context("registry unreadable (daemon too old for pr_list?)")?;
             let entries = v.as_array().cloned().unwrap_or_default();
             match resolve_in(&entries, &sel)? {
                 Some(e) => {
@@ -744,7 +744,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                         _ => "#",
                     };
                     println!(
-                        "{}:{}{}{}: non résoluble après {} échecs de sync",
+                        "{}:{}{}{}: unresolved after {} sync failures",
                         s.host, s.repo, mark, s.pr, nf
                     );
                 }
@@ -752,7 +752,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             for n in &out.notes {
                 println!("{n}");
             }
-            println!("sync ok ({} vérifiées, {} maj)", out.checked, out.updates.len());
+            println!("sync ok ({} checked, {} updated)", out.checked, out.updates.len());
         }
         "review" => {
             // Review native du change (pr_review de l'orchestrateur) :
@@ -764,10 +764,10 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             let t = detect_target(args, c, 2).await?;
             anyhow::ensure!(
                 t.change_id.is_none() && t.forge != "git",
-                "acctl pr review : review native indisponible en git nu \
-                 (pas de forge) — lancez la review manuellement"
+                "acctl pr review: native review unavailable in plain git \
+                 (no forge) — run the review manually"
             );
-            anyhow::ensure!(!t.repo.is_empty(), "repo requis (--repo ou remote git)");
+            anyhow::ensure!(!t.repo.is_empty(), "repo required (--repo or git remote)");
             let v = c
                 .call(proto::ReqKind::PrReviewRequest {
                     session: std::env::var("AGENTCONTROL_SESSION")
@@ -779,7 +779,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 .await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
-        other => anyhow::bail!("pr: sous-commande inconnue: {other} (add|ls|note|rm|sync|review)"),
+        other => anyhow::bail!("pr: unknown subcommand: {other} (add|ls|note|rm|sync|review)"),
     }
     Ok(())
 }
@@ -866,8 +866,8 @@ mod tests {
             ent("gitlab", "gitlab.corp", "y/two", 42),
         ];
         match resolve_in(&entries, &sel(42)) {
-            Err(e) => assert!(e.to_string().contains("ambigu") || e.to_string().contains("entrées")),
-            _ => panic!("ambiguïté attendue"),
+            Err(e) => assert!(e.to_string().contains("ambiguous") || e.to_string().contains("entries")),
+            _ => panic!("expected ambiguity"),
         }
         // --forge lève l'ambiguïté.
         let s = PrSel { pr: 42, forge: Some("gitlab".into()), host: Some("gitlab.corp".into()), ..Default::default() };

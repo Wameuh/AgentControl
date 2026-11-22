@@ -6,6 +6,7 @@
 
 import { invoke, getVersion, isWeb } from "../core/bridge";
 import { $, esc, logUi, notify } from "../core/dom";
+import { codedErrorMsg } from "../core/errcode";
 import { icon } from "../ui/icons";
 import { isAndroid, shellOpen } from "../core/chrome";
 import { cmpVer, connKeyOf, connLabel, daemonParams } from "../core/conn";
@@ -144,10 +145,12 @@ export async function performClientUpdate(tag: string) {
     await invoke("update_client", { tag });
   } catch (e) {
     const reason = String(e);
-    notify("error", t("update_failed_reason", { reason }));
+    notify("error", t("update_failed_reason", {
+      reason: codedErrorMsg(e, "update"),
+    }));
     // Repli « page releases » quand le backend le désigne (hors bundle
     // .app, build portable…) — l'erreur affiche déjà la cause exacte.
-    if (reason.includes("page releases")) {
+    if (/releases? page|update-failed:(manual|writable)/.test(reason)) {
       shellOpen(`https://github.com/Wameuh/AgentControl/releases/tag/v${tag}`);
     }
     return;
@@ -222,7 +225,7 @@ export async function performDaemonUpdate(o: {
           o.cfg?.kind === "ssh") {
         await daemonViaScript(o, host);
       } else {
-        notify("error", msg);
+        notify("error", codedErrorMsg(e, "update"));
       }
     }
     return;
@@ -281,7 +284,7 @@ async function daemonViaScript(
         return;
       }
     }
-    notify("error", String(e));
+    notify("error", codedErrorMsg(e, "update"));
   }
 }
 
@@ -448,7 +451,9 @@ async function reportLastUpdateStatus() {
   const st = await invoke<string | null>("update_last_status").catch(() => null);
   if (!st) return;
   if (st.startsWith("FAIL")) {
-    notify("error", t("update_failed_reason", { reason: st.slice(4).trim() }));
+    notify("error", t("update_failed_reason", {
+      reason: codedErrorMsg(st.slice(4), "update"),
+    }));
   } else if (st.startsWith("WARN")) {
     // "WARN <ver> <cause>" : install réussie mais relance impossible —
     // le prochain boot doit pouvoir le dire (spec item #195).
@@ -456,7 +461,7 @@ async function reportLastUpdateStatus() {
     const sp = rest.indexOf(" ");
     notify("warn", t("update_partial", {
       v: sp < 0 ? rest : rest.slice(0, sp),
-      reason: sp < 0 ? "" : rest.slice(sp + 1),
+      reason: sp < 0 ? "" : codedErrorMsg(rest.slice(sp + 1), "update"),
     }));
   } else if (st.startsWith("OK")) {
     notify("success", t("update_done", { v: st.slice(2).trim() }));

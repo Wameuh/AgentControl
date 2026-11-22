@@ -176,10 +176,10 @@ impl Daemon {
                     spawn_prompt: true,
                 });
                 let wrapped = format!(
-                    "[AgentControl] tu es la session {sid}, créée par \
-                            le service externe « {o} » — la tâche ci-dessous \
-                            t'est confiée par ce programme (pas par un humain \
-                            ni une autre session).\n\
+                    "[AgentControl] you are session {sid}, created by \
+                            the external service \"{o}\" — the task below is \
+                            assigned to you by this program (not by a human \
+                            or another session).\n\
                             ---\n{p}\n---",
                 );
                 FreshDeliver::Service { wrapped }

@@ -162,33 +162,33 @@ fn fail_role(
 
 /// Prompt du worker de reprise : le contexte de l'ancienne session
 /// est perdu — items `wip` et PRs sont réinjectés explicitement.
-const WORKER_FAILOVER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — worker de REPRISE apres changement de profil provider (failover rate_limit), pas par un agent humain ni une session parente.]
+const WORKER_FAILOVER_PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — TAKEOVER worker after a provider profile switch (rate_limit failover), not by a human or a parent session.]
 
-Tu es un worker sur le repo (cwd {WS}) — tu remplaces une session detruite car bloquee en rate_limit sur l'ancien profil. Son contexte est perdu ; le travail est recoverable via la file AgentBacklog, les worktrees et le registre PR.
+You are a worker on the repo (cwd {WS}) — you replace a session destroyed because it was stuck in rate_limit on the old profile. Its context is lost; the work is recoverable via the AgentBacklog queue, the worktrees and the PR registry.
 
-Commence par lire {WS}/AGENTS.md (ou {WS}/CLAUDE.md a defaut) — les regles de branches, PR, review, CI et merge du repo s'y trouvent et priment.
+Start by reading {WS}/AGENTS.md (or {WS}/CLAUDE.md as a fallback) — the repo's branch, PR, review, CI and merge rules live there and take precedence.
 
-## ITEMS A REPRENDRE (wip, deja assignes a toi)
+## ITEMS TO RESUME (wip, already assigned to you)
 {ITEMS}
 
-## PR OUVERTES A SUIVRE (deja attribuees a toi dans le registre)
+## OPEN PRs TO FOLLOW (already attributed to you in the registry)
 {PRS}
 
 ## MISSION
-1. Pour chaque item ci-dessus : verifie son etat (`agentbacklog --list --json`), retrouve ou cree le worktree dedie sous {WORKTREE_DIR} (ex. `git worktree add {WORKTREE_DIR}/<feat> -b <branch> origin/{BASE}` — JAMAIS dans le checkout principal {WS} ; la convention precise est celle des regles du repo), continue le travail et mene la PR selon le cycle complet des regles du repo (merge : {MERGE_RULE}).
-2. Continue jusqu'a ce que tes items soient `--done` et tes PRs soldees (mergees ou cloturees), puis ARRETE-toi purement et simplement. Tu NE LANCES JAMAIS `agentbacklog --pop` toi-meme : l'orchestrateur dispatche le travail suivant (un worker = un item ; un pop contournerait la revue de plan en mode plan_review et l'invariant « contexte frais par item »).
-3. `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` selon le done_when de chaque item (`agentbacklog --list --json` : 'pr_merged' = ta PR de l'item MERGED, 'deliverable' = ses criteres propres remplis, jamais d'attente de merge) ; blocage insurmontable : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison, puis arrete.
+1. For each item above: check its state (`agentbacklog --list --json`), find or create the dedicated worktree under {WORKTREE_DIR} (e.g. `git worktree add {WORKTREE_DIR}/<feat> -b <branch> origin/{BASE}` — NEVER in the main checkout {WS}; the exact convention is the repo rules' one), continue the work and drive the PR through the repo rules' full cycle (merge: {MERGE_RULE}).
+2. Continue until your items are `--done` and your PRs settled (merged or closed), then STOP outright. You NEVER run `agentbacklog --pop` yourself: the orchestrator dispatches the next work (one worker = one item; a pop would bypass the plan review in plan_review mode and the "fresh context per item" invariant).
+3. `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` per each item's done_when (`agentbacklog --list --json`: 'pr_merged' = your item's PR MERGED, 'deliverable' = its own criteria met, never waiting for a merge); unrecoverable blocker: `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explain the reason, then stop.
 
-Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+Steps: publish your task's step list via `acctl steps set` (ac-steps skill, provisioned in your workspace) — the list from the start, then an update at each step completed; the client's "Steps" panel shows it to the user.
 
-Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin ; reponds en francais."#;
+Absolute rules: never stop/restart/touch the agentcontrol-daemon daemon; no secrets committed; push only to your PR branch; clean up your worktree at the end. Language: write PR text and review comments in the repository's language; reply in the user's language."#;
 
 /// Note ajoutée aux prompts planner/implementer pour expliciter la
 /// reprise — le reste du prompt standard s'applique tel quel.
 const FAILOVER_NOTE: &str = r#"
 
-## REPRISE (failover provider)
-Tu reprends le role d'une session detruite car bloquee en rate_limit sur l'ancien profil — son contexte est perdu. L'item t'est reassigne : n'appelle ni --claim ni --pop pour celui-ci, poursuis directement le travail."#;
+## TAKEOVER (provider failover)
+You are resuming the role of a session destroyed because it was stuck in rate_limit on the old profile — its context is lost. The item is reassigned to you: do not call --claim or --pop for it, continue the work directly."#;
 
 impl Daemon {
     /// Passe failover provider — appelée en tête de `orch_cycle`

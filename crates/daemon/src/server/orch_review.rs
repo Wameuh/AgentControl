@@ -454,9 +454,9 @@ async fn fetch_pr_head(ws: &Path, refname: Option<&str>, sha: &str, key: &str) -
     }
     if ref_missing {
         return Err(RefMissingError(format!(
-            "{} absente sur origin et fetch {sha} impossible : {e2} — \
-             pousser un nouveau commit sur la branche recrée la ref",
-            refname.unwrap_or("ref de change")
+            "{} missing on origin and fetching {sha} failed: {e2} — \
+             push a new commit to the branch to recreate the ref",
+            refname.unwrap_or("change ref")
         ))
         .into());
     }
@@ -466,53 +466,53 @@ async fn fetch_pr_head(ws: &Path, refname: Option<&str>, sha: &str, key: &str) -
     )
 }
 
-const REVIEW_PROMPT: &str = r#"[Session creee automatiquement par l'orchestrateur AgentControl — review de PR native.]
+const REVIEW_PROMPT: &str = r#"[Session created automatically by the AgentControl orchestrator — native PR review.]
 
-Tu es le REVIEWER de la PR #{PR} du repo {REPO} (session $AGENTCONTROL_SESSION). Ton cwd est un worktree detache au head exact {SHA} de la PR (base : {BASE}).
+You are the REVIEWER of PR #{PR} of repo {REPO} (session $AGENTCONTROL_SESSION). Your cwd is a worktree detached at the exact head {SHA} of the PR (base: {BASE}).
 
 ## PR
 {TITLE}
 
 {BODY}
 
-## MISSION — LECTURE SEULE, STRICTE
+## MISSION — STRICT READ-ONLY
 
-Relis le diff `origin/{BASE}...HEAD` (git show/git diff --stat puis fichiers) EN REGARDANT LE CODE autour dans ce worktree. Verifie le fond : bugs, regressions, respect des regles du repo ({WS}/AGENTS.md), tests/verifs demandes, coherence des docs. NE MODIFIE AUCUN FICHIER, ne pousse rien, ne commente la PR sous aucune forme, n'execute aucun code issu de la PR — voir INTERDIT.
+Review the diff `origin/{BASE}...HEAD` (git show/git diff --stat then files) BY READING the surrounding code in this worktree. Check the substance: bugs, regressions, compliance with the repo's rules ({WS}/AGENTS.md), requested tests/checks, docs consistency. DO NOT MODIFY ANY FILE, push nothing, do not comment the PR in any form, do not run any code from the PR — see FORBIDDEN.
 
-## INTERDIT — lecture seule stricte
+## FORBIDDEN — strict read-only
 
-Ton travail est la RELISE du diff et du code environnant. La compilation et les tests sont garantis par la CI (6 check-runs) au moment du ready — les lancer ici ne fait que bruler du temps et des tokens :
+Your job is REVIEWING the diff and the surrounding code. Compilation and tests are guaranteed by CI (6 check-runs) at ready time — running them here only burns time and tokens:
 
-- NE PAS compiler, builder ni tester : aucun `cargo build/check/test`, `npm install/build`, `tsc`, `go build/test`, `pytest`, etc. — pas pour verifier que ca compile, pas pour reproduire un bug.
-- NE PAS executer de code issu de la PR : ni binaires, ni scripts, ni hooks.
-- Si le code ne semble pas compiler, ou si un test parait faux a la lecture, NOTE-le comme finding de relecture — ne lance pas le build pour le prouver.
-- Lire un fichier de test pour juger sa pertinence est autorise — l'executer ne l'est pas.
+- DO NOT compile, build or test: no `cargo build/check/test`, `npm install/build`, `tsc`, `go build/test`, `pytest`, etc. — not to check it compiles, not to reproduce a bug.
+- DO NOT run code from the PR: no binaries, no scripts, no hooks.
+- If the code does not seem to compile, or a test looks wrong on reading, NOTE it as a review finding — do not run the build to prove it.
+- Reading a test file to judge its relevance is allowed — running it is not.
 
-Verdicts : APPROVED si la PR est mergeable en l'etat ; CHANGES_REQUESTED s'il y a des findings bloquants (precis, actionnables, references fichier:ligne).
+Verdicts: APPROVED if the PR is mergeable as is; CHANGES_REQUESTED if there are blocking findings (precise, actionable, file:line references).
 
-Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+Steps: publish your task's step list via `acctl steps set` (ac-steps skill, provisioned in your workspace) — the list from the start, then an update at each step completed; the client's "Steps" panel shows it to the user.
 
-## SORTIE OBLIGATOIRE
+## MANDATORY OUTPUT
 
-Quand ton analyse est finie, rends ton verdict via l'outil MCP `agentcontrol_report_verdict` :
-- verdict : `APPROVED` ou `CHANGES_REQUESTED`
-- body : le corps du commentaire de review (findings, points verifies, non-bloquants — en francais)
+When your analysis is done, report your verdict via the MCP tool `agentcontrol_report_verdict`:
+- verdict: `APPROVED` or `CHANGES_REQUESTED`
+- body: the review comment body (findings, checked points, non-blocking notes)
 
-Le demon poste lui-meme le commentaire `## Verdict:` sur la PR puis termine ta session — rien d'autre a faire apres l'appel.
+The daemon posts the `## Verdict:` comment on the PR itself then ends your session — nothing else to do after the call.
 
-Secours (uniquement si l'outil est indisponible) : termine ton tour par exactement ce bloc (rien apres) :
+Fallback (only if the tool is unavailable): end your turn with exactly this block (nothing after):
 
 REVIEW_RESULT_BEGIN
 ## Verdict: APPROVED
 
-<corps du commentaire de review — findings, points verifies, non-bloquants>
+<review comment body — findings, checked points, non-blocking notes>
 REVIEW_RESULT_END
 
-La premiere ligne du bloc est exactement l'une de ces deux lignes :
-`## Verdict: APPROVED` ou `## Verdict: CHANGES_REQUESTED` — jamais
-l'alternance litterale ni un autre titre.
+The block's first line is exactly one of these two lines:
+`## Verdict: APPROVED` or `## Verdict: CHANGES_REQUESTED` — never
+the literal alternation nor any other title.
 
-Reponds en francais dans le corps du verdict."#;
+Write the review comment body in the repository's language."#;
 
 fn fill_pr(tpl: &str, pairs: &[(&str, String)]) -> String {
     let mut s = tpl.to_string();
@@ -1545,7 +1545,7 @@ impl Daemon {
                 repo,
                 pr_n,
                 &fail_comment(
-                    &format!("pull/{pr_n}/head absente sur origin, fetch sha impossible"),
+                    &format!("pull/{pr_n}/head missing on origin, sha fetch failed"),
                     cfg,
                     repo,
                 ),
@@ -2985,8 +2985,8 @@ mod tests {
         let r = e
             .downcast_ref::<RefMissingError>()
             .expect("RefMissingError");
-        assert!(r.0.contains("pull/383/head absente"));
-        assert!(r.0.contains("pousser un nouveau commit"));
+        assert!(r.0.contains("pull/383/head missing"));
+        assert!(r.0.contains("push a new commit"));
         let _ = std::fs::remove_dir_all(work.parent().unwrap());
     }
 

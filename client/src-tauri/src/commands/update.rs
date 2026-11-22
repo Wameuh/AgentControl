@@ -88,7 +88,9 @@ fn latest_incl_rc() -> Result<String, String> {
     let rels = gh_get(
         "https://api.github.com/repos/Wameuh/AgentControl/releases?per_page=20",
     )?;
-    let arr = rels.as_array().ok_or("réponse releases inattendue")?;
+    let arr = rels
+        .as_array()
+        .ok_or("update-failed:check:unexpected releases response")?;
     let mut best = String::new();
     for r in arr {
         if r["draft"].as_bool().unwrap_or(false) {
@@ -101,7 +103,7 @@ fn latest_incl_rc() -> Result<String, String> {
         }
     }
     if best.is_empty() {
-        Err("aucune release listée".into())
+        Err("update-failed:check:no release listed".into())
     } else {
         Ok(best)
     }
@@ -144,13 +146,13 @@ pub(crate) async fn check_update(include_rc: Option<bool>) -> Result<String, Str
 #[cfg(target_os = "android")]
 #[tauri::command]
 pub(crate) async fn check_update(_include_rc: Option<bool>) -> Result<String, String> {
-    Err("non supporté sur Android — APK par release GitHub".into())
+    Err("update-failed:unsupported:APK updates install via the GitHub release".into())
 }
 
 #[cfg(target_os = "android")]
 #[tauri::command]
 pub(crate) async fn update_client(_tag: String) -> Result<(), String> {
-    Err("non supporté sur Android — installez le nouvel APK".into())
+    Err("update-failed:unsupported:install the new APK from the release".into())
 }
 
 /// Garde-fou post-téléchargement : fichier non vide + en-tête attendu
@@ -161,7 +163,7 @@ pub(crate) async fn update_client(_tag: String) -> Result<(), String> {
 fn verify_asset(path: &std::path::Path, name: &str) -> Result<(), String> {
     use std::io::Read;
     if std::fs::metadata(path).map_err(|e| e.to_string())?.len() == 0 {
-        return Err(format!("{name} téléchargé vide"));
+        return Err(format!("update-failed:verify:{name} downloaded empty"));
     }
     let mut head = [0u8; 8];
     if std::fs::File::open(path)
@@ -169,21 +171,21 @@ fn verify_asset(path: &std::path::Path, name: &str) -> Result<(), String> {
         .read_exact(&mut head)
         .is_err()
     {
-        return Err(format!("{name} invalide — fichier trop petit"));
+        return Err(format!("update-failed:verify:{name} invalid — file too small"));
     }
     if name.ends_with(".deb") && !head.starts_with(b"!<arch>") {
         return Err(format!(
-            "{name} invalide — pas une archive deb (téléchargement corrompu ?)"
+            "update-failed:verify:{name} invalid — not a .deb archive (corrupted download?)"
         ));
     }
     if name.ends_with(".exe") && !head.starts_with(b"MZ") {
         return Err(format!(
-            "{name} invalide — pas un exécutable (téléchargement corrompu ?)"
+            "update-failed:verify:{name} invalid — not an executable (corrupted download?)"
         ));
     }
     if name.ends_with(".msi") && !head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
         return Err(format!(
-            "{name} invalide — pas un installeur MSI (téléchargement corrompu ?)"
+            "update-failed:verify:{name} invalid — not an MSI installer (corrupted download?)"
         ));
     }
     Ok(())
@@ -312,7 +314,7 @@ fn resolve_relaunch_path(exe_before: Option<&std::path::Path>) -> Result<PathBuf
     candidates
         .into_iter()
         .find(|p| p.exists())
-        .ok_or_else(|| "aucun chemin de relance résolu".to_string())
+        .ok_or_else(|| "no relaunch path resolved".to_string())
 }
 
 /// Corps texte d'un asset nommé exact de la release `rel` — `Ok(None)`
@@ -375,7 +377,7 @@ fn verify_release_integrity(
         }
         (None, None) => {
             let msg = format!(
-                "release non signée — {} et {} absents (anciennes releases : AGENTCONTROL_ALLOW_UNSIGNED=1 pour forcer, non recommandé)",
+                "update-failed:verify:unsigned release — {} and {} missing (older releases: AGENTCONTROL_ALLOW_UNSIGNED=1 to force, not recommended)",
                 rv::SUMS_NAME,
                 rv::SIG_NAME
             );
@@ -384,7 +386,7 @@ fn verify_release_integrity(
         }
         _ => {
             let msg = format!(
-                "manifeste d'intégrité incomplet — un seul de {}/{} présent (release trafiquée ?)",
+                "update-failed:verify:incomplete integrity manifest — only one of {}/{} published (tampered release?)",
                 rv::SUMS_NAME,
                 rv::SIG_NAME
             );
@@ -413,7 +415,7 @@ fn fetch_release_asset(
     // sous le modèle I1) : whitelist semver AVANT l'URL d'API et tout
     // usage — un tag arbitraire réécrirait la requête.
     if !proto::release_verify::valid_tag(tag) {
-        return Err(format!("tag de release invalide : {tag:?}"));
+        return Err(format!("update-failed:tag:invalid release tag {tag:?}"));
     }
     let rel = gh_get(&format!(
         "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
@@ -433,7 +435,7 @@ fn fetch_release_asset(
                 }
             })
         })
-        .with_context(|| format!("pas de {name} dans la release"))
+        .with_context(|| format!("update-failed:download:no {name} in the release"))
         .map_err(|e| e.to_string())?;
     let dir = std::env::temp_dir().join("agentcontrol-update");
     let _ = std::fs::remove_dir_all(&dir);
@@ -475,7 +477,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     .map_err(|e| e.to_string())??;
     // Repli manuel cité dans TOUTES les erreurs ci-dessous : le .deb
     // reste dans le dossier temp jusqu'à la prochaine tentative.
-    let manual = format!("installez-le à la main : sudo dpkg -i {}", deb.display());
+    let manual = format!("install it by hand: sudo dpkg -i {}", deb.display());
     // pkexec : sans agent polkit de session l'auth peut ne jamais se
     // résoudre (hang) → timeout ; binaire absent → NotFound ; refus
     // utilisateur → 126 ; pkexec incapable de lancer → 127. stderr
@@ -489,16 +491,17 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     let run = pkexec.output();
     let out = match tokio::time::timeout(std::time::Duration::from_secs(300), run).await {
         Err(_) => {
-            let msg =
-                format!("aucune réponse de l'authentification (agent polkit absent ?) — {manual}");
+            let msg = format!(
+                "update-failed:auth-timeout:no answer from authentication (polkit agent missing?) — {manual}"
+            );
             ulog(format!("install v{tag} échouée — {msg}"));
             return Err(msg);
         }
         Ok(Err(e)) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                format!("pkexec introuvable (polkit/policykit non installé) — {manual}")
+                format!("update-failed:pkexec-missing:pkexec not found (polkit/policykit not installed) — {manual}")
             } else {
-                format!("pkexec non lançable : {e} — {manual}")
+                format!("update-failed:pkexec-launch:cannot launch pkexec: {e} — {manual}")
             };
             ulog(format!("install v{tag} échouée — {msg}"));
             return Err(msg);
@@ -515,12 +518,12 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
             }
         };
         let msg = match out.status.code() {
-            Some(126) => detail("autorisation refusée (demande annulée)"),
+            Some(126) => detail("update-failed:auth-cancelled:authorization refused (request cancelled)"),
             Some(127) => detail(
-                "pkexec n'a pas pu lancer l'installation (agent d'authentification absent ?)",
+                "update-failed:auth-agent:pkexec could not run the installer (authentication agent missing?)",
             ),
             code => detail(&format!(
-                "dpkg -i a échoué{}",
+                "update-failed:install:dpkg -i failed{}",
                 code.map(|c| format!(" (code {c})")).unwrap_or_default()
             )),
         };
@@ -548,10 +551,10 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
             std::process::exit(0);
         }
         Err(e) => {
-            write_update_status(&format!("WARN {tag} relance impossible : {e}"));
+            write_update_status(&format!("WARN {tag} update-failed:relaunch:{e}"));
             ulog(format!("install v{tag} OK mais relance impossible — {e}"));
             Err(format!(
-                "v{tag} installée mais relance impossible ({e}) — redémarrez l'app"
+                "update-failed:relaunch:v{tag} installed but relaunch failed ({e}) — restart the app"
             ))
         }
     }
@@ -572,7 +575,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     let app: PathBuf = exe
         .ancestors()
         .find(|p| p.extension().is_some_and(|e| e == "app"))
-        .ok_or("hors bundle .app — update manuelle via la page releases")?
+        .ok_or("update-failed:manual:outside a .app bundle — update manually via the releases page")?
         .to_path_buf();
     tokio::task::spawn_blocking({
         let app = app.clone();
@@ -586,7 +589,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
             let dmg = fetch_release_asset(&tag, "agentcontrol.dmg", |n| {
                 n.ends_with(".dmg") && n.contains(arch)
             })?;
-            let dir = dmg.parent().ok_or("chemin dmg inattendu")?;
+            let dir = dmg.parent().ok_or("update-failed:install:unexpected dmg path")?;
             let run = |cmd: &mut std::process::Command| -> Result<(), String> {
                 let st = cmd.status().map_err(|e| e.to_string())?;
                 if st.success() {
@@ -618,11 +621,11 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
                     .map_err(|e| e.to_string())?
                     .filter_map(|e| e.ok().map(|e| e.path()))
                     .find(|p| p.extension().is_some_and(|e| e == "app"))
-                    .ok_or("pas de .app dans le dmg")?;
+                    .ok_or("update-failed:install:no .app in the dmg")?;
                 let old = app.with_extension("app.old");
                 let _ = std::fs::remove_dir_all(&old);
                 std::fs::rename(&app, &old)
-                    .map_err(|e| format!("{} non remplaçable: {e}", app.display()))?;
+                    .map_err(|e| format!("update-failed:install:{} cannot be replaced: {e}", app.display()))?;
                 if let Err(e) = run(std::process::Command::new("ditto").arg(&src).arg(&app)) {
                     let _ = std::fs::remove_dir_all(&app);
                     let _ = std::fs::rename(&old, &app);
@@ -667,10 +670,10 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
             std::process::exit(0);
         }
         Err(e) => {
-            write_update_status(&format!("WARN {tag} relance impossible : {e}"));
+            write_update_status(&format!("WARN {tag} update-failed:relaunch:{e}"));
             ulog(format!("install v{tag} OK mais relance impossible — {e}"));
             Err(format!(
-                "v{tag} installée mais relance impossible ({e}) — redémarrez l'app"
+                "update-failed:relaunch:v{tag} installed but relaunch failed ({e}) — restart the app"
             ))
         }
     }
@@ -747,7 +750,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .map_err(|e| {
                 let msg = format!(
-                    "{e} — prenez l'installateur MSI v{tag} à la main : page releases"
+                    "{e} — grab the MSI installer v{tag} by hand: releases page"
                 );
                 ulog(format!("install v{tag} impossible — {msg}"));
                 msg
@@ -800,7 +803,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .map_err(|e| {
                 let msg = format!(
-                    "{e} — prenez le build portable v{tag} à la main : page releases"
+                    "{e} — grab the portable build v{tag} by hand: releases page"
                 );
                 ulog(format!("install v{tag} impossible — {msg}"));
                 msg
@@ -849,7 +852,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     std::fs::write(
         &bat,
         format!(
-            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\n{action}\r\nif errorlevel 1 goto fail\r\n>\"{st}\" echo OK {tag}\r\ndel \"{dls}\"\r\n{ok_dels}start \"\" \"{curs}\"\r\nif errorlevel 1 >\"{st}\" echo WARN {tag} relance impossible\r\ndel \"%~f0\" & exit /b 0\r\n:fail\r\n>\"{st}\" echo FAIL {cause}\r\n{fail_dels}start \"\" \"{curs}\"\r\nexit /b 1\r\n"
+            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\n{action}\r\nif errorlevel 1 goto fail\r\n>\"{st}\" echo OK {tag}\r\ndel \"{dls}\"\r\n{ok_dels}start \"\" \"{curs}\"\r\nif errorlevel 1 >\"{st}\" echo WARN {tag} update-failed:relaunch:relaunch failed\r\ndel \"%~f0\" & exit /b 0\r\n:fail\r\n>\"{st}\" echo FAIL {cause}\r\n{fail_dels}start \"\" \"{curs}\"\r\nexit /b 1\r\n"
         ),
     )
     .map_err(|e| e.to_string())?;
@@ -902,9 +905,9 @@ fn dir_writable_or_err(cur: &std::path::Path, tag: &str) -> Result<(), String> {
         }
         Err(e) => {
             let msg = format!(
-                "dossier en lecture seule — {dir} non inscriptible ({e}) : \
-                 l'exe ne peut pas être remplacé ; déplacez-le ou prenez \
-                 le build portable v{tag} sur la page releases"
+                "update-failed:writable:read-only directory — {dir} not writable ({e}): \
+                 the exe cannot be replaced; move it or grab the portable \
+                 build v{tag} from the releases page"
             );
             ulog(format!("chemin portable refusé — {msg}"));
             Err(msg)

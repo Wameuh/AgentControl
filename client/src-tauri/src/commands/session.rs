@@ -56,7 +56,7 @@ async fn list_sessions_all(app: &AppHandle, k: &str, c: &Arc<Client>) -> Result<
                 let Some(sessions) = v.get("sessions").and_then(Value::as_array) else {
                     // Réponse hors forme page : erreur franche plutôt
                     // qu'un tableau vide silencieux dans le merge.
-                    anyhow::bail!("list_sessions_page: réponse hors forme");
+                    anyhow::bail!("list_sessions_page: malformed response");
                 };
                 let next = v.get("next_offset").and_then(Value::as_u64);
                 all.extend(sessions.iter().cloned());
@@ -295,7 +295,7 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                         use base64::Engine;
                         json!({"push":"term_data","term":tid,
                                "data": base64::engine::general_purpose::STANDARD
-                                   .encode("\r\n\x1b[31m[données perdues]\x1b[0m\r\n")})
+                                   .encode("\r\n\x1b[31m[data lost]\x1b[0m\r\n")})
                     }
                     Err(_) => break,
                 };
@@ -522,7 +522,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
                 .get("spec")
                 .cloned()
                 .and_then(|v| serde_json::from_value(v).ok())
-                .ok_or("component_upsert: spec absente ou invalide")?,
+                .ok_or("component_upsert: missing or invalid spec")?,
         },
         "component_remove" => ReqKind::ComponentRemove { name: s("name") },
         "component_catalog" => ReqKind::ComponentCatalog {
@@ -534,7 +534,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
                 None => None,
                 Some(v) => Some(
                     serde_json::from_value(v.clone())
-                        .map_err(|e| format!("component_install: params invalides: {e}"))?,
+                        .map_err(|e| format!("component_install: invalid params: {e}"))?,
                 ),
             },
         },
@@ -544,7 +544,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
                 .get("params")
                 .cloned()
                 .and_then(|v| serde_json::from_value(v).ok())
-                .ok_or("component_set_params: params absents ou invalides")?,
+                .ok_or("component_set_params: missing or invalid params")?,
         },
         "term_open" => ReqKind::TermOpen {
             session: s("session"),
@@ -582,7 +582,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             prompt: so("prompt"),
             group: so("group"),
         },
-        m => return Err(format!("méthode inconnue: {m}")),
+        m => return Err(format!("unknown method: {m}")),
     })
 }
 

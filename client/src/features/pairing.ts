@@ -22,6 +22,7 @@ import { invoke } from "../core/bridge";
 import { $, esc } from "../core/dom";
 import { accentOf, isAndroid } from "../core/chrome";
 import { t } from "../i18n";
+import { codedErrorMsg } from "../core/errcode";
 import { parsePair } from "./pair-payload";
 import type { SavedConn } from "../core/types";
 
@@ -245,7 +246,7 @@ export async function renderAccesses(
         .then(() => void renderAccesses(cfg, els, onErr))
         .catch((e) => {
           btn.disabled = false;
-          report(String(e));
+          report(codedErrorMsg(e, "pair"));
         });
     };
     ul.appendChild(li);
@@ -317,7 +318,7 @@ async function beginPair(s: PairSession) {
         return;
       }
     }
-    qrStatus(String(e), true);
+    qrStatus(codedErrorMsg(e, "pair"), true);
   } finally {
     ($("qr-gen") as HTMLButtonElement).disabled = false;
   }
@@ -417,10 +418,10 @@ export function initPairing() {
     if (session) void beginPair(session);
   };
   ($("qr-alt-creds") as HTMLButtonElement).onclick = () => {
-    if (session) void credQr(session).catch((e) => qrStatus(String(e), true));
+    if (session) void credQr(session).catch((e) => qrStatus(codedErrorMsg(e, "pair"), true));
   };
   ($("qr-alt-ep") as HTMLButtonElement).onclick = () => {
-    if (session) void endpointQr(session).catch((e) => qrStatus(String(e), true));
+    if (session) void endpointQr(session).catch((e) => qrStatus(codedErrorMsg(e, "pair"), true));
   };
 }
 
