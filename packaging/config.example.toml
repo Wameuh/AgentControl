@@ -118,11 +118,12 @@ spawn_max_sessions = 20
 # e.g.
 #   command = [["my-adapter"], ["my-adapter", "--acp"]]
 #
-# The [agents.*] sections are hot-reloaded: a section added or edited
-# in this file is picked up at the next list_agents / daemon_status /
-# spawn, without restarting the daemon (upsert only — removing a
-# section does not tear the profile down until the next boot). The
-# other config sections are still only read at startup.
+# The [agents.*] sections are hot-reloaded: a section added, edited
+# or removed in this file converges at the next list_agents /
+# daemon_status / spawn — and within ~60 s via the periodic rescan —
+# without restarting the daemon. Hand-edited [[forges]] sections are
+# hot-reloaded the same way (first use + periodic rescan). The other
+# config sections are still only read at startup.
 # ---------------------------------------------------------------------------
 
 [agents.devin]
