@@ -976,6 +976,8 @@ mod tests {
             Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
                 vec![],
             ))),
+            crate::caps::CapsRegistry::in_memory(),
+            Arc::new(crate::catalogue::CatalogueCache::default()),
             std::collections::HashMap::new(),
         );
         let absent = tool_spec(&["ac-tool-inexistant-xyz"]);
@@ -1014,6 +1016,8 @@ mod tests {
             Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
                 vec![],
             ))),
+            crate::caps::CapsRegistry::in_memory(),
+            Arc::new(crate::catalogue::CatalogueCache::default()),
             std::collections::HashMap::new(),
         );
         let mut spec = tool_spec(&["sh", "-c", "echo 0.2.0"]);
@@ -1054,6 +1058,8 @@ mod tests {
             Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
                 vec![],
             ))),
+            crate::caps::CapsRegistry::in_memory(),
+            Arc::new(crate::catalogue::CatalogueCache::default()),
             std::collections::HashMap::new(),
         );
         c.upsert("t", tool_spec(&["sh"])).await.unwrap();

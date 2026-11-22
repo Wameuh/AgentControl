@@ -15,6 +15,7 @@ import { isAndroid, shellOpen } from "../core/chrome";
 import { t, type Key } from "../i18n";
 import { icon } from "../ui/icons";
 import { nav } from "../ui/nav";
+import { catalogFor, ensureCatalog } from "./modelcatalog";
 import type {
   AgentOpt,
   CatalogEntry,
@@ -650,24 +651,36 @@ export class ComponentsPanel {
   }
 
   /** Options d'une colonne du widget pool pour un profil donné :
-   *  modèles = caps.models + extra_models ; modes = caps.modes ;
-   *  effort = config_option « thought_level »/« effort » si annoncée.
+   *  modèles = caps.models + extra_models + catalogue du profil
+   *  (model_catalog — variantes hors annonce ACP, ex. devin) ;
+   *  modes = caps.modes ; effort = config_option
+   *  « thought_level »/« effort » si annoncée.
    *  Vide → champ texte libre (valeur hors vocabulaire tolérée). */
   private poolOpts(
     profile: string,
     field: "model" | "effort" | "mode",
   ): { v: string; n: string }[] {
     const a = this.poolAgents.get(profile);
+    if (field === "model") {
+      const out = new Map<string, string>();
+      for (const m of a?.caps?.models ?? []) out.set(m.value, m.name || m.value);
+      for (const e of a?.extra_models ?? [])
+        if (!out.has(e.value)) out.set(e.value, e.label || e.value);
+      // Variantes catalogue-only (catalogue_cmd côté démon) — badgées
+      // comme dans le sélecteur de session ; appliquées au spawn via le
+      // side-channel/env du profil, pas par set_config_option. Union même
+      // sans caps moissonnées : un profil jamais spawné garde son
+      // catalogue.
+      const cat = catalogFor(apiConn(this.connKey()) ?? "", profile);
+      if (cat)
+        for (const e of Object.values(cat))
+          if (!out.has(e.value))
+            out.set(e.value, `${e.label} · ${t("catalog_badge")}`);
+      return [...out].map(([v, n]) => ({ v, n }));
+    }
     if (!a?.caps) return [];
     if (field === "mode")
       return (a.caps.modes ?? []).map((o) => ({ v: o.value, n: o.name || o.value }));
-    if (field === "model") {
-      const out = new Map<string, string>();
-      for (const m of a.caps.models ?? []) out.set(m.value, m.name || m.value);
-      for (const e of a.extra_models ?? [])
-        if (!out.has(e.value)) out.set(e.value, e.label || e.value);
-      return [...out].map(([v, n]) => ({ v, n }));
-    }
     const co = (a.caps.config_options ?? []).find((o) =>
       /thought|effort|thinking/i.test(o.id),
     );
@@ -729,6 +742,13 @@ export class ComponentsPanel {
 
     const fillDatalist = (r: Row) => {
       const profile = r.profile.value;
+      // Réchauffe le catalogue du profil (RPC model_catalog, cache
+      // client 10 min) — le re-fill rejoue poolOpts quand les variantes
+      // arrivent ; profil sans catalogue_cmd → rien (datalist caps).
+      if (profile)
+        ensureCatalog(apiConn(this.connKey()) ?? "", profile, () =>
+          fillDatalist(r),
+        );
       (["model", "effort", "mode"] as const).forEach((f, i) => {
         const dl = r.dls[i];
         dl.innerHTML = "";

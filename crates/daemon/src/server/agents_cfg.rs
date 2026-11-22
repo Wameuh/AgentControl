@@ -86,6 +86,30 @@ fn caps_stale_at(
     (now - t >= CAPS_STALE_AFTER).then_some(t)
 }
 
+/// Variantes Devin cœur — repli statique quand `devin models list`
+/// n'existe pas (CLI trop vieux) ou que la sonde échoue. Uids réels du
+/// catalogue : seuls ces uids sont résolubles par `devin acp --model` /
+/// `devin -r --model` (les slugs de famille type « swe-2 » restent des
+/// alias CLI, pas des valeurs posables par session).
+const DEVIN_EXTRA_MODELS: &[(&str, &str)] = &[
+    ("adaptive", "Adaptive"),
+    ("swe-2-max", "SWE-2 Max"),
+    ("swe-2-high", "SWE-2 High"),
+    ("swe-2-medium", "SWE-2 Medium"),
+    ("swe-2-max-lightning", "SWE-2 Max Lightning"),
+    ("swe-2-high-lightning", "SWE-2 High Lightning"),
+    ("swe-2-medium-lightning", "SWE-2 Medium Lightning"),
+    ("swe-2-flash-max", "SWE-2 Flash Max"),
+    ("swe-2-flash-high", "SWE-2 Flash High"),
+    ("swe-2-flash-medium", "SWE-2 Flash Medium"),
+    ("swe-2-flash-max-lightning", "SWE-2 Flash Max Lightning"),
+    ("swe-2-flash-high-lightning", "SWE-2 Flash High Lightning"),
+    (
+        "swe-2-flash-medium-lightning",
+        "SWE-2 Flash Medium Lightning",
+    ),
+];
+
 /// Profils built-in du démon — `devin` et `cursor` sont toujours
 /// présents ; une section `[agents.<id>]` de config.toml les remplace
 /// ENTIÈRE (override complet, pas de merge par champ). Partagé par le
@@ -95,6 +119,11 @@ pub(crate) fn default_agents() -> HashMap<String, AgentProfile> {
     let mut m = HashMap::new();
     let mut devin_env = HashMap::new();
     devin_env.insert("DEVIN_PERMISSION_MODE".to_string(), "{mode}".to_string());
+    // DEVIN_MODEL : défaut des NOUVELLES sessions `devin acp` (résolution
+    // fuzzy comme /model — le catalogue `devin models list` entier est
+    // accepté, y compris les variantes hors annonce ACP). Une session/load
+    // garde le modèle persisté de son store — l'env n'y change rien.
+    devin_env.insert("DEVIN_MODEL".to_string(), "{model}".to_string());
     m.insert(
         "devin".into(),
         AgentProfile {
@@ -104,9 +133,29 @@ pub(crate) fn default_agents() -> HashMap<String, AgentProfile> {
             env: devin_env,
             compact: CompactPartial::default(),
             max_instances: DEFAULT_MAX_INSTANCES,
-            catalogue_cmd: None,
-            model_override_cmd: None,
-            extra_models: Vec::new(),
+            // Catalogue texte `devin models list` — le format indenté
+            // « uid  Label  [détails] » est celui que parse_catalog lit.
+            catalogue_cmd: Some("devin models list".into()),
+            // `devin -r` persiste le modèle dans le store natif AVANT que
+            // le TUI n'échoue sur stdout non-TTY (« Scrollback error »,
+            // exit 1) : exit {0,1} = commande exécutée, ≥2 = vraie erreur
+            // (argv, binaire). Vérifié en live : le modèle demandé est
+            // écrit dans sessions.db malgré l'exit 1.
+            model_override_cmd: Some(
+                "devin -r {native_sid} --model {model} --respect-workspace-trust false \
+                 || test $? -eq 1"
+                    .into(),
+            ),
+            // Repli statique pour les CLI sans `models list` (trop vieux)
+            // ou la sonde en échec — la fusion catalogue ∪ extras est
+            // dédupliquée par valeur.
+            extra_models: DEVIN_EXTRA_MODELS
+                .iter()
+                .map(|(value, label)| proto::ExtraModel {
+                    value: value.to_string(),
+                    label: label.to_string(),
+                })
+                .collect(),
             advisor_models: Vec::new(),
             provision_skills: true,
         },
@@ -860,6 +909,35 @@ mod tests {
         // Frontière : pile CAPS_STALE_AFTER → stale (>=).
         let edge = (now - CAPS_STALE_AFTER).to_rfc3339();
         assert!(caps_stale_at(Some(&edge), now).is_some());
+    }
+
+    /// Le preset devin déclare le catalogue modèles complet : sonde
+    /// `devin models list` + override side-channel `devin -r` (tolérance
+    /// exit 1 non-TTY) + repli statique extra_models + env DEVIN_MODEL.
+    /// Un profil sans `model_override_cmd` ne sert aucune valeur
+    /// catalogue (h_model_catalog l'exige).
+    #[test]
+    fn preset_devin_catalogue_complet() {
+        let d = &default_agents()["devin"];
+        assert_eq!(d.catalogue_cmd.as_deref(), Some("devin models list"));
+        let ov = d.model_override_cmd.as_deref().unwrap();
+        assert!(ov.contains("{native_sid}") && ov.contains("{model}"));
+        assert_eq!(
+            d.env.get("DEVIN_MODEL").map(String::as_str),
+            Some("{model}")
+        );
+        // Repli statique : valeurs coeur du catalogue (uids réels) —
+        // au moins adaptive + une variante swe-2 et flash.
+        for v in ["adaptive", "swe-2-high", "swe-2-flash-max"] {
+            assert!(
+                d.extra_models.iter().any(|e| e.value == v),
+                "extra_models missing {v}"
+            );
+        }
+        // Pas de doublons de valeur.
+        let mut seen = std::collections::HashSet::new();
+        assert!(d.extra_models.iter().all(|e| seen.insert(&e.value)));
+        assert_eq!(d.commands, vec![vec!["devin", "acp"]]);
     }
 
     /// caps_retry_after (sweep #268) : backoff ×2 par échec, plafonné —

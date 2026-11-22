@@ -127,19 +127,44 @@ spawn_max_sessions = 20
 name = "Devin CLI"
 command = ["devin", "acp"]
 
-# DEVIN_PERMISSION_MODE est lue par le CLI au démarrage.
-#
 # Variantes modèle hors annonce ACP (ex. swe-2-flash-max que Devin
-# n'expose pas dans config_options) : les deux clés ci-dessous activent
-# le catalogue + l'override side-channel. `catalogue_cmd` liste les
-# variantes complètes ; `model_override_cmd` persiste la valeur dans le
-# store provider entre le kill de l'agent ACP et le session/load —
-# {native_sid} et {model} sont substitués. Sans elles, seules les
-# valeurs annoncées ACP sont sélectionnables.
-# catalogue_cmd = "devin models list"
-# model_override_cmd = "devin -r {native_sid} --model {model} --respect-workspace-trust false"
+# n'expose pas dans config_options) : le preset built-in déclare déjà
+# `catalogue_cmd` (sonde `devin models list`, cache ~1 h) +
+# `model_override_cmd` (persiste la valeur dans le store provider
+# entre le kill de l'agent ACP et le session/load — {native_sid} et
+# {model} substitués pré-quotés, exécuté via sh -c) + un repli statique
+# `extra_models`. ⚠️ Une section [agents.devin] écrite ici REMPLACE le
+# preset entier : pour garder le catalogue il faut y redéclarer les
+# trois clés ci-dessous (`devin -r` sort 1 sur stdout non-TTY une fois
+# le modèle persisté — la tolérance `|| test $? -eq 1` évite un faux
+# échec).
+catalogue_cmd = "devin models list"
+model_override_cmd = "devin -r {native_sid} --model {model} --respect-workspace-trust false || test $? -eq 1"
+# Repli statique du preset — servi quand `devin models list` échoue
+# (CLI trop vieux) et fusionné au catalogue sinon (dédoublonné par
+# valeur).
+extra_models = [
+  { value = "adaptive", label = "Adaptive" },
+  { value = "swe-2-max", label = "SWE-2 Max" },
+  { value = "swe-2-high", label = "SWE-2 High" },
+  { value = "swe-2-medium", label = "SWE-2 Medium" },
+  { value = "swe-2-max-lightning", label = "SWE-2 Max Lightning" },
+  { value = "swe-2-high-lightning", label = "SWE-2 High Lightning" },
+  { value = "swe-2-medium-lightning", label = "SWE-2 Medium Lightning" },
+  { value = "swe-2-flash-max", label = "SWE-2 Flash Max" },
+  { value = "swe-2-flash-high", label = "SWE-2 Flash High" },
+  { value = "swe-2-flash-medium", label = "SWE-2 Flash Medium" },
+  { value = "swe-2-flash-max-lightning", label = "SWE-2 Flash Max Lightning" },
+  { value = "swe-2-flash-high-lightning", label = "SWE-2 Flash High Lightning" },
+  { value = "swe-2-flash-medium-lightning", label = "SWE-2 Flash Medium Lightning" },
+]
+
+# DEVIN_PERMISSION_MODE est lue par le CLI au démarrage ; DEVIN_MODEL
+# (preset built-in, "{model}") pose le modèle demandé à la création de
+# session — redéclaré ici pour les mêmes raisons.
 [agents.devin.env]
 DEVIN_PERMISSION_MODE = "{mode}"
+DEVIN_MODEL = "{model}"
 
 # Cursor CLI — ACP natif, preset BUILT-IN (id `cursor`, affiché dans le
 # sélecteur de session sans rien déclarer ici). argv[0] est résolu sur

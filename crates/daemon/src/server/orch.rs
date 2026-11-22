@@ -2749,7 +2749,7 @@ impl Daemon {
             entry.mode.as_str(),
             entry.effort.as_str(),
         );
-        self.warn_spawn_cfg(agent, model, mode);
+        self.warn_spawn_cfg(agent, model, mode).await;
         let v = match self
             .h_new_session(
                 agent.to_string(),
@@ -2781,13 +2781,18 @@ impl Daemon {
     /// → pas de warning (information absente, jamais bloquant ; le
     /// fallback réel est le défaut de l'agent si le spawn rejette —
     /// documenté : modes/modèles sont des vocabulaires par profil).
-    pub(crate) fn warn_spawn_cfg(self: &Arc<Self>, agent: &str, model: &str, mode: &str) {
+    pub(crate) async fn warn_spawn_cfg(self: &Arc<Self>, agent: &str, model: &str, mode: &str) {
         let agent = if agent.is_empty() {
             super::OrchCfg::default().agent
         } else {
             agent.to_string()
         };
-        let dyn_ = orch_cfg::dyn_choices(&self.root, &agent);
+        // Listes complètes : meta.json ∪ caps ∪ extra_models ∪
+        // catalogue (probe `catalogue_cmd`, cache borné) — une valeur
+        // catalogue (ex. swe-2-max sur devin) ne doit pas faussement
+        // alarmer : env/side-channel l'appliquent.
+        let src = orch_cfg::dyn_src(&self.agents, &self.caps, &self.catalogues, &agent).await;
+        let dyn_ = orch_cfg::dyn_choices_full(&self.root, &agent, &src);
         for (key, val, known) in [("model", model, &dyn_.models), ("mode", mode, &dyn_.modes)] {
             if !val.is_empty() && !known.is_empty() && !known.iter().any(|(v, _)| v.as_str() == val)
             {
@@ -2892,7 +2897,7 @@ impl Daemon {
         .chain(orch_plan::workflow_pairs(cfg))
         .collect();
         let prompt = orch_plan::fill(tpl, &pairs);
-        self.warn_spawn_cfg(&cfg.agent, &cfg.model, &cfg.mode);
+        self.warn_spawn_cfg(&cfg.agent, &cfg.model, &cfg.mode).await;
         let v = self
             .h_new_session(
                 cfg.agent.clone(),

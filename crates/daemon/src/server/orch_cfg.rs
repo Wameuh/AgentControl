@@ -122,6 +122,71 @@ pub(crate) struct DynChoices {
     pub thought_levels: Vec<(String, String)>,
 }
 
+/// Sources « profil » des listes dynamiques, rassemblées par l'appelant
+/// (le probe catalogue est async et mis en cache côté démon — voir
+/// `dyn_src`). Une meta.json de session ne dit que ce que la session a
+/// annoncé ; le profil sait plus : caps du registre (handshakes +
+/// probes), `extra_models` déclarés et catalogue `catalogue_cmd`.
+#[derive(Default)]
+pub(crate) struct DynSrc {
+    pub caps: Option<proto::AgentCaps>,
+    pub extra_models: Vec<proto::ExtraModel>,
+    pub catalogue: crate::catalogue::CatalogList,
+}
+
+/// Unionne des couples `(valeur, libellé)` dans `dst` — dédup par
+/// valeur, premier libellé vu faisant foi (les méta.json, annonce la
+/// plus fraîche d'une session réelle, passent avant le profil).
+pub(crate) fn push_pairs(
+    dst: &mut Vec<(String, String)>,
+    src: impl IntoIterator<Item = (String, String)>,
+) {
+    for (v, n) in src {
+        if !dst.iter().any(|(x, _)| x == &v) {
+            dst.push((v, n));
+        }
+    }
+}
+
+/// Couples `(valeur, libellé)` de la configOption `kind` des caps —
+/// `id` ou `category` matchant (même règle que `meta_config_values`) :
+/// un agent qui n'annonce ses modèles/modes/efforts que par
+/// configOption (codex : « model », devin : « thought_level ») les
+/// retrouve dans les dropdowns sans `availableModels`.
+fn caps_cfg_pairs<'a>(
+    caps: &'a proto::AgentCaps,
+    kind: &str,
+) -> impl Iterator<Item = (String, String)> + 'a {
+    caps.config_options
+        .iter()
+        .find(|o| o.id == kind || o.category == kind)
+        .into_iter()
+        .flat_map(|o| o.options.iter().map(|x| (x.value.clone(), x.name.clone())))
+}
+
+/// Moisson des sources profil d'un agent pour les listes dynamiques —
+/// partagée par `warn_spawn_cfg` (server/orch.rs) et l'item
+/// `backlog-orchestrator` (components) : caps du registre,
+/// `extra_models` et catalogue sondé (`catalogue_cmd`, cache démon —
+/// probe borné ~25 s la première fois, TTL ensuite).
+pub(crate) async fn dyn_src(
+    agents: &tokio::sync::RwLock<HashMap<String, super::cfg::AgentProfile>>,
+    caps: &crate::caps::CapsRegistry,
+    catalogues: &crate::catalogue::CatalogueCache,
+    agent: &str,
+) -> DynSrc {
+    let profile = agents.read().await.get(agent).cloned();
+    let catalogue = match profile.as_ref().and_then(|p| p.catalogue_cmd.as_deref()) {
+        Some(cmd) => catalogues.get(agent, Some(cmd)).await,
+        None => Vec::new(),
+    };
+    DynSrc {
+        caps: caps.get(agent),
+        extra_models: profile.map(|p| p.extra_models).unwrap_or_default(),
+        catalogue,
+    }
+}
+
 /// Valeurs connues d'un config_id sur une métadonnée de session :
 /// options ACP (`config_options`, match `id` ou `category`, en
 /// couples valeur/libellé) complétées par `available_models` /
@@ -198,6 +263,49 @@ pub(crate) fn dyn_choices(root: &Path, agent: &str) -> DynChoices {
     out
 }
 
+/// `dyn_choices` (scan des meta.json) ∪ les sources profil — ce que
+/// voient les dropdowns orchestrateur : modèles de `caps.models` ∪
+/// configOptions « model » ∪ `extra_models` ∪ catalogue, modes de
+/// `caps.modes` ∪ configOptions « mode », efforts de configOptions
+/// « thought_level ». Une annonce ACP vide (devin n'expose rien dans
+/// `availableModels`) ne laisse plus les paramètres en texte libre.
+pub(crate) fn dyn_choices_full(root: &Path, agent: &str, src: &DynSrc) -> DynChoices {
+    let mut out = dyn_choices(root, agent);
+    if let Some(c) = &src.caps {
+        push_pairs(
+            &mut out.models,
+            c.models.iter().map(|o| (o.value.clone(), o.name.clone())),
+        );
+        push_pairs(&mut out.models, caps_cfg_pairs(c, "model"));
+        push_pairs(
+            &mut out.modes,
+            c.modes.iter().map(|o| (o.value.clone(), o.name.clone())),
+        );
+        push_pairs(&mut out.modes, caps_cfg_pairs(c, "mode"));
+        push_pairs(&mut out.thought_levels, caps_cfg_pairs(c, "thought_level"));
+    }
+    push_pairs(
+        &mut out.models,
+        src.extra_models.iter().map(|e| {
+            (
+                e.value.clone(),
+                if e.label.is_empty() {
+                    e.value.clone()
+                } else {
+                    e.label.clone()
+                },
+            )
+        }),
+    );
+    push_pairs(
+        &mut out.models,
+        src.catalogue
+            .iter()
+            .map(|e| (e.value.clone(), e.label.clone())),
+    );
+    out
+}
+
 /// Param à liste dynamique : `known` non vide → enum ouverte (la
 /// valeur stockée hors liste est conservée, signalée « (?) » par le
 /// client) ; vide → texte libre comme avant.
@@ -230,20 +338,23 @@ fn dyn_ps(
 /// faisant foi. Sert le schéma quand les rôles (`*_agent`) pointent
 /// des profils différents : les dropdowns modèles/modes doivent
 /// couvrir tous les agents configurés (enum ouverte de toute façon).
-pub(crate) fn dyn_choices_multi(root: &Path, agents: &[&str]) -> DynChoices {
+/// `srcs` porte les sources profil moissonnées en amont (`dyn_src` —
+/// le probe catalogue est async) ; un agent absent de la map n'apporte
+/// que ses meta.json.
+pub(crate) fn dyn_choices_multi(
+    root: &Path,
+    agents: &[&str],
+    srcs: &HashMap<String, DynSrc>,
+) -> DynChoices {
     let mut out = DynChoices::default();
-    let merge = |dst: &mut Vec<(String, String)>, src: Vec<(String, String)>| {
-        for (v, n) in src {
-            if !dst.iter().any(|(x, _)| x == &v) {
-                dst.push((v, n));
-            }
-        }
-    };
     for a in agents {
-        let d = dyn_choices(root, a);
-        merge(&mut out.models, d.models);
-        merge(&mut out.modes, d.modes);
-        merge(&mut out.thought_levels, d.thought_levels);
+        let d = match srcs.get(*a) {
+            Some(s) => dyn_choices_full(root, a, s),
+            None => dyn_choices(root, a),
+        };
+        push_pairs(&mut out.models, d.models);
+        push_pairs(&mut out.modes, d.modes);
+        push_pairs(&mut out.thought_levels, d.thought_levels);
     }
     out
 }
@@ -2266,5 +2377,136 @@ mod tests {
         assert!(schema
             .iter()
             .any(|p| p.key == "pr_reviewer_effort" && p.group.as_deref() == Some("pr_reviews")));
+    }
+
+    /// `dyn_choices_full` : meta.json ∪ caps.models ∪ configOptions
+    /// « model » ∪ extra_models ∪ catalogue — dédup par valeur,
+    /// premier libellé vu conservé ; modes/efforts ont leur propre
+    /// union (configOptions « mode » / « thought_level »).
+    #[test]
+    fn dyn_choices_full_union_sources() {
+        let root = std::env::temp_dir().join(format!("ac-dyn-{}", std::process::id()));
+        let sdir = root.join("sessions").join("s1");
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(
+            sdir.join("meta.json"),
+            serde_json::to_string(&json!({
+                "id": "s1", "agent": "devin", "title": "t", "cwd": "/tmp",
+                "created_at": "2026-01-01T00:00:00Z",
+                "available_models": ["m-meta"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let opt = |v: &str, n: &str| proto::ConfigOpt {
+            value: v.into(),
+            name: n.into(),
+            description: String::new(),
+        };
+        let src = DynSrc {
+            caps: Some(proto::AgentCaps {
+                models: vec![opt("m-announced", "Announced")],
+                modes: vec![opt("smart", "Smart")],
+                config_options: vec![
+                    proto::ConfigOption {
+                        id: "model".into(),
+                        name: "Model".into(),
+                        category: "model".into(),
+                        current_value: String::new(),
+                        options: vec![opt("m-announced", "Dup"), opt("m-cfg", "Cfg")],
+                    },
+                    proto::ConfigOption {
+                        id: "thought_level".into(),
+                        name: "Effort".into(),
+                        category: String::new(),
+                        current_value: String::new(),
+                        options: vec![opt("max", "Max")],
+                    },
+                ],
+                ..Default::default()
+            }),
+            extra_models: vec![proto::ExtraModel {
+                value: "m-extra".into(),
+                label: "Extra".into(),
+            }],
+            catalogue: vec![crate::catalogue::CatalogEntry {
+                value: "m-cat".into(),
+                label: "Cat".into(),
+            }],
+        };
+        let d = dyn_choices_full(&root, "devin", &src);
+        let vals: Vec<&str> = d.models.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(vals, ["m-meta", "m-announced", "m-cfg", "m-extra", "m-cat"]);
+        // Le doublon configOption n'écrase pas le libellé de
+        // l'annonce dédiée (caps.models).
+        assert_eq!(d.models[1].1, "Announced");
+        assert_eq!(
+            d.modes.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>(),
+            ["smart"]
+        );
+        assert_eq!(
+            d.thought_levels
+                .iter()
+                .map(|(v, _)| v.as_str())
+                .collect::<Vec<_>>(),
+            ["max"]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `caps_cfg_pairs` : match sur `id` OU `category` (codex range ses
+    /// modèles sous category="model"), jamais les deux faux.
+    #[test]
+    fn caps_cfg_pairs_id_ou_category() {
+        let caps = proto::AgentCaps {
+            config_options: vec![proto::ConfigOption {
+                id: "x".into(),
+                name: "Model".into(),
+                category: "model".into(),
+                current_value: String::new(),
+                options: vec![proto::ConfigOpt {
+                    value: "gpt-5.5".into(),
+                    name: "GPT".into(),
+                    description: String::new(),
+                }],
+            }],
+            ..Default::default()
+        };
+        let got: Vec<String> = caps_cfg_pairs(&caps, "model").map(|(v, _)| v).collect();
+        assert_eq!(got, ["gpt-5.5"]);
+        assert!(caps_cfg_pairs(&caps, "mode").next().is_none());
+    }
+
+    /// `dyn_choices_multi` : union sur plusieurs profils — dédup par
+    /// valeur ; un profil absent de `srcs` n'apporte que ses meta.json.
+    #[test]
+    fn dyn_choices_multi_union_agents() {
+        let root = std::env::temp_dir().join(format!("ac-dynm-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let mk = |v: &str| DynSrc {
+            caps: Some(proto::AgentCaps {
+                models: vec![proto::ConfigOpt {
+                    value: v.into(),
+                    name: format!("N-{v}"),
+                    description: String::new(),
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let srcs = HashMap::from([
+            ("a".to_string(), mk("m1")),
+            ("b".to_string(), mk("m1")),
+            ("c".to_string(), mk("m2")),
+        ]);
+        let d = dyn_choices_multi(&root, &["a", "b", "c"], &srcs);
+        assert_eq!(
+            d.models,
+            vec![
+                ("m1".to_string(), "N-m1".to_string()),
+                ("m2".to_string(), "N-m2".to_string())
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

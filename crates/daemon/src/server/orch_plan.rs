@@ -2703,7 +2703,7 @@ impl Daemon {
     ) -> Option<String> {
         let title = format!("{prefix}{number}");
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
-        self.warn_spawn_cfg(agent, model, mode);
+        self.warn_spawn_cfg(agent, model, mode).await;
         let v = match self
             .h_new_session(
                 agent.to_string(),
