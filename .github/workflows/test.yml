@@ -118,5 +118,12 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      # npm ci + audit sur le lockfile client — setup-node explicite
+      # plutôt que le Node préinstallé du runner (version non garantie).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
       - run: npm ci && npm audit --omit=dev --audit-level=high
         working-directory: client
