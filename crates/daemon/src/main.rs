@@ -134,16 +134,18 @@ fn parse_cli() -> Result<Cli> {
     Ok(cli)
 }
 
-/// Le listener web ne doit JAMAIS exposer le démon sur le réseau :
-/// loopback strict, l'accès distant passe par le tunnel SSH (`ssh -L`).
-fn check_loopback(addr: &str) -> Result<()> {
+/// Les listeners du démon ne doivent JAMAIS exposer le démon sur le
+/// réseau : loopback strict, l'accès distant passe par le tunnel SSH
+/// (`ssh -L`). `name` = la clé de config fautive, pour un message qui
+/// indique exactement quoi corriger.
+fn check_loopback(name: &str, addr: &str) -> Result<()> {
     let host = addr
         .rsplit_once(':')
         .map(|(h, _)| h.trim_matches(['[', ']']))
         .unwrap_or_default();
     anyhow::ensure!(
         matches!(host, "127.0.0.1" | "localhost" | "::1"),
-        "bind_http « {addr} » is not loopback — use 127.0.0.1 / ::1 \
+        "{name} « {addr} » is not loopback — use 127.0.0.1 / ::1 \
          (remote access goes through ssh -L, never network exposure)"
     );
     Ok(())
@@ -354,7 +356,10 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         let _ = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600));
     }
 
-    // TCP loopback (pour tunnel SSH `ssh -L`)
+    // TCP loopback (pour tunnel SSH `ssh -L`) — même garde que
+    // bind_http : un bind_tcp hors loopback exposerait le démon sur le
+    // réseau sans authentification.
+    check_loopback("bind_tcp", &cfg.bind_tcp)?;
     let tcp_listener = tokio::net::TcpListener::bind(&cfg.bind_tcp)
         .await
         .with_context(|| format!("bind {}", cfg.bind_tcp))?;
@@ -363,7 +368,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // web.token. Une panne/erreur de ce listener ne doit pas abattre le
     // démon → tâche séparée, hors du select de shutdown.
     if let Some(addr) = &bind_http {
-        check_loopback(addr)?;
+        check_loopback("bind_http", addr)?;
         let token = gen_web_token(root)?;
         let assets = resolve_assets(web_dir_cfg.as_deref(), root);
         match &assets {

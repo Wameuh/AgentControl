@@ -109,6 +109,11 @@ const GIANT_LINE_BYTES: usize = 256 * 1024;
 /// Un flush qui ne s'écoule pas en 30 s = lien noir : la connexion meurt
 /// au lieu de rester zombie avec sa file qui gonfle.
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Longueur max d'une ligne de requête NDJSON : `BufReader::lines` n'a
+/// aucune borne — une ligne sans '\n' gonflait la mémoire sans fin.
+/// write_file accepte 16 Mio de données encodées : 32 Mio laisse de la
+/// marge. Au-delà la connexion est refermée (cf. next_bounded_line).
+const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Étiquette cheap d'une ligne géante déjà sérialisée : push →
 /// `push=<genre>` + type_tag de l'event quand présent ; réponse →
@@ -1188,13 +1193,20 @@ impl Daemon {
     }
 
     /// Sert une connexion : lit des Request en NDJSON, écrit Response/Push.
-    /// Retourne quand le client se déconnecte.
-    pub async fn serve_conn<S>(self: &Arc<Self>, stream: S) -> Result<()>
+    /// `peer` = étiquette d'origine pour les logs (« unix#n »,
+    /// « tcp <addr> », « ws <addr> »). Retourne quand le client se
+    /// déconnecte — et dès la première ligne invalide : le protocole n'a
+    /// pas de ligne non-JSON légitime et la tolérer laissait une requête
+    /// HTTP quelconque exécuter son corps comme RPC.
+    pub async fn serve_conn<S>(self: &Arc<Self>, stream: S, peer: &str) -> Result<()>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let (read, write) = tokio::io::split(stream);
-        let mut lines = BufReader::new(read).lines();
+        let mut reader = BufReader::new(read);
+        // Fragment de ligne en cours — persiste entre les appels bornés
+        // (un poll interrompu par le select! ne perd aucun octet).
+        let mut line_buf: Vec<u8> = Vec::new();
         // Tâche d'écriture dédiée : seule propriétaire du socket sortant,
         // alimentée par une file bornée. Avant, tout l'émission passait par
         // un Mutex<BufWriter> awaité inline — un flush piétinant (tunnel
@@ -1281,7 +1293,7 @@ impl Daemon {
 
         loop {
             tokio::select! {
-                line = lines.next_line() => {
+                line = next_bounded_line(&mut reader, &mut line_buf) => {
                     let line = match line {
                         Ok(Some(l)) => l,
                         // EOF propre (client parti) vs erreur de lecture :
@@ -1289,19 +1301,44 @@ impl Daemon {
                         Ok(None) => return Ok(()),
                         Err(e) => return Err(e).context("reading conn"),
                     };
-                    if line.trim().is_empty() {
+                    if line.iter().all(|b| b.is_ascii_whitespace()) {
                         continue;
+                    }
+                    // Requête HTTP sur le socket RPC : fermer SANS
+                    // répondre — le corps serait sinon lu comme NDJSON.
+                    if is_http_request_line(&line) {
+                        warn!("conn {peer}: http request line — closing cross-protocol conn");
+                        return Ok(());
                     }
                     // L'id est extrait du JSON brut AVANT la désérialisation
                     // stricte : une ReqKind inconnue (client plus récent) ne
                     // doit pas répondre avec id=0 — le client route par id et
                     // dropperait l'erreur → timeout de 60 s pour rien.
-                    let raw: Value = match serde_json::from_str(&line) {
+                    let raw: Value = match serde_json::from_slice(&line) {
                         Ok(v) => v,
                         Err(e) => {
+                            // Autre ligne non-JSON : erreur parse (debug
+                            // client) puis fermeture — voir doc serve_conn.
                             let resp = Response::err(0, format!("parse: {e}"));
                             Self::send_resp(&outbox, &resp)?;
-                            continue;
+                            // La réponse doit sortir avant la fermeture :
+                            // la tâche d'écriture est avortée au retour —
+                            // bref délai borné pour vider la file.
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_millis(500),
+                                async {
+                                    while outbox
+                                        .queued
+                                        .load(std::sync::atomic::Ordering::Relaxed)
+                                        > 0
+                                    {
+                                        tokio::time::sleep(std::time::Duration::from_millis(5))
+                                            .await;
+                                    }
+                                },
+                            )
+                            .await;
+                            return Ok(());
                         }
                     };
                     let req: Request = match serde_json::from_value(raw.clone()) {
@@ -1867,6 +1904,294 @@ mod tests {
             "1"
         );
     }
+
+    // --- Connexion NDJSON : ligne invalide, borne, cross-protocol ----
+
+    use super::{is_http_request_line, next_bounded_line, Daemon, MAX_LINE_BYTES};
+    use serde_json::Value;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    /// Daemon minimal en tempdir — aucun listener ouvert, aucune
+    /// session : juste de quoi servir une connexion NDJSON sur duplex.
+    async fn daemon_test(tag: &str) -> Arc<Daemon> {
+        let root = std::env::temp_dir().join(format!("ac-serveconn-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let (d, _resumable) = Daemon::open(
+            root,
+            HashMap::new(),
+            super::RetentionCfg::default(),
+            super::A2aCfg::default(),
+            Vec::new(),
+            "127.0.0.1:0".into(),
+            super::OrchCfg::default(),
+            super::CompactCfg::default(),
+            super::WatchdogCfg::default(),
+            false,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+        d
+    }
+
+    /// Première ligne HTTP (« METHOD cible HTTP/v ») — signature
+    /// byte-level du garde cross-protocol.
+    #[test]
+    fn http_request_line_detection() {
+        assert!(is_http_request_line(b"GET / HTTP/1.1"));
+        assert!(is_http_request_line(b"POST /api/x HTTP/2"));
+        assert!(is_http_request_line(b"OPTIONS * HTTP/1.1"));
+        assert!(is_http_request_line(b"CONNECT h:443 HTTP/1.1"));
+        assert!(!is_http_request_line(b"{\"id\":1,\"req\":\"x\"}"));
+        // Pas de cible séparée par un espace.
+        assert!(!is_http_request_line(b"GET /HTTP/1.1"));
+        assert!(!is_http_request_line(b"GET / HTTP/"));
+        // Méthode hors liste / casse → pas une request line reconnue :
+        // retombe sur le chemin « ligne non-JSON » (erreur puis close).
+        assert!(!is_http_request_line(b"PRI * HTTP/2.0"));
+        assert!(!is_http_request_line(b"get / http/1.1"));
+        assert!(!is_http_request_line(b""));
+    }
+
+    /// La borne de ligne : au-delà de MAX_LINE_BYTES la lecture échoue
+    /// sans lire le reste ; exactement à la borne elle passe. '\n' et
+    /// '\r' finaux retirés, queue de flux sans '\n' rendue telle quelle.
+    #[tokio::test]
+    async fn bounded_line_cap() {
+        // Ligne énorme sans '\n' → erreur (le fragment reste dans buf :
+        // un appel Err = connexion morte, buf n'est pas réutilisé).
+        let big = vec![b'x'; MAX_LINE_BYTES + 8];
+        let mut buf = Vec::new();
+        assert!(next_bounded_line(&mut BufReader::new(&big[..]), &mut buf)
+            .await
+            .is_err());
+        // Pareil avec le '\n' tout à la fin : la borne frappe avant.
+        let mut big2 = vec![b'x'; MAX_LINE_BYTES + 8];
+        big2.push(b'\n');
+        assert!(
+            next_bounded_line(&mut BufReader::new(&big2[..]), &mut Vec::new())
+                .await
+                .is_err()
+        );
+        // Exactement à la borne + '\n' → ligne complète.
+        let mut ok = vec![b'y'; MAX_LINE_BYTES];
+        ok.push(b'\n');
+        let l = next_bounded_line(&mut BufReader::new(&ok[..]), &mut Vec::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(l.len(), MAX_LINE_BYTES);
+        // « a\r\nb » : '\r' retiré, queue sans '\n' rendue puis EOF.
+        let mut r = BufReader::new(&b"a\r\nb"[..]);
+        let mut buf = Vec::new();
+        assert_eq!(
+            next_bounded_line(&mut r, &mut buf).await.unwrap().unwrap(),
+            b"a"
+        );
+        assert_eq!(
+            next_bounded_line(&mut r, &mut buf).await.unwrap().unwrap(),
+            b"b"
+        );
+        assert!(next_bounded_line(&mut r, &mut buf).await.unwrap().is_none());
+    }
+
+    /// Une requête HTTP sur le socket NDJSON : la connexion se ferme
+    /// SANS répondre — le corps ne doit jamais être exécuté comme RPC.
+    #[tokio::test]
+    async fn serve_conn_ferme_sur_http() {
+        let d = daemon_test("http").await;
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let serve = {
+            let d = Arc::clone(&d);
+            tokio::spawn(async move { d.serve_conn(server, "tcp 127.0.0.1:9").await })
+        };
+        let (mut rd, mut wr) = tokio::io::split(client);
+        wr.write_all(b"POST / HTTP/1.1\r\nHost: x\r\n\r\n{\"id\":1,\"req\":\"daemon_status\"}\n")
+            .await
+            .unwrap();
+        let r = tokio::time::timeout(std::time::Duration::from_secs(5), serve)
+            .await
+            .expect("serve_conn stuck")
+            .expect("serve_conn task");
+        assert!(r.is_ok(), "{r:?}");
+        // Aucune réponse émise — surtout pas d'« ok:true » pour le corps
+        // JSON qui suivait les en-têtes HTTP.
+        let out = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut v = Vec::new();
+            rd.read_to_end(&mut v).await.map(|_| v)
+        })
+        .await
+        .expect("eof")
+        .unwrap();
+        assert!(
+            out.is_empty(),
+            "réponse inattendue: {}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    /// Un JSON valide de `req` inconnue : erreur parse portant l'id, et
+    /// la connexion reste ouverte (compat client plus récent).
+    #[tokio::test]
+    async fn serve_conn_req_inconnue_reste_ouverte() {
+        let d = daemon_test("unknown").await;
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let serve = {
+            let d = Arc::clone(&d);
+            tokio::spawn(async move { d.serve_conn(server, "unix#1").await })
+        };
+        let (rd, mut wr) = tokio::io::split(client);
+        let mut rd = BufReader::new(rd);
+        wr.write_all(b"{\"id\":42,\"req\":\"no_such_req\"}\n")
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), rd.read_line(&mut line))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["id"], 42);
+        assert_eq!(v["ok"], false);
+        assert!(
+            v["error"].as_str().unwrap_or_default().contains("parse"),
+            "{v}"
+        );
+        // Toujours ouverte : une vraie requête obtient sa réponse.
+        wr.write_all(b"{\"id\":7,\"req\":\"list_sessions\"}\n")
+            .await
+            .unwrap();
+        line.clear();
+        tokio::time::timeout(std::time::Duration::from_secs(5), rd.read_line(&mut line))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["id"], 7);
+        assert_eq!(v["ok"], true);
+        drop(wr);
+        drop(rd);
+        tokio::time::timeout(std::time::Duration::from_secs(5), serve)
+            .await
+            .expect("serve_conn stuck")
+            .expect("serve_conn task")
+            .unwrap();
+    }
+
+    /// Une ligne non-JSON (autre qu'HTTP) : l'erreur parse part d'abord,
+    /// puis la connexion se ferme.
+    #[tokio::test]
+    async fn serve_conn_ligne_non_json_ferme() {
+        let d = daemon_test("garbage").await;
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let serve = {
+            let d = Arc::clone(&d);
+            tokio::spawn(async move { d.serve_conn(server, "tcp 127.0.0.1:10").await })
+        };
+        let (rd, mut wr) = tokio::io::split(client);
+        let mut rd = BufReader::new(rd);
+        wr.write_all(b"pas du json\n").await.unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), rd.read_line(&mut line))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["id"], 0);
+        assert_eq!(v["ok"], false);
+        assert!(
+            v["error"].as_str().unwrap_or_default().contains("parse"),
+            "{v}"
+        );
+        // Puis fermeture : EOF côté client, serve_conn retourné propre.
+        line.clear();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), rd.read_line(&mut line))
+            .await
+            .expect("timeout")
+            .unwrap();
+        assert_eq!(n, 0, "{line}");
+        tokio::time::timeout(std::time::Duration::from_secs(5), serve)
+            .await
+            .expect("serve_conn stuck")
+            .expect("serve_conn task")
+            .unwrap();
+    }
+}
+
+/// Première ligne d'une requête HTTP (`^(GET|POST|…|TRACE) \S+ HTTP/\d`).
+/// Un tel flux n'est pas du NDJSON — détecté pour refermer la connexion
+/// sans répondre plutôt que d'exécuter un éventuel corps JSON (un POST
+/// navigateur en `no-cors` n'a pas besoin de préflight pour atteindre le
+/// port local). Comparé sur octets : nul besoin d'UTF-8 pour repérer
+/// « METHOD cible HTTP/v ».
+fn is_http_request_line(line: &[u8]) -> bool {
+    const METHODS: [&[u8]; 9] = [
+        b"GET", b"POST", b"PUT", b"PATCH", b"DELETE", b"HEAD", b"OPTIONS", b"CONNECT", b"TRACE",
+    ];
+    METHODS.iter().any(|m| {
+        let Some(rest) = line.strip_prefix(*m) else {
+            return false;
+        };
+        let Some(rest) = rest.strip_prefix(b" ") else {
+            return false;
+        };
+        // \S+ = la cible jusqu'au prochain espace ; « HTTP/ » + chiffre.
+        let Some(sp) = rest.iter().position(|b| *b == b' ') else {
+            return false;
+        };
+        let (target, ver) = (&rest[..sp], &rest[sp + 1..]);
+        !target.is_empty()
+            && ver.starts_with(b"HTTP/")
+            && ver.get(5).is_some_and(|b| b.is_ascii_digit())
+    })
+}
+
+/// Prochaine ligne de la connexion, bornée à `MAX_LINE_BYTES` octets de
+/// payload (terminaison `\n` retirée, `\r` final aussi — mêmes lignes
+/// que `BufReader::lines`, queue de flux sans '\n' rendue pareil).
+/// `buf` accumule entre les appels : un poll interrompu par le `select!`
+/// de `serve_conn` ne perd aucun octet (fill_buf→consume est atomique
+/// vis-à-vis de l'annulation). Err sur I/O ou dépassement — le reste de
+/// la ligne n'est jamais lu, la connexion est refermée.
+async fn next_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> Result<Option<Vec<u8>>> {
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            // EOF : ligne incomplète éventuelle = dernière ligne du flux.
+            return Ok(if buf.is_empty() {
+                None
+            } else {
+                Some(std::mem::take(buf))
+            });
+        }
+        match available.iter().position(|b| *b == b'\n') {
+            Some(i) => {
+                if buf.len() + i > MAX_LINE_BYTES {
+                    anyhow::bail!("request line exceeds {MAX_LINE_BYTES} bytes");
+                }
+                buf.extend_from_slice(&available[..i]);
+                reader.consume(i + 1);
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+                return Ok(Some(std::mem::take(buf)));
+            }
+            None => {
+                if buf.len() + available.len() > MAX_LINE_BYTES {
+                    anyhow::bail!("request line exceeds {MAX_LINE_BYTES} bytes");
+                }
+                let n = available.len();
+                buf.extend_from_slice(available);
+                reader.consume(n);
+            }
+        }
+    }
 }
 
 /// Cycle de vie d'une conn cliente : open → durée → raison de close.
@@ -1895,7 +2220,7 @@ pub async fn accept_unix(daemon: Arc<Daemon>, listener: tokio::net::UnixListener
                 tokio::spawn(async move {
                     let t0 = std::time::Instant::now();
                     let s: UnixStream = stream;
-                    let r = d.serve_conn(s).await;
+                    let r = d.serve_conn(s, &id).await;
                     log_conn_close(&id, t0, &r);
                 });
             }
@@ -1917,8 +2242,9 @@ pub async fn accept_tcp(daemon: Arc<Daemon>, listener: tokio::net::TcpListener) 
                 info!("conn tcp open {addr}");
                 tokio::spawn(async move {
                     let t0 = std::time::Instant::now();
-                    let r = d.serve_conn(stream).await;
-                    log_conn_close(&format!("tcp {addr}"), t0, &r);
+                    let peer = format!("tcp {addr}");
+                    let r = d.serve_conn(stream, &peer).await;
+                    log_conn_close(&peer, t0, &r);
                 });
             }
             Err(e) => {

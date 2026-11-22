@@ -83,11 +83,14 @@ pub async fn upgrade_and_serve(
     let d = Arc::clone(&daemon);
     let mut conn = tokio::spawn(async move {
         let t0 = std::time::Instant::now();
-        let r = d.serve_conn(tokio::io::join(srv_in, srv_out)).await;
+        let peer_lbl = format!("ws {peer}");
+        let r = d
+            .serve_conn(tokio::io::join(srv_in, srv_out), &peer_lbl)
+            .await;
         let secs = t0.elapsed().as_secs();
         match &r {
-            Ok(()) => tracing::info!("conn ws {peer} closed ({secs}s) — client gone"),
-            Err(e) => tracing::info!("conn ws {peer} close ({secs}s): {e:#}"),
+            Ok(()) => tracing::info!("conn {peer_lbl} closed ({secs}s) — client gone"),
+            Err(e) => tracing::info!("conn {peer_lbl} close ({secs}s): {e:#}"),
         }
         r
     });

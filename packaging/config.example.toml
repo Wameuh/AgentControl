@@ -1,7 +1,8 @@
 # Configuration agentcontrol-daemon — ~/.agentcontrol/config.toml
 
-# Listener TCP loopback (tunnelé par le client via ssh -L). Ne pas binder 0.0.0.0
-# sans TLS/auth — tout le monde sur la machine pourrait piloter les agents.
+# Listener TCP loopback (tunnelé par le client via ssh -L). Le démon refuse
+# de démarrer sur une adresse non-loopback — une exposition réseau donnerait
+# à tout le monde sur le réseau le contrôle des agents.
 bind_tcp = "127.0.0.1:7331"
 
 # Interface web : le démon sert la même SPA que le client Tauri — sessions,
