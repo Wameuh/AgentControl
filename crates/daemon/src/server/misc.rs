@@ -75,6 +75,14 @@ impl Daemon {
             // /plugin/<name>/ (vues plugin en iframe
             // sandboxée — option B).
             "plugin_views": true,
+            // Gate capacité : ce démon exige `auth` en 1re ligne du
+            // port TCP et sert `token_rotate`. `token_path` = où relire
+            // le jeton côté admin (fichier 0600 — jamais renvoyé par
+            // RPC). Un vieux démon n'a pas ce bloc (pre-auth).
+            "auth": {
+                "tcp": true,
+                "token_path": self.root.join("daemon.token").display().to_string(),
+            },
             "host": host,
         }))
     }
@@ -122,6 +130,30 @@ impl Daemon {
         tokio::task::spawn_blocking(move || crate::selfupdate::self_update(&version))
             .await
             .context("self-update task")?
+    }
+
+    /// `TokenRotate` (`acctl token rotate`) : régénère `daemon.token`
+    /// (écriture atomique, 0600) puis diffuse la nouvelle valeur —
+    /// `changed()` dans chaque conn TCP révoque les conns ouvertes :
+    /// ré-authentification exigée au reconnect. Le jeton n'est JAMAIS
+    /// renvoyé par RPC — l'admin le relit dans le fichier.
+    /// `send_replace` (pas `send`) : un send() sans receivers échouerait
+    /// en silence si aucune conn TCP n'était ouverte à cet instant.
+    /// La diffusion est différée ~150 ms : un rotate émis DEPUIS une
+    /// conn TCP a sa réponse encore en vol (dispatch spawné) — la
+    /// révocation laisse d'abord sortir l'outbox (drain dans
+    /// serve_conn), sinon le client perdrait sa propre réponse.
+    pub(super) async fn h_token_rotate(self: &Arc<Self>) -> Result<Value> {
+        let root = self.root.clone();
+        let t = tokio::task::spawn_blocking(move || crate::regen_token(&root, "daemon.token"))
+            .await
+            .context("token rotate task")??;
+        let tx = self.tcp_token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            tx.send_replace(std::sync::Arc::from(t.as_str()));
+        });
+        Ok(json!({ "rotated": true }))
     }
     pub(super) async fn h_list_agents(self: &Arc<Self>) -> Result<Value> {
         // Hot-reload : les profils ajoutés à config.toml après

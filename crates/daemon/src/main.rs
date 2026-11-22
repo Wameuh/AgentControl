@@ -151,25 +151,88 @@ fn check_loopback(name: &str, addr: &str) -> Result<()> {
     Ok(())
 }
 
-/// Token d'accès web : aléa /dev/urandom (32 o → 64 hex), persisté
-/// `<root>/web.token` mode 600 — l'utilisateur le copie dans l'URL ou
-/// le colle dans le dialogue du front (`acctl status` l'affiche aussi
-/// via daemon_status.web.url).
-fn gen_web_token(root: &std::path::Path) -> Result<String> {
+/// Jeton 64 hex — 32 octets /dev/urandom. Source partagée par
+/// `web.token` (accès web UI) et `daemon.token` (auth du port TCP).
+fn new_token() -> Result<String> {
     use std::io::Read;
     let mut b = [0u8; 32];
     std::fs::File::open("/dev/urandom")
         .context("/dev/urandom")?
         .read_exact(&mut b)?;
-    let token: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    let p = root.join("web.token");
-    std::fs::write(&p, &token).context("writing web.token")?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
+/// Écriture atomique `<name>.part` + `rename`, mode 0600 dès la
+/// création — le jeton n'est jamais tronqué à moitié écrit ni lisible
+/// par un autre utilisateur dans une fenêtre d'umask.
+fn write_token_file(path: &std::path::Path, token: &str) -> Result<()> {
+    use std::io::Write;
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".part");
+    let tmp = path.with_file_name(tmp_name);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(&tmp)
+        .and_then(|mut f| f.write_all(token.as_bytes()))
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    // Windows refuse le rename sur une cible existante — micro-fenêtre
+    // acceptable (l'accès au port TCP est déjà un privilège local).
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(path);
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    // Le rename conserve les perms du .part — on refixe au cas où un
+    // ancien .part traînait avec un mode plus large que 0600.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
-    Ok(token)
+    Ok(())
+}
+
+/// Jeton de service persisté (`<root>/<name>`, 0600) : réutilise le
+/// fichier existant s'il est non vide — `daemon.token` doit survivre
+/// aux restarts sinon chaque boot invaliderait les clients. Resserre
+/// les perms d'un fichier hérité trop lisible.
+fn load_or_create_token(root: &std::path::Path, name: &str) -> Result<String> {
+    let p = root.join(name);
+    match std::fs::read_to_string(&p) {
+        Ok(t) => {
+            let t = t.trim().to_string();
+            if !t.is_empty() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+                }
+                return Ok(t);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
+    }
+    regen_token(root, name)
+}
+
+/// (Re)génère le jeton — neuf et atomique. `daemon.token` : appelé par
+/// `token_rotate` en plus du boot.
+pub(crate) fn regen_token(root: &std::path::Path, name: &str) -> Result<String> {
+    let t = new_token()?;
+    write_token_file(&root.join(name), &t)?;
+    Ok(t)
+}
+
+/// Token d'accès web : régénéré à chaque boot (les URLs du front sont
+/// éphémères), persisté `<root>/web.token` mode 600 — l'utilisateur le
+/// copie dans l'URL ou le colle dans le dialogue du front
+/// (`acctl status` l'affiche aussi via daemon_status.web.url).
+fn gen_web_token(root: &std::path::Path) -> Result<String> {
+    regen_token(root, "web.token")
 }
 
 /// Source des assets de la web UI, par ordre : `--web-dir`/`web_dir`
@@ -316,6 +379,12 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // fonction que le hot-reload (agents_cfg.rs).
     let agents = server::agents_cfg::full_agent_profiles(cfg.agents);
 
+    // Jeton d'authentification du port TCP — créé ici (avant tout
+    // bind) : le loopback ne vaut pas isolation par utilisateur, un
+    // autre compte local ou un `ssh -L` atteint le port.
+    let tcp_token: std::sync::Arc<str> =
+        std::sync::Arc::from(load_or_create_token(root, "daemon.token")?);
+
     let (daemon, resumable) = Daemon::open(
         root.to_path_buf(),
         agents,
@@ -328,6 +397,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         cfg.watchdog.clone(),
         cfg.provision_skills,
         cfg.catalog.clone(),
+        tcp_token,
     )
     .await?;
     tracing::info!(

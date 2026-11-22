@@ -290,6 +290,14 @@ pub struct NativeGuard {
 }
 
 impl NativeGuard {
+    /// Exec sur la session SSH vivante (le canal direct-tcpip n'est
+    /// qu'un flux parmi d'autres) — utilisé pour relire `daemon.token`
+    /// sans passer par le canal data : le jeton ne transite que par la
+    /// session authentifiée, jamais en clair sur le port TCP.
+    pub async fn exec(&self, script: &str) -> Result<(i32, String, String)> {
+        exec_on(&self.h, script, None).await
+    }
+
     /// Note post-mortem : la raison russh capturée si la session est
     /// morte, sinon la distinction canal-seul-fermé vs session morte.
     pub fn death_note(&self) -> String {

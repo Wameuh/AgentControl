@@ -51,9 +51,20 @@ def check(name, ok, extra=""):
 
 class Conn:
     """Ligne JSON par ligne sur le socket TCP du démon — démux par id."""
-    def __init__(self, port):
+    def __init__(self, port, home):
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=30)
         self.f = self.sock.makefile("rwb")
+        # B1 : le port TCP exige `auth` en première ligne — daemon.token
+        # vit à la racine du démon (0600). FileNotFoundError = démon pas
+        # encore prêt → la boucle d'appel retente.
+        token = open(os.path.join(home, "daemon.token")).read().strip()
+        self.f.write((json.dumps({"id": 0, "req": "auth", "token": token}) + "\n").encode())
+        self.f.flush()
+        line = self.f.readline()
+        if not line:
+            raise OSError("conn fermée avant la réponse auth")
+        resp = json.loads(line)
+        assert resp.get("ok"), f"tcp auth refusée: {resp}"
         self.n = 0
         self.lock = threading.Lock()
         self.pending = {}
@@ -160,7 +171,7 @@ def main():
         t0 = time.time()
         while time.time() - t0 < 15:
             try:
-                c = Conn(port)
+                c = Conn(port, home)
                 break
             except OSError:
                 if daemon.poll() is not None:

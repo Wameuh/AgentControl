@@ -65,11 +65,13 @@ async fn main() -> Result<()> {
                 expected_hk: None,
             }
         }
-        "tcp" | "close" => Transport::Tcp(
-            args.get(1)
+        "tcp" | "close" => Transport::Tcp {
+            addr: args
+                .get(1)
                 .context("usage: conn_probe tcp|close <addr>")?
                 .clone(),
-        ),
+            token: std::env::var("AGENTCONTROL_TOKEN").ok(),
+        },
         _ => {
             eprintln!("usage: conn_probe ssh <host> [-- args] | native <u@h[:p]> [-k clé] | tcp <addr> | close <addr>");
             std::process::exit(2);

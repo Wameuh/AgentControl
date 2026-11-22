@@ -46,8 +46,16 @@
 //!                                     config/set : édition persistée ;
 //!                                     metrics : série + agrégats)
 //!
+//!   acctl token rotate                    — régénère daemon.token et
+//!       révoque les connexions TCP ouvertes (ré-auth au reconnect ;
+//!       le jeton se relit dans le fichier — jamais affiché par RPC)
+//!
 //! Connexion : $AGENTCONTROL_SOCK (défaut ~/.agentcontrol/daemon.sock)
-//!             ou $AGENTCONTROL_TCP host:port
+//!             ou $AGENTCONTROL_TCP host:port — port TCP authentifié :
+//!             jeton pris dans $AGENTCONTROL_TOKEN, sinon relu dans
+//!             ${AGENTCONTROL_HOME:-$HOME/.agentcontrol}/daemon.token
+//!             (le fichier vit sur la machine du démon — acctl doit
+//!             donc tourner dessus, ou l'env doit porter le jeton)
 
 mod comp;
 mod pr;
@@ -64,15 +72,60 @@ pub(crate) struct Conn {
     next_id: u64,
 }
 
+/// Chemin du `daemon.token` local : ${AGENTCONTROL_HOME:-$HOME/.agentcontrol}/daemon.token.
+fn daemon_token_path() -> std::path::PathBuf {
+    let root = std::env::var("AGENTCONTROL_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+                .join(".agentcontrol")
+        });
+    root.join("daemon.token")
+}
+
+/// Handshake d'ouverture TCP : `auth` en 1re ligne quand un jeton est
+/// disponible (le démon récent l'exige ; un vieux démon répond
+/// « unknown variant `auth` » → mode pré-auth, la conn reste ouverte).
+/// Sans jeton, on laisse le premier appel recevoir « auth-required »
+/// — l'erreur porte alors la piste de résolution.
+async fn tcp_auth(c: &mut Conn) -> Result<()> {
+    let token = std::env::var("AGENTCONTROL_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string(daemon_token_path())
+                .ok()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+        });
+    let Some(token) = token else { return Ok(()) };
+    match c.call(proto::ReqKind::Auth { token }).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if msg.contains("unknown variant `auth`") {
+                // Démon pré-B1 : pas d'auth — la conn reste utilisable.
+                return Ok(());
+            }
+            Err(e).context(
+                "tcp auth refused — vérifier AGENTCONTROL_TOKEN ou le daemon.token distant",
+            )
+        }
+    }
+}
+
 async fn connect() -> Result<Conn> {
     if let Ok(addr) = std::env::var("AGENTCONTROL_TCP") {
         let s = TcpStream::connect(&addr).await.with_context(|| format!("tcp {addr}"))?;
         let (r, w) = s.into_split();
-        return Ok(Conn {
+        let mut c = Conn {
             w: Box::new(w),
             lines: BufReader::new(Box::new(r) as Box<dyn tokio::io::AsyncRead + Unpin + Send>).lines(),
             next_id: 1,
-        });
+        };
+        tcp_auth(&mut c).await?;
+        return Ok(c);
     }
     #[cfg(unix)]
     {
@@ -111,7 +164,17 @@ impl Conn {
         if resp.ok {
             Ok(resp.result.unwrap_or(Value::Null))
         } else {
-            bail!("{}", resp.error.unwrap_or_else(|| "?".into()))
+            let err = resp.error.unwrap_or_else(|| "?".into());
+            if err == proto::ERR_AUTH_REQUIRED {
+                // Le démon ferme la conn après cette réponse — le jeton
+                // manquait ou était faux (auth skip sans jeton, ou
+                // rotation entre-temps).
+                bail!(
+                    "{err} — jeton attendu en 1re ligne (AGENTCONTROL_TOKEN ou {})",
+                    daemon_token_path().display()
+                );
+            }
+            bail!("{err}")
         }
     }
 
@@ -245,7 +308,7 @@ const COMMANDS: &[&str] = &[
     "spawn", "events", "tail", "search", "find", "create", "resume",
     "attach", "fork", "cancel", "kill", "clear", "sleep", "rm", "mode",
     "model", "setcfg", "steps", "respond", "blob", "download", "write",
-    "pr", "comp", "orch",
+    "pr", "comp", "orch", "token",
 ];
 
 /// Distance d'édition de Levenshtein (deux rangées, noms courts).
@@ -290,7 +353,7 @@ fn suggest_command(input: &str) -> Option<&'static str> {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|pr|comp|orch|steps|daemon-update");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|pr|comp|orch|steps|token|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -308,6 +371,16 @@ async fn main() -> Result<()> {
                 c.call(proto::ReqKind::UpdateDaemon { version }).await?
             );
         }
+        // Rotation du jeton TCP : nouveau daemon.token côté démon +
+        // révocation des conns ouvertes. Un vieux démon répond
+        // « unknown variant `token_rotate` » — erreur claire.
+        "token" => match args.get(1).map(String::as_str) {
+            Some("rotate") => println!("{}", c.call(proto::ReqKind::TokenRotate).await?),
+            _ => {
+                eprintln!("usage: acctl token rotate");
+                std::process::exit(2);
+            }
+        },
         "agents" => {
             // `agents install <id>` : provisioning de l'adaptateur ACP
             // côté démon (npm i -g déclaré par le registre — #277) ;

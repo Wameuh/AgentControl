@@ -2,7 +2,7 @@
 //! subscribe (push → events Tauri), ensure_daemon (install via ssh).
 
 use anyhow::Result;
-use client_core::{Client, Level, Transport};
+use client_core::{sanitize_ssh_args, Client, Level, Transport};
 use proto::ReqKind;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -70,41 +70,6 @@ fn ssh_diag(cfg: &ConnectCfg) -> Result<Option<SshDiag>, String> {
     }
 }
 
-/// Les args de la cfg servent la joignabilité (`-p`, `-i`, `-o`,
-/// `-J`…) — ceux qui changent le mode de ssh sont retirés pour l'exec
-/// diag : `-N`/`-f`/`-T`/`-n` (pas de commande / pas de terminal /
-/// fond) et les forwards `-L`/`-R`/`-D` avec leur argument (un
-/// `-L…` glué seul suffirait à casser l'exec de toute façon, mais
-/// autant ne pas le passer). Tout autre token est conservé.
-fn sanitize_ssh_args(args: &[String]) -> Vec<String> {
-    let mut out = Vec::with_capacity(args.len());
-    let mut skip_next = false;
-    for a in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        match a.as_str() {
-            "-L" | "-R" | "-D" => {
-                skip_next = true;
-                continue;
-            }
-            s if s.starts_with("-L") || s.starts_with("-R") || s.starts_with("-D") => continue,
-            s => {
-                // Bundles de flags sans argument (-N, -f, -T, -n, -t
-                // et leurs combinaisons -NT, -tt…) — retirés : pas de
-                // commande, détachement ou tty forcé casseraient l'exec.
-                let f = s.strip_prefix('-').unwrap_or("");
-                if !f.is_empty() && f.chars().all(|c| "NfTnt".contains(c)) {
-                    continue;
-                }
-                out.push(a.clone());
-            }
-        }
-    }
-    out
-}
-
 /// Configure la connexion au démon.
 #[tauri::command]
 pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: ConnectCfg) -> Result<Value, String> {
@@ -115,7 +80,7 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
             let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
             Transport::Unix(home.join(".agentcontrol/daemon.sock"))
         }
-        ConnectCfg::Tcp { addr } => Transport::Tcp(addr),
+        ConnectCfg::Tcp { addr, token } => Transport::Tcp { addr, token },
         ConnectCfg::Ssh {
             host,
             remote_port,
@@ -512,7 +477,11 @@ pub(crate) async fn ensure_daemon(
     // — une version identique prouve que le listener est le sien (bind
     // TCP du même process) → l'upgrade continue ; une version différente
     // (autre démon managé ailleurs) ou aucune réponse (service étranger,
-    // timeout 4 s si `timeout` existe) → busy.
+    // timeout 4 s si `timeout` existe) → busy. Le probe porte
+    // AGENTCONTROL_TOKEN lu depuis daemon.token : sans lui un démon
+    // authentifié (B1) répondrait « auth-required » → faux busy.
+    // (acctl relit aussi le fichier lui-même — redondance par sécurité
+    // pour un AGENTCONTROL_HOME non standard.)
     // `rc=0; cmd || rc=$?` car `set -e` tue le shell sur tout échec de
     // commande — `rc=$?` seul ne s'exécuterait jamais.
     // `echo step:<id> >&2` : marqueurs de progression streamés sur
@@ -534,7 +503,7 @@ pub(crate) async fn ensure_daemon(
          own=\"\"; \
          if [ -n \"$ver\" ]; then \
          to=$(command -v timeout >/dev/null 2>&1 && echo \"timeout 4\" || true); \
-         own=$({{ AGENTCONTROL_TCP=127.0.0.1:{p} $to \"$ac\" status 2>/dev/null || true; }} | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
+         own=$({{ AGENTCONTROL_TCP=127.0.0.1:{p} AGENTCONTROL_TOKEN=$(cat \"${{AGENTCONTROL_HOME:-$HOME/.agentcontrol}}/daemon.token\" 2>/dev/null || true) $to \"$ac\" status 2>/dev/null || true; }} | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
          fi; \
          if [ -z \"$own\" ] || [ \"$own\" != \"$ver\" ]; then echo busy:127.0.0.1:{p}; exit 0; fi; \
          fi; \

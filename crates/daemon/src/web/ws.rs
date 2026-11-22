@@ -84,8 +84,10 @@ pub async fn upgrade_and_serve(
     let mut conn = tokio::spawn(async move {
         let t0 = std::time::Instant::now();
         let peer_lbl = format!("ws {peer}");
+        // Pas de gate TCP : l'auth du pont WS est portée par le
+        // handshake HTTP (web.token + vérification Origin) en amont.
         let r = d
-            .serve_conn(tokio::io::join(srv_in, srv_out), &peer_lbl)
+            .serve_conn(tokio::io::join(srv_in, srv_out), &peer_lbl, None)
             .await;
         let secs = t0.elapsed().as_secs();
         match &r {
