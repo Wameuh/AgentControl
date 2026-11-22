@@ -408,10 +408,14 @@ pub struct AgentCaps {
     /// Horodatage ISO de la dernière moisson.
     #[serde(default)]
     pub updated_at: String,
-    /// Modes ACP (`modes.availableModes` : id→`value`, name).
+    /// Modes ACP (`modes.availableModes` : id→`value`, name — ∪
+    /// `configOptions` id|category « mode » : certains agents n'annoncent
+    /// leurs modes que par configOption).
     #[serde(default)]
     pub modes: Vec<ConfigOpt>,
-    /// Modèles ACP (`models.availableModels` : modelId→`value`, name).
+    /// Modèles ACP (`models.availableModels` : modelId→`value`, name —
+    /// ∪ `configOptions` id|category « model » : codex/devin n'annoncent
+    /// leurs modèles que par configOption, jamais availableModels).
     #[serde(default)]
     pub models: Vec<ConfigOpt>,
     /// Options de config dynamiques (extension `config_option_update` —

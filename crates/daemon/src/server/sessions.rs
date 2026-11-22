@@ -699,10 +699,11 @@ impl Daemon {
     }
 
     /// Vrai si `value` est une variante catalogue-only pour la session :
-    /// présente dans le catalogue du profil (`catalogue_cmd`) ET absente
-    /// des valeurs modèle annoncées (config_options + available_models).
-    /// Profil sans catalogue/override → toujours faux : le chemin ACP
-    /// (set_config_option/set_model) reste inchangé.
+    /// présente dans le catalogue du profil (`catalogue_cmd` ou
+    /// `extra_models` — catalogue de secours déclaré) ET absente des
+    /// valeurs modèle annoncées (config_options + availableModels
+    /// réels). Profil sans catalogue/override → toujours faux : le
+    /// chemin ACP (set_config_option/set_model) reste inchangé.
     async fn catalogue_only(&self, s: &Arc<Session>, value: &str) -> bool {
         let meta = s.meta_snapshot();
         let Some(profile) = self.agents.read().await.get(&meta.agent).cloned() else {
@@ -711,11 +712,14 @@ impl Daemon {
         if profile.catalogue_cmd.is_none() || profile.model_override_cmd.is_none() {
             return false;
         }
-        let catalog = self
-            .catalogues
-            .get(&meta.agent, profile.catalogue_cmd.as_deref())
-            .await;
-        if !catalog.iter().any(|e| e.value == value) {
+        let in_catalog = profile.extra_models.iter().any(|e| e.value == value)
+            || self
+                .catalogues
+                .get(&meta.agent, profile.catalogue_cmd.as_deref())
+                .await
+                .iter()
+                .any(|e| e.value == value);
+        if !in_catalog {
             return false;
         }
         // Sans session/load le chemin est inapplicable (store indexé
@@ -723,9 +727,7 @@ impl Daemon {
         if meta.supports_load == Some(false) {
             return false;
         }
-        !crate::server::orch_cfg::meta_config_values(&meta, "model")
-            .iter()
-            .any(|(v, _)| v == value)
+        !model_announced(&meta, &profile.extra_models, value)
     }
 
     /// Modèle catalogue choisi sur une session endormie/morte : rien à
@@ -829,8 +831,8 @@ impl Daemon {
         // `devin -r` ne doit jamais tourner pendant qu'il vit.
         s.sleep_for_override().await;
         let rendered = tpl
-            .replace("{native_sid}", &native)
-            .replace("{model}", model);
+            .replace("{native_sid}", &sh_quote(&native))
+            .replace("{model}", &sh_quote(model));
         let cwd = meta.cwd.clone();
         let r = tokio::task::spawn_blocking(move || run_override_cmd(&rendered, &cwd))
             .await
@@ -962,6 +964,11 @@ impl Daemon {
         // n'est pas applicable — inutile de sonder pour rien.
         if p.catalogue_cmd.is_none() || p.model_override_cmd.is_none() {
             return false;
+        }
+        // extra_models = catalogue de secours déclaré : membres sans
+        // sonder (CLI trop vieux pour catalogue_cmd → liste vide).
+        if p.extra_models.iter().any(|e| e.value == value) {
+            return true;
         }
         self.catalogues
             .get(agent, p.catalogue_cmd.as_deref())
@@ -1896,26 +1903,59 @@ fn match_excerpt(hay: &str, needle: &str, ctx: usize) -> Option<String> {
     Some(s)
 }
 
-/// Exécute `model_override_cmd` (argv simple, `{native_sid}`/`{model}`
-/// déjà substitués par l'appelant) avec borne de temps — `devin -r …
-/// --model X` doit sortir vite (stdin EOF) ; au-delà on tue. Le stderr
-/// est capturé pour le message d'erreur.
+/// Entoure un mot de quotes simples pour `sh -c` — `'` interne échappé
+/// en `'\''`. `{native_sid}`/`{model}` sont substitués AVEC quoting :
+/// la valeur choisie (saisie libre possible) ne doit jamais pouvoir
+/// casser hors de l'argument — le template reste de la config de
+/// confiance, la valeur substituée non.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Modèle « annoncé », donc posable par l'ACP : option des
+/// config_options de la session, ou availableModels réellement
+/// remontés par l'agent. Les `extra_models` du profil fusionnent dans
+/// `available_models` au handshake mais ne sont que des déclarations
+/// daemon — un agent à config_options les refuse (devin : l'annonce
+/// modèle n'existe que via « model ») : ils relèvent du side-channel
+/// catalogue, pas de l'annonce.
+fn model_announced(meta: &proto::SessionMeta, extras: &[proto::ExtraModel], value: &str) -> bool {
+    let in_opts = meta
+        .config_options
+        .iter()
+        .find(|o| o.id == "model" || o.category == "model")
+        .is_some_and(|o| o.options.iter().any(|x| x.value == value));
+    in_opts
+        || meta
+            .available_models
+            .iter()
+            .any(|v| v == value && !extras.iter().any(|e| e.value == *v))
+}
+
+/// Exécute `model_override_cmd` via `sh -c` ({native_sid}/{model}
+/// substitués pré-quotés par l'appelant) avec borne de temps — `devin -r
+/// … --model X` doit sortir vite (exit 1 « Scrollback error » sur
+/// stdout non-TTY une fois le modèle persisté — le template le tolère
+/// via `|| test $? -eq 1`) ; au-delà on tue. Le stderr est capturé
+/// pour le message d'erreur. L'exécution shell (documentée
+/// « template shell » dans cfg.rs) autorise les compositions
+/// nécessaires à ces tolérances de code de sortie.
 fn run_override_cmd(cmdline: &str, cwd: &str) -> Result<()> {
     use std::io::Read;
     use std::process::{Command, Stdio};
-    let argv: Vec<String> = cmdline.split_whitespace().map(String::from).collect();
     anyhow::ensure!(
-        !argv.is_empty(),
+        !cmdline.trim().is_empty(),
         "model_override_cmd empty after substitution"
     );
-    let mut child = Command::new(&argv[0])
-        .args(&argv[1..])
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(cmdline)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("spawn override {}", argv[0]))?;
+        .with_context(|| "spawn override sh -c")?;
     let mut err = child.stderr.take();
     let err_reader = std::thread::spawn(move || {
         let mut b = Vec::new();
@@ -2182,5 +2222,71 @@ mod tests {
 
         assert!(up.join("s-victime").join("f").exists());
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// `sh_quote` : la valeur substituée dans `model_override_cmd`
+    /// (sh -c) reste un seul argument, quotes internes comprises —
+    /// un `'` ne casse pas hors de l'argument.
+    #[test]
+    fn sh_quote_neutralise_les_quotes() {
+        assert_eq!(sh_quote("swe-2-max"), "'swe-2-max'");
+        assert_eq!(sh_quote(""), "''");
+        assert_eq!(sh_quote("a'b"), "'a'\\''b'");
+        // Round-trip shell réel : la chaîne produite se re-parse en
+        // exactement un mot.
+        for (raw, _) in [("swe-2", ()), ("o'clock --x", ()), ("$(id)", ())] {
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("printf '%s' {}", sh_quote(raw)))
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8(out.stdout).unwrap(), raw);
+        }
+    }
+
+    /// `model_announced` : extra fusionné dans available_models ≠
+    /// annonce ACP — l'agent à config_options (devin) refuserait la
+    /// valeur ; une vraie annonce (option « model » ou availableModels
+    /// non-extra) reste posable en ACP.
+    #[test]
+    fn model_announced_distingue_extra_de_l_annonce_reelle() {
+        let extras = vec![
+            proto::ExtraModel {
+                value: "swe-2-max".into(),
+                label: "SWE-2 Max".into(),
+            },
+            proto::ExtraModel {
+                value: "swe-2-high".into(),
+                label: String::new(),
+            },
+        ];
+        // Session devin : configOption « model » annonce swe-2-high
+        // (aussi extra) ; available_models porte les extras fusionnés
+        // au handshake + une valeur remontée par l'agent.
+        let mut m = meta("idle");
+        m.config_options = vec![proto::ConfigOption {
+            id: "model".into(),
+            name: "Model".into(),
+            category: "model".into(),
+            current_value: "swe-2-high".into(),
+            options: vec![proto::ConfigOpt {
+                value: "swe-2-high".into(),
+                name: "SWE-2 High".into(),
+                description: String::new(),
+            }],
+        }];
+        m.available_models = vec![
+            "swe-2-max".into(),    // extra fusionné au handshake
+            "swe-2-high".into(),   // extra + option réelle
+            "swe-2-medium".into(), // annonce agent réelle
+        ];
+        // Extra-only → pas « annoncé » → catalogue_only → side-channel.
+        assert!(!model_announced(&m, &extras, "swe-2-max"));
+        // Dans les options réelles → annoncé malgré le statut d'extra.
+        assert!(model_announced(&m, &extras, "swe-2-high"));
+        // Annonce agent authentique (pas extra) → annoncé.
+        assert!(model_announced(&m, &extras, "swe-2-medium"));
+        // Hors de toute liste → pas annoncé.
+        assert!(!model_announced(&m, &extras, "n-importe-quoi"));
     }
 }

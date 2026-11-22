@@ -50,10 +50,16 @@ pub struct CapsRegistry {
 impl CapsRegistry {
     pub fn open(root: &Path) -> Arc<Self> {
         let path = root.join("agent_caps.json");
-        let map: HashMap<String, proto::AgentCaps> = std::fs::read_to_string(&path)
+        let mut map: HashMap<String, proto::AgentCaps> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+        // Snapshots persistés par un démon antérieur au repli
+        // configOptions → models/modes (codex garde ses modèles dans
+        // config_options[model] et laissait models vide, #345).
+        for c in map.values_mut() {
+            fold_config_options(c);
+        }
         Arc::new(Self {
             map: Mutex::new(map),
             path: Some(path),
@@ -139,6 +145,10 @@ impl CapsRegistry {
             let mut m = self.map.lock().unwrap();
             let e = m.entry(agent.to_string()).or_default();
             e.config_options = options.to_vec();
+            // Les listes dédiées suivent la même annonce : un agent qui
+            // ne publie ses modèles/modes que par configOption (codex,
+            // devin) remplit models/modes sans availableModels.
+            fold_config_options(e);
             // La notification porte aussi les valeurs courantes — les
             // indices de présélection restent frais entre deux probes.
             for (kind, cur) in [
@@ -266,7 +276,37 @@ pub(crate) fn caps_from_new_resp(resp: &Value) -> proto::AgentCaps {
     {
         c.current_model = v.to_string();
     }
+    fold_config_options(&mut c);
     c
+}
+
+/// Unionne les options `config_options` portant `id|category == kind`
+/// dans la liste dédiée (`models`/`modes`) : un agent qui n'annonce ses
+/// modèles que par configOption (codex : `category: "model"`, jamais
+/// `availableModels` ; devin : `id: "model"`) voit `models` rempli des
+/// mêmes valeurs — les points d'usage (list_agents, dyn_choices,
+/// poolOpts) n'ont plus à lire config_options séparément. Dédup par
+/// `value`, l'annonce `availableModels` garde priorité (libellé souvent
+/// plus riche).
+fn fold_config_options(caps: &mut proto::AgentCaps) {
+    for kind in ["model", "mode"] {
+        let opts: Vec<proto::ConfigOpt> = caps
+            .config_options
+            .iter()
+            .find(|o| o.id == kind || o.category == kind)
+            .map(|o| o.options.clone())
+            .unwrap_or_default();
+        let dst = if kind == "model" {
+            &mut caps.models
+        } else {
+            &mut caps.modes
+        };
+        for x in opts {
+            if !dst.iter().any(|d| d.value == x.value) {
+                dst.push(x);
+            }
+        }
+    }
 }
 
 /// Sonde les capacités d'un profil : spawn jetable de l'agent dans un
@@ -457,5 +497,59 @@ impl ProbeIo {
                 _ => return,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Le repli configOptions → models/modes : un agent n'annonçant ses
+    /// modèles que par configOption (codex `category:"model"`, devin
+    /// `id:"model"`) voit `models` rempli ; l'annonce dédiée
+    /// (`availableModels`) garde priorité sur le doublon.
+    #[test]
+    fn fold_config_options_enrichit_models_et_modes() {
+        let opt = |v: &str| proto::ConfigOpt {
+            value: v.into(),
+            name: format!("N-{v}"),
+            description: String::new(),
+        };
+        let mut c = proto::AgentCaps {
+            models: vec![opt("m-dedie")],
+            config_options: vec![
+                proto::ConfigOption {
+                    id: "model".into(),
+                    options: vec![opt("m-cfg"), opt("m-dedie")],
+                    ..Default::default()
+                },
+                proto::ConfigOption {
+                    id: "x".into(),
+                    category: "mode".into(),
+                    options: vec![opt("mo-cfg")],
+                    ..Default::default()
+                },
+                proto::ConfigOption {
+                    id: "thought_level".into(),
+                    options: vec![opt("max")],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        fold_config_options(&mut c);
+        assert_eq!(
+            c.models
+                .iter()
+                .map(|m| m.value.as_str())
+                .collect::<Vec<_>>(),
+            ["m-dedie", "m-cfg"]
+        );
+        assert_eq!(
+            c.modes.iter().map(|m| m.value.as_str()).collect::<Vec<_>>(),
+            ["mo-cfg"]
+        );
+        // thought_level n'alimente ni models ni modes.
+        assert_eq!(c.models.len(), 2);
     }
 }

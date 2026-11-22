@@ -332,8 +332,9 @@ pub struct Daemon {
     /// sondes `devin models`… avec cache TTL, servis par ModelCosts.
     pub model_costs: CostCache,
     /// Catalogues complets par profil (`catalogue_cmd`) — sert les
-    /// variantes hors annonce ACP via ReqKind::ModelCatalog.
-    pub catalogues: CatalogueCache,
+    /// variantes hors annonce ACP via ReqKind::ModelCatalog et
+    /// alimente les listes dynamiques orchestrateur (dyn_choices).
+    pub catalogues: Arc<CatalogueCache>,
     /// `provision_skills` global (config.toml, défaut on) — synchro des
     /// skills agents embarqués dans les répertoires scannés par chaque
     /// provider au spawn et au boot (skills.rs) ; combiné au flag par
@@ -423,6 +424,9 @@ impl Daemon {
         // `agents` + dropdowns `*_agent` de l'orchestrateur — lus à
         // live) — mutabilité à chaud voir agents_cfg.rs.
         let agents = Arc::new(RwLock::new(agents));
+        // Catalogues modèles partagés avec Components (dropdowns
+        // orchestrateur = metas ∪ caps ∪ extras ∪ catalogue).
+        let catalogues = Arc::new(CatalogueCache::default());
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
@@ -437,6 +441,8 @@ impl Daemon {
                 Arc::clone(&orch),
                 Arc::clone(&agents),
                 Arc::clone(&forges),
+                Arc::clone(&caps),
+                Arc::clone(&catalogues),
                 catalog,
             ),
             orch,
@@ -456,7 +462,7 @@ impl Daemon {
             host_sys: std::sync::Mutex::new(sysinfo::System::new()),
             slot_lock: tokio::sync::Mutex::new(()),
             model_costs: CostCache::default(),
-            catalogues: CatalogueCache::default(),
+            catalogues,
             provision_skills,
             tcp_token: watch::channel(tcp_token).0,
         });

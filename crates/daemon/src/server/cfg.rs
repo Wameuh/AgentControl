@@ -53,9 +53,11 @@ pub struct AgentProfile {
     pub catalogue_cmd: Option<String>,
     /// Template shell d'override du modèle persisté côté provider
     /// (`[agents.<id>.model_override_cmd]`, ex.
-    /// "devin -r {native_sid} --model {model}") — exécuté entre le kill
-    /// de l'agent ACP et le session/load quand la valeur choisie est
-    /// catalogue-only. Requis pour appliquer une telle valeur.
+    /// "devin -r {native_sid} --model {model}") — exécuté via `sh -c`
+    /// entre le kill de l'agent ACP et le session/load quand la valeur
+    /// choisie est catalogue-only ; les placeholders sont substitués
+    /// pré-quotés (guillemets simples — la valeur choisie ne peut pas
+    /// casser hors de l'argument). Requis pour appliquer une telle valeur.
     pub model_override_cmd: Option<String>,
     /// Modèles sélectionnables hors annonce ACP
     /// (`[agents.<id>.extra_models]`, ex. variantes Fable de
@@ -123,8 +125,10 @@ pub struct AgentConf {
     /// annonce ACP) — ex. "devin models list".
     #[serde(default)]
     pub catalogue_cmd: Option<String>,
-    /// Template shell `{native_sid}`/`{model}` pour persister un modèle
-    /// catalogue-only côté provider (ex. "devin -r {native_sid} --model {model}").
+    /// Template shell `{native_sid}`/`{model}` (exécuté via `sh -c`,
+    /// placeholders substitués pré-quotés) pour persister un modèle
+    /// catalogue-only côté provider (ex.
+    /// "devin -r {native_sid} --model {model}").
     #[serde(default)]
     pub model_override_cmd: Option<String>,
     /// Modèles sélectionnables hors annonce ACP — `[{value=…, label=…}]`

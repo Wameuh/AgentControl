@@ -2295,7 +2295,8 @@ impl Daemon {
         let effort = cfg.effort_or(&cfg.pr_reviewer_effort).to_string();
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
         let agent = cfg.agent_or(&cfg.pr_reviewer_agent);
-        self.warn_spawn_cfg(agent, &model, &cfg.pr_reviewer_mode);
+        self.warn_spawn_cfg(agent, &model, &cfg.pr_reviewer_mode)
+            .await;
         let v = self
             .h_new_session(
                 agent.to_string(),

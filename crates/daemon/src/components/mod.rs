@@ -131,6 +131,14 @@ pub struct Components {
     /// lectures sont brefs et la vérif forge (closure sync du
     /// PrVerifier) a besoin du même verrou.
     forges: Arc<std::sync::RwLock<crate::forges::ForgeLive>>,
+    /// Caps moissonnées des profils (partagé avec `Daemon.caps`) —
+    /// modèles/modes/config_options annoncés, unis aux listes
+    /// dynamiques des dropdowns orchestrateur.
+    caps: Arc<crate::caps::CapsRegistry>,
+    /// Catalogues modèles sondés `catalogue_cmd` (partagé avec
+    /// `Daemon.catalogues`) — variantes hors annonce ACP dans les
+    /// listes dynamiques orchestrateur.
+    catalogues: Arc<crate::catalogue::CatalogueCache>,
     /// Cache des sondes upstream du catalogue (tag+notes par repo,
     /// TTL ~5 min) — voir catalog.rs. Mutex std : sections courtes
     /// (get/insert), jamais tenue pendant un await.
@@ -157,6 +165,8 @@ impl Components {
         orch: Arc<OrchProbe>,
         agents: Arc<RwLock<HashMap<String, crate::server::AgentProfile>>>,
         forges: Arc<std::sync::RwLock<crate::forges::ForgeLive>>,
+        caps: Arc<crate::caps::CapsRegistry>,
+        catalogues: Arc<crate::catalogue::CatalogueCache>,
         catalog_patches: HashMap<String, crate::server::CatalogPatch>,
     ) -> Arc<Self> {
         let dir = root.join("components");
@@ -221,6 +231,8 @@ impl Components {
             orch,
             agents,
             forges,
+            caps,
+            catalogues,
             upstream: Mutex::new(HashMap::new()),
             view_tokens: Mutex::new(HashMap::new()),
             catalog_patches,
@@ -341,7 +353,20 @@ impl Components {
                 eff.role_agents().into_iter().map(str::to_string).collect()
             };
             let role_refs: Vec<&str> = role_agents.iter().map(String::as_str).collect();
-            let dyn_ = crate::server::orch_cfg::dyn_choices_multi(&self.root, &role_refs);
+            // Sources par profil (caps + extras + catalogue) — les
+            // dropdowns couvrent les modèles annoncés ACP, les
+            // config_options (codex…), les extras statiques du profil
+            // et le catalogue CLI sondé (devin models list), pas
+            // seulement les meta.json des sessions passées.
+            let mut srcs: HashMap<String, crate::server::orch_cfg::DynSrc> = HashMap::new();
+            for a in &role_refs {
+                srcs.insert(
+                    (*a).to_string(),
+                    crate::server::orch_cfg::dyn_src(&self.agents, &self.caps, &self.catalogues, a)
+                        .await,
+                );
+            }
+            let dyn_ = crate::server::orch_cfg::dyn_choices_multi(&self.root, &role_refs, &srcs);
             // Ids des profils vivants, triés — lus dans la map partagée
             // (hot-reload des `[agents.*]` inclus) : un profil déclaré
             // à chaud est proposable dans les dropdowns `*_agent`.
