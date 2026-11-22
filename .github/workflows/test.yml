@@ -130,7 +130,14 @@ jobs:
             | while IFS= read -r f; do
                 [ -f "$f" ] || continue
                 n=$(wc -l < "$f")
-                b=$(git show "origin/${{ github.base_ref }}:$f" 2>/dev/null | wc -l)
+                # Fichier absent de la base (nouveau) : baseline 0 — un
+                # `git show` direct echouerait et `bash -e -o pipefail`
+                # interromprait le job.
+                if git cat-file -e "origin/${{ github.base_ref }}:$f" 2>/dev/null; then
+                  b=$(git show "origin/${{ github.base_ref }}:$f" | wc -l)
+                else
+                  b=0
+                fi
                 if [ "$n" -gt 1000 ] && [ "$n" -gt "$b" ]; then
                   echo "::warning file=$f::$n lines (> 1000, was $b)"
                 fi
