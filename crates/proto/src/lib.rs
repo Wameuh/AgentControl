@@ -2,6 +2,7 @@
 //! Tout est en JSON Lines (un objet JSON par ligne) sur socket Unix ou TCP.
 
 mod components;
+pub mod release_verify;
 pub use components::*;
 
 use serde::{Deserialize, Serialize};

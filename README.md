@@ -82,6 +82,20 @@ Same sessions, same agents — native mobile UI on Android:
   | Ubuntu / Linux | `.deb`, AppImage, or the standalone binary |
   | Android | `.apk` (arm64) — allow installs from this source |
 
+  Every release is signed — `SHA256SUMS` + `SHA256SUMS.minisig`
+  (minisign/Ed25519) plus GitHub build-provenance attestations. The
+  app and the daemon verify the signature before installing anything;
+  to check a download by hand:
+
+  ```bash
+  minisign -Vm SHA256SUMS -P "$(grep -v '^untrusted' packaging/agentcontrol.pub | head -n1)"
+  sha256sum -c SHA256SUMS --ignore-missing
+  ```
+
+  (`packaging/agentcontrol.pub` ships the public key. Releases older
+  than signed publishing have no manifest and are refused unless
+  `AGENTCONTROL_ALLOW_UNSIGNED=1` — troubleshooting only.)
+
   Rather compile it yourself? See [build from source](#for-developers).
 
 ### First launch

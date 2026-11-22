@@ -3,6 +3,27 @@
 Archive: `agentcontrol-server-<arch>-linux.tar.gz`
 Contents: `agentcontrol-daemon` · `acctl` · `acp-claude` · `ac-wait` · `packaging/` (systemd unit, example config)
 
+## 0. Verify the archive first (recommended)
+
+Every release ships `SHA256SUMS` + `SHA256SUMS.minisig` — a minisign
+(Ed25519) signature over the checksum manifest. The app and the daemon
+verify it themselves before installing anything (in-app update,
+`acctl daemon-update`, remote install). For a manual check:
+
+```bash
+# the manifest is really signed by the project key
+minisign -Vm SHA256SUMS -P "$(grep -v '^untrusted' packaging/agentcontrol.pub | head -n1)"
+# your archive matches a signed checksum
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+The public key is the second line of `packaging/agentcontrol.pub`
+(also in the repo root's `packaging/`). GitHub build-provenance
+attestations are attached to each release file (`gh attestation
+verify <file>` works too). Releases older than signed publishing have
+no manifest: they are refused by default — `AGENTCONTROL_ALLOW_UNSIGNED=1`
+re-enables them for troubleshooting only (never for a bad signature).
+
 ## 1. Server (Ubuntu — where the agents run)
 
 ```bash

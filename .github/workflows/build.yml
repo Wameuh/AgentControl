@@ -490,6 +490,9 @@ jobs:
 
   # -----------------------------------------------------------------
   # Release GitHub sur tag v* (permet l'auto-update + install démon distant)
+  # Intégrité (I1) : SHA256SUMS signé minisign + attestations Sigstore —
+  # fail-closed sans les secrets MINISIGN_* (une release non signée ne
+  # doit plus jamais être publiée, même politique que l'APK).
   # -----------------------------------------------------------------
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -498,11 +501,71 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # OIDC Sigstore + store d'attestations — portés par CE seul job.
+      id-token: write
+      attestations: write
     steps:
+      # Checkout requis avant le staging : packaging/agentcontrol.pub
+      # sert à la contre-vérification de la signature produite.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
+      - name: Signer SHA256SUMS (minisign)
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Fail-closed : tag v* sans la clé = release refusée (comme
+          # ANDROID_KEYSTORE_* pour l'APK). La paire est générée une fois
+          # hors CI ; la pubkey voyage dans packaging/agentcontrol.pub.
+          if [ -z "${MINISIGN_KEY:-}" ]; then
+            echo "::error::Secret MINISIGN_KEY absent — minisign -G -p packaging/agentcontrol.pub -s <clé hors repo> puis gh secret set MINISIGN_KEY (+ MINISIGN_PASSWORD si chiffrée) ; cf. AGENTS.md § Releases."
+            exit 1
+          fi
+          if grep -q PLACEHOLDER packaging/agentcontrol.pub; then
+            echo "::error::packaging/agentcontrol.pub est encore le placeholder — commiter la vraie clé publique issue de la paire de signature."
+            exit 1
+          fi
+          if ! command -v minisign >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          fi
+          # Artefacts à plat dans release-files/ : les assets publiés
+          # portent leur basename → SHA256SUMS les liste tels quels, ce
+          # qui rend `sha256sum -c` directement rejouable en local.
+          mkdir -p release-files
+          expect=$(find agentcontrol-* -type f | wc -l)
+          find agentcontrol-* -type f -exec cp -t release-files {} +
+          got=$(find release-files -type f | wc -l)
+          if [ "$got" != "$expect" ]; then
+            echo "::error::collision de noms d'artefacts ($got/$expect fichiers)"
+            exit 1
+          fi
+          (cd release-files && sha256sum -- * > SHA256SUMS)
+          cat release-files/SHA256SUMS
+          # La clé privée ne vit que dans $RUNNER_TEMP (umask 077, rm
+          # immédiat) — jamais sur le workspace, jamais en log.
+          KEY="$RUNNER_TEMP/agentcontrol-minisign.key"
+          umask 077
+          printf '%s\n' "$MINISIGN_KEY" > "$KEY"
+          # Mot de passe : MINISIGN_PASSWORD est lue par minisign ≥0.10 ;
+          # le pipe stdin couvre les versions antérieures sans tty.
+          printf '%s\n' "${MINISIGN_PASSWORD:-}" | timeout 60 minisign -S \
+            -m release-files/SHA256SUMS -x release-files/SHA256SUMS.minisig \
+            -s "$KEY" -t "release ${GITHUB_REF_NAME}"
+          rm -f "$KEY"
+          # Contre-vérif immédiate : la signature doit correspondre à la
+          # pubkey embarquée dans les binaires — une clé secrète qui ne
+          # matche pas packaging/agentcontrol.pub publierait des releases
+          # invérifiables chez tous les clients → casser la release ici.
+          minisign -V -m release-files/SHA256SUMS \
+            -x release-files/SHA256SUMS.minisig -p packaging/agentcontrol.pub
+      - name: Attestations de provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "release-files/*"
       - uses: softprops/action-gh-release@v2
         with:
-          files: "**/*"
+          files: "release-files/*"
           # Tags vX.Y.Z-rc.K → prerelease GitHub JAMAIS marquée "latest"
           # (sinon releases/latest — la sonde stable de l'app et le
           # Dockerfile devcontainer — renverrait la rc aux utilisateurs

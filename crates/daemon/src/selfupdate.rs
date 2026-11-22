@@ -94,12 +94,29 @@ pub fn self_update(version: &str) -> Result<Value> {
     probe_dir_writable(&dir)
         .with_context(|| format!("binary not writable ({}) — system-managed?", exe.display()))?;
 
-    let url = release_asset_url(&ver)?;
+    let name = release_asset_name()?;
+    let url = release_file_url(&ver, &name);
     let tgz = match http_get(&url) {
         Ok(b) => b,
         Err(HttpError::Status(404)) => bail!("{}", release_not_found(&ver)),
         Err(e) => return Err(anyhow::Error::from(e)).with_context(|| format!("downloading {url}")),
     };
+    // Intégrité AVANT tout swap (I1) : SHA256SUMS signé minisign —
+    // signature/empreinte invalide ou manifeste partiel → refus sec ;
+    // release pré-signature → refus sauf AGENTCONTROL_ALLOW_UNSIGNED=1.
+    match verify_release_asset(&ver, &name, &tgz) {
+        Ok(true) => tracing::info!("self-update: v{ver} signature minisign + sha256 vérifiés"),
+        Ok(false) if proto::release_verify::allow_unsigned() => {
+            tracing::warn!(
+                "self-update: unsigned release v{ver} accepted (AGENTCONTROL_ALLOW_UNSIGNED)"
+            );
+        }
+        Ok(false) => bail!(
+            "release v{ver} is unsigned — no SHA256SUMS/SHA256SUMS.minisig; \
+             set AGENTCONTROL_ALLOW_UNSIGNED=1 to bypass (not recommended)"
+        ),
+        Err(e) => return Err(e).with_context(|| format!("integrity check of release v{ver}")),
+    }
     let staging = dir.join(format!(".ac-upd-{}", std::process::id()));
     std::fs::create_dir_all(&staging).context("staging")?;
     let res = swap_binaries(&tgz, &staging, &dir, &exe);
@@ -187,7 +204,8 @@ fn acp_bootstrap_inner(root: &Path) -> Result<()> {
             dir.display()
         )
     })?;
-    let url = release_asset_url(ver)?;
+    let name = release_asset_name()?;
+    let url = release_file_url(ver, &name);
     let tgz = match http_get(&url) {
         Ok(b) => b,
         Err(HttpError::Status(404)) => {
@@ -201,6 +219,28 @@ fn acp_bootstrap_inner(root: &Path) -> Result<()> {
             return Err(anyhow::Error::from(e)).with_context(|| format!("downloading {url}"));
         }
     };
+    // Même garde d'intégrité que l'update (I1) : l'archive posera des
+    // binaires sur le serveur — jamais sans signature valide, sauf
+    // repli de dépannage explicite. Release pré-signature : réponse
+    // définitive (elle ne sera jamais signée après coup) → marker.
+    match verify_release_asset(ver, &name, &tgz) {
+        Ok(true) => {}
+        Ok(false) if proto::release_verify::allow_unsigned() => {
+            tracing::warn!(
+                "self-update: unsigned release v{ver} accepted for acp bootstrap \
+                 (AGENTCONTROL_ALLOW_UNSIGNED)"
+            );
+        }
+        Ok(false) => {
+            let _ = std::fs::write(&marker, "");
+            tracing::info!(
+                "self-update: unsigned release v{ver} — acp bootstrap skipped \
+                 (AGENTCONTROL_ALLOW_UNSIGNED=1 to force)"
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e).with_context(|| format!("integrity check of release v{ver}")),
+    }
     let staging = dir.join(format!(".ac-bt-{}", std::process::id()));
     std::fs::create_dir_all(&staging).context("staging")?;
     let res = (|| -> Result<Vec<String>> {
@@ -233,12 +273,58 @@ fn asset_arch() -> Result<&'static str> {
     }
 }
 
-/// URL de l'asset serveur de la release `ver` (tag `v{ver}`).
-fn release_asset_url(ver: &str) -> Result<String> {
+/// URL d'un fichier de la release `ver` (tag `v{ver}`).
+fn release_file_url(ver: &str, name: &str) -> String {
+    format!("https://github.com/{REPO}/releases/download/v{ver}/{name}")
+}
+
+/// Nom de l'asset serveur de la release — l'archive tarball listée dans
+/// `SHA256SUMS`.
+fn release_asset_name() -> Result<String> {
     Ok(format!(
-        "https://github.com/{REPO}/releases/download/v{ver}/agentcontrol-server-{}-linux.tar.gz",
+        "agentcontrol-server-{}-linux.tar.gz",
         asset_arch()?
     ))
+}
+
+/// Corps texte d'un fichier de la release `ver` — `Ok(None)` sur 404
+/// (release pré-signature sans manifeste), `Err` sur toute autre panne.
+fn fetch_release_text(ver: &str, name: &str) -> Result<Option<String>> {
+    match http_get(&release_file_url(ver, name)) {
+        Ok(b) => Ok(Some(
+            String::from_utf8(b).with_context(|| format!("{name}: invalid UTF-8"))?,
+        )),
+        Err(HttpError::Status(404)) => Ok(None),
+        Err(e) => Err(anyhow::Error::from(e))
+            .with_context(|| format!("downloading {name} of release v{ver}")),
+    }
+}
+
+/// Vérifie l'artefact `name` contre le manifeste signé de la release
+/// `ver` — `SHA256SUMS` + `SHA256SUMS.minisig` publiés par le job
+/// release, clé publique compilée (proto::release_verify, I1).
+/// `Ok(true)` = signature + empreinte valides ; `Ok(false)` = release
+/// SANS manifeste (pré-signature) — la politique (repli
+/// `AGENTCONTROL_ALLOW_UNSIGNED` ou refus) relève de l'appelant ;
+/// `Err` = signature/empreinte invalide, manifeste partiel ou panne
+/// réseau — toujours un refus sec.
+fn verify_release_asset(ver: &str, name: &str, data: &[u8]) -> Result<bool> {
+    use proto::release_verify as rv;
+    let sums = fetch_release_text(ver, rv::SUMS_NAME)?;
+    let sig = fetch_release_text(ver, rv::SIG_NAME)?;
+    match (sums, sig) {
+        (Some(sums), Some(sig)) => {
+            rv::verify(name, data, &sums, &sig)
+                .map_err(|e| anyhow::anyhow!("release v{ver}: {e}"))?;
+            Ok(true)
+        }
+        (None, None) => Ok(false),
+        _ => bail!(
+            "release v{ver}: incomplete integrity manifest — only one of {}/{} published",
+            rv::SUMS_NAME,
+            rv::SIG_NAME
+        ),
+    }
 }
 
 /// Semver strict `X.Y.Z` (+ suffixe `-pre`/`+meta` alphanumérique) —

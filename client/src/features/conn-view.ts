@@ -23,7 +23,7 @@ import type { ConnectionManager } from "./connections";
 
 // Étapes du script ensure_daemon — chaque `echo step:<id>` distant est
 // streamé (stderr/stdout selon le transport) en event `daemon-step`.
-const SCRIPT_STEPS = ["check", "download", "install", "service", "verify"];
+const SCRIPT_STEPS = ["check", "download", "integrity", "push", "install", "service", "verify"];
 // Variante pour l'auto-update via ReqKind::UpdateDaemon (pas de script).
 const SELF_STEPS = ["send", "restart"];
 

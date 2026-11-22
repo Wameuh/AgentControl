@@ -31,8 +31,8 @@ url = "2"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
-
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# HTTP releases — utilisé par ensure_daemon AUSSI sur Android (le
+# téléchargement + la vérif d'intégrité y vivent, I1).
 ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
 
 [target.'cfg(target_os = "android")'.dependencies]

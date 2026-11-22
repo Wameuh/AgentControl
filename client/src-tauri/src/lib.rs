@@ -156,7 +156,7 @@ pub fn run() {
             commands::connect::connect,
             commands::connect::disconnect,
             commands::connect::subscribe,
-            commands::connect::ensure_daemon,
+            commands::ensure_daemon::ensure_daemon,
             commands::session::call,
             commands::files::write_download,
             commands::files::clipboard_file_stat,

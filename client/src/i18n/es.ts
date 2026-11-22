@@ -577,6 +577,8 @@ export const es: Record<Key, string> = {
   spawn_failed: "« {title} » no arrancó — abra la sesión para el detalle",
   dstep_check: "Comprobar el estado remoto",
   dstep_download: "Descargar los binarios de la release",
+  dstep_integrity: "Verificar la firma de la release",
+  dstep_push: "Enviar el archivo al servidor",
   dstep_install: "Instalar los binarios",
   dstep_service: "Reiniciar el servicio",
   dstep_verify: "Verificar que el daemon esté arriba",

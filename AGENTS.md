@@ -401,6 +401,43 @@ the old debug-keystore APKs → install over the top is refused once —
 users must **uninstall then reinstall** (the device key and saved
 connections live in app_data → re-pair/re-enter them).
 
+**Release integrity (minisign, I1)**: every `v*` release also
+publishes `SHA256SUMS` + `SHA256SUMS.minisig` — a minisign (Ed25519)
+signature over the checksum manifest — plus GitHub build-provenance
+attestations (`attest-build-provenance`, `id-token`+`attestations`
+scoped to the release job). All three install paths verify signature
+then sha256 before installing (`proto::release_verify`, key compiled
+via `include_str!(packaging/agentcontrol.pub)`): app update, daemon
+self-update + acp bootstrap, and remote install (`ensure_daemon`
+option (a) — the app downloads+verifies the tarball itself then
+pushes it through the ssh stdin; the server needs neither GitHub
+access nor curl). Required one-time **user** setup:
+
+```bash
+minisign -G -p packaging/agentcontrol.pub -s <path OUTSIDE the repo>
+gh secret set MINISIGN_KEY < <that private key>
+gh secret set MINISIGN_PASSWORD      # only if the key is passphrase-protected
+```
+
+The private key NEVER enters the repo — CI writes it to `$RUNNER_TEMP`
+only. Without `MINISIGN_KEY`, or with the placeholder still in
+`packaging/agentcontrol.pub` (CI greps for it), a `v*` tag **fails**
+— an unsigned release must never be published (same policy as APK
+signing). The job also counter-verifies the signature it just
+produced against the committed `.pub` — a secret key that doesn't
+match the embedded pubkey would publish releases no client can
+verify, so it breaks the release instead. Releases older than signed
+publishing have no manifest: every client refuses them by default —
+`AGENTCONTROL_ALLOW_UNSIGNED=1` (warn-logged) is the troubleshooting
+override for pre-signature releases only, never for an invalid
+signature or digest. **Key rotation**: generate a new pair, commit
+the new `.pub` in the same change, update `MINISIGN_KEY` — but FIRST
+ship a transition release still signed by the old key and carrying
+the new `.pub` (binaries verify with the key they were built with;
+without that step, already-installed clients can never verify a
+new-key release again). If SECURITY.md lands with I9, the public
+rotation procedure belongs there too.
+
 Release = `next_release` → `main` PR switched **ready** →
 `version.yml`'s `release-bump` job computes `last tag + level`,
 commit `chore: bump version` pushed to `next_release` (the PR

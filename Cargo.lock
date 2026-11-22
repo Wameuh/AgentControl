@@ -1240,6 +1240,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "minisign-verify"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871285dc19d8d0ebe0eef3d0e99a205f2a71363b122632cbbfa4a6c370a960ce"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1670,9 +1676,14 @@ dependencies = [
 name = "proto"
 version = "0.10.4"
 dependencies = [
+ "base64",
+ "blake2",
  "chrono",
+ "ed25519-dalek",
+ "minisign-verify",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -574,6 +574,8 @@ export const fr: Record<Key, string> = {
   spawn_failed: "« {title} » n'a pas démarré — ouvrir la session pour le détail",
   dstep_check: "Vérification de l'existant",
   dstep_download: "Téléchargement des binaires",
+  dstep_integrity: "Vérification de la signature",
+  dstep_push: "Envoi de l'archive au serveur",
   dstep_install: "Installation des binaires",
   dstep_service: "Redémarrage du service",
   dstep_verify: "Vérification du démon",
