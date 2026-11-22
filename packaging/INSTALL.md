@@ -40,8 +40,11 @@ systemctl --user status agentcontrol-daemon
 ```
 
 The daemon listens on:
-- `127.0.0.1:7331` (loopback → reachable only via SSH tunnel)
-- `~/.agentcontrol/daemon.sock` (local)
+- `127.0.0.1:7331` — loopback only (a non-loopback bind needs the
+  explicit `allow_non_loopback_tcp` opt-in); remote access goes through
+  your SSH tunnel, and every TCP connection authenticates (below)
+- `~/.agentcontrol/daemon.sock` — Unix socket, mode `0600`: only your
+  own account can open it
 
 The TCP port requires an authentication token as the first line of
 every connection: `~/.agentcontrol/daemon.token` is generated at first
@@ -52,6 +55,9 @@ already-authenticated SSH channel; nothing to configure there.
 Direct-TCP profiles carry the token in the connection form.
 Rotate it any time with `acctl token rotate` (open TCP connections are
 dropped; clients re-read the file or field on reconnect).
+
+See the README's [Security model](../README.md#security-model) for the
+threat model — the short version: one trusted user per server account.
 
 Local test: `~/.local/bin/acctl status` → `{"agents":["devin","cursor"],...}`
 

@@ -70,7 +70,8 @@ Same sessions, same agents — native mobile UI on Android:
 ### You need
 
 - **A Linux server** (x86_64 or aarch64) reachable over SSH — that's
-  where the agents run.
+  where the agents run. Run it on a server account you don't share
+  (see [Security model](#security-model)).
 - **At least one coding agent** on that server. Anything that speaks
   [ACP](https://agentclientprotocol.com) over stdio works: Devin
   (`devin acp`) and Cursor (`cursor-agent acp`) natively, Codex and
@@ -264,6 +265,41 @@ A few concrete setups — every bullet is something you can do today:
 Prefer a browser to an app? The daemon can also **serve the same UI over
 HTTP** on the server (`bind_http` in `config.toml` — loopback + SSH
 tunnel, token-protected): zero install on the client side.
+
+## Security model
+
+AgentControl assumes **one trusted user per server account**.
+
+- **Who can drive the daemon.** It listens on a Unix socket
+  (`~/.agentcontrol/daemon.sock`, mode `0600`) and on loopback TCP for
+  the SSH tunnel — a non-loopback bind needs the explicit
+  `allow_non_loopback_tcp` opt-in. Every TCP connection must present
+  the per-install token (`~/.agentcontrol/daemon.token`, mode `0600`),
+  which the app reads over the already-authenticated SSH channel.
+  Loopback alone is not per-user isolation: don't run the daemon on an
+  account other people can log into.
+- **Server identity.** Every SSH transport verifies the server's host
+  key — pinned by QR pairing, matched against your `known_hosts`, or
+  confirmed once on first connect — and a later change must be
+  explicitly re-confirmed.
+- **What agents can do.** Agents run as your user, with your shell,
+  files and credentials (`gh`, SSH keys, API tokens). Permission modes
+  that skip approvals let an agent run any command — use them only in
+  workspaces you'd let a junior engineer work in unsupervised.
+- **Untrusted content.** Agents read repositories, issues and pull
+  requests — text there can try to steer the agent (prompt injection).
+  The orchestrator's PR review is opt-in: a trigger comment only fires
+  from a repository member, and the automatic modes only fire on
+  trusted changes — a same-repo source branch or an
+  owner/member/collaborator author (`auto_review_untrusted` relaxes the
+  filter if you really mean it).
+- **Agents talking to agents.** The built-in MCP server lets an agent
+  create sessions and message its peers on the same daemon.
+- **Updates.** Releases ship `SHA256SUMS` signed with minisign
+  (Ed25519) plus GitHub build-provenance attestations; the app, the
+  daemon self-update and the remote install all verify the signature
+  and checksums before installing.
+- **Reporting a vulnerability.** See [SECURITY.md](SECURITY.md).
 
 ## For developers
 

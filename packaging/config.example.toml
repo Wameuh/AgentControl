@@ -8,7 +8,8 @@
 # <root>/daemon.token token (generated on first start, mode 0600) —
 # loopback alone is not per-user isolation (other local account,
 # forwarded port). Rotation: `acctl token rotate` (revokes open TCP
-# connections). The unix socket and web access have their own trust.
+# connections). The unix socket (mode 0600) and the web UI (web.token)
+# have their own trust.
 bind_tcp = "127.0.0.1:7331"
 # Explicit escape hatch for the loopback guard (isolated private network,
 # container): the bind is accepted off-loopback, a warn is logged at every
