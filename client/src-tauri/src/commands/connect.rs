@@ -52,15 +52,14 @@ async fn ssh_diag(cfg: &ConnectCfg) -> Result<Option<SshDiag>, String> {
     if native.unwrap_or(false) || cfg!(target_os = "android") {
         let (user, h) = split_user_host(host, user.as_deref())?;
         let port = port.unwrap_or(22);
+        let expected_hk = effective_hk(host_keys.clone(), &h, port).await;
         Ok(Some(SshDiag::Native {
             host: h,
             port,
             user,
             password: password.clone(),
             key: key.as_deref().map(PathBuf::from),
-            expected_hk: effective_hk(host_keys.clone(), &h, port)
-                .await
-                .map(Arc::new),
+            expected_hk: expected_hk.map(Arc::new),
         }))
     } else {
         Ok(Some(SshDiag::OpenSsh {
