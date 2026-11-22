@@ -523,6 +523,7 @@ export async function scanPair(): Promise<Record<string, unknown> | null> {
     if (!ok) return null;
     // K jetable + pinning hk : pair-ok:<fp> vérifié côté Rust —
     // l'empreinte rendue est celle de NOTRE clé app, preuve réelle.
+    // Erreur `pair-failed:*` → libellé i18n (scanAndGo l'affiche brut).
     await invoke<string>("pair_attempt", {
       host: p.host,
       port: p.port,
@@ -530,6 +531,8 @@ export async function scanPair(): Promise<Record<string, unknown> | null> {
       kPem: p.k,
       hk: p.hk,
       label: deviceLabel(),
+    }).catch((e) => {
+      throw new Error(codedErrorMsg(e, "pair"));
     });
     return {
       kind: "ssh",
@@ -582,6 +585,8 @@ export async function scanPair(): Promise<Record<string, unknown> | null> {
     cfg.key = await invoke<string>("pair_import_key", {
       pem: p.secret,
       name: `${p.host}_${p.port}`,
+    }).catch((e) => {
+      throw new Error(codedErrorMsg(e, "pair"));
     });
     if (p.pw != null) cfg.password = p.pw;
   } else {
