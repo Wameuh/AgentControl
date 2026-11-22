@@ -209,9 +209,9 @@ jobs:
           if-no-files-found: error
 
   # -----------------------------------------------------------------
-  # Client desktop Tauri : macOS arm64 (.app + .dmg — non signé pour
-  # l'instant, cf. README : installation via clic droit → Ouvrir ou
-  # xattr -dr com.apple.quarantine).
+  # Client desktop Tauri : macOS arm64 (.app + .dmg — signature ad hoc
+  # via signingIdentity "-", pas de notarisation : cf. README pour le
+  # contournement Privacy & Security → Open Anyway au 1er lancement).
   # -----------------------------------------------------------------
   client-macos:
     if: github.event.pull_request.draft != true
