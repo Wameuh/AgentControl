@@ -574,6 +574,8 @@ export const en = {
   spawn_failed: "« {title} » failed to start — open the session for details",
   dstep_check: "Check remote state",
   dstep_download: "Download release binaries",
+  dstep_integrity: "Verify release signature",
+  dstep_push: "Upload archive to the server",
   dstep_install: "Install binaries",
   dstep_service: "Restart service",
   dstep_verify: "Verify daemon is up",

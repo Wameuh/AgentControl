@@ -315,29 +315,119 @@ fn resolve_relaunch_path(exe_before: Option<&std::path::Path>) -> Result<PathBuf
         .ok_or_else(|| "aucun chemin de relance résolu".to_string())
 }
 
+/// Corps texte d'un asset nommé exact de la release `rel` — `Ok(None)`
+/// si l'asset n'existe pas (release plus ancienne que la publication du
+/// manifeste signé), `Err` si le transfert échoue.
+#[cfg(not(target_os = "android"))]
+fn fetch_release_text(rel: &serde_json::Value, asset_name: &str) -> Result<Option<String>, String> {
+    let url = rel["assets"].as_array().and_then(|a| {
+        a.iter().find_map(|x| {
+            if x["name"].as_str() == Some(asset_name) {
+                x["browser_download_url"].as_str().map(String::from)
+            } else {
+                None
+            }
+        })
+    });
+    let Some(url) = url else { return Ok(None) };
+    ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(30))
+        .set("User-Agent", "agentcontrol-updater")
+        .call()
+        .map_err(|e| format!("{asset_name} : {e}"))?
+        .into_string()
+        .map(Some)
+        .map_err(|e| format!("{asset_name} : {e}"))
+}
+
+/// Intégrité de la release (I1) : `SHA256SUMS` + sa signature minisign
+/// `SHA256SUMS.minisig` — publiés par le job release, vérifiés contre la
+/// clé publique compilée (proto::release_verify). `aname` = nom réel de
+/// l'asset dans la release (celui listé dans le manifeste), pas le nom
+/// local du fichier. Une release sans manifeste (pré-signature) est
+/// refusée — repli de dépannage `AGENTCONTROL_ALLOW_UNSIGNED=1`
+/// (journalisé en warn) ; signature ou empreinte invalide → refus sec,
+/// jamais couvert par le repli.
+#[cfg(not(target_os = "android"))]
+fn verify_release_integrity(
+    rel: &serde_json::Value,
+    path: &std::path::Path,
+    aname: &str,
+) -> Result<(), String> {
+    use proto::release_verify as rv;
+    let sums = fetch_release_text(rel, rv::SUMS_NAME)?;
+    let sig = fetch_release_text(rel, rv::SIG_NAME)?;
+    match (sums, sig) {
+        (Some(sums), Some(sig)) => {
+            let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            rv::verify(aname, f, &sums, &sig).inspect_err(|e| {
+                ulog(format!("{aname} rejeté à la vérif d'intégrité — {e}"));
+            })?;
+            ulog(format!("{aname} : signature minisign + empreinte sha256 vérifiés"));
+            Ok(())
+        }
+        (None, None) if rv::allow_unsigned() => {
+            ulog(format!(
+                "{aname} : release SANS {} — installée quand même (AGENTCONTROL_ALLOW_UNSIGNED)",
+                rv::SUMS_NAME
+            ));
+            Ok(())
+        }
+        (None, None) => {
+            let msg = format!(
+                "release non signée — {} et {} absents (anciennes releases : AGENTCONTROL_ALLOW_UNSIGNED=1 pour forcer, non recommandé)",
+                rv::SUMS_NAME,
+                rv::SIG_NAME
+            );
+            ulog(format!("{aname} rejeté — {msg}"));
+            Err(msg)
+        }
+        _ => {
+            let msg = format!(
+                "manifeste d'intégrité incomplet — un seul de {}/{} présent (release trafiquée ?)",
+                rv::SUMS_NAME,
+                rv::SIG_NAME
+            );
+            ulog(format!("{aname} rejeté — {msg}"));
+            Err(msg)
+        }
+    }
+}
+
 /// Télécharge un asset de la release `tag` vers un dossier temporaire
 /// dédié (agentcontrol-update, purgé à l'appel) et rend son chemin.
 /// Tag exact d'abord (les rc sont des prereleases — latest renverrait
 /// la STABLE à la place), latest en repli. `pred` choisit l'asset par
 /// nom (`.deb`, `-setup.exe`, `.dmg`+arch…) — `name` sert au chemin de
-/// destination et au message d'erreur. Sync → spawn_blocking requis.
+/// destination et au message d'erreur. L'intégrité est prouvée AVANT
+/// tout retour : bytes magiques (`verify_asset`, corruption) puis
+/// `SHA256SUMS` signé minisign (`verify_release_integrity`, origine —
+/// I1). Sync → spawn_blocking requis.
 #[cfg(not(target_os = "android"))]
 fn fetch_release_asset(
     tag: &str,
     name: &str,
     pred: impl Fn(&str) -> bool,
 ) -> Result<PathBuf, String> {
+    // `tag` vient de la release GitHub (tag_name → attacker-controlled
+    // sous le modèle I1) : whitelist semver AVANT l'URL d'API et tout
+    // usage — un tag arbitraire réécrirait la requête.
+    if !proto::release_verify::valid_tag(tag) {
+        return Err(format!("tag de release invalide : {tag:?}"));
+    }
     let rel = gh_get(&format!(
         "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
     ))
     .or_else(|_| gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest"))?;
-    let url = rel["assets"]
+    let (aname, url) = rel["assets"]
         .as_array()
         .and_then(|a| {
             a.iter().find_map(|x| {
                 let n = x["name"].as_str().unwrap_or("");
                 if pred(n) {
-                    x["browser_download_url"].as_str().map(String::from)
+                    x["browser_download_url"]
+                        .as_str()
+                        .map(|u| (n.to_string(), u.to_string()))
                 } else {
                     None
                 }
@@ -361,6 +451,7 @@ fn fetch_release_asset(
     verify_asset(&dest, name).inspect_err(|e| {
         ulog(format!("{name} rejeté à la vérif — {e}"));
     })?;
+    verify_release_integrity(&rel, &dest, &aname)?;
     Ok(dest)
 }
 

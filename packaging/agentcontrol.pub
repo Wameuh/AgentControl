@@ -1,0 +1,2 @@
+untrusted comment: AgentControl release public key — PLACEHOLDER (I1)
+PLACEHOLDER_A_GENERER — voir AGENTS.md § Releases : `minisign -G -p packaging/agentcontrol.pub -s <cle hors repo>` puis `gh secret set MINISIGN_KEY` (+ MINISIGN_PASSWORD si la clé est chiffrée). La clé privée n'est JAMAIS commitée.

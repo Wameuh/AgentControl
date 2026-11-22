@@ -577,6 +577,8 @@ export const de: Record<Key, string> = {
   spawn_failed: "« {title} » konnte nicht starten — Sitzung für Details öffnen",
   dstep_check: "Entfernten Status prüfen",
   dstep_download: "Release-Binärdateien herunterladen",
+  dstep_integrity: "Release-Signatur prüfen",
+  dstep_push: "Archiv zum Server hochladen",
   dstep_install: "Binärdateien installieren",
   dstep_service: "Dienst neu starten",
   dstep_verify: "Daemon-Erreichbarkeit prüfen",

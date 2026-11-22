@@ -7,3 +7,15 @@ edition = "2021"
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+# Intégrité des releases (I1) : SHA256SUMS signé minisign + empreinte
+# sha256. minisign-verify est sans aucune dépendance (ed25519+blake2b
+# vendored) — vérifiable par le client Tauri comme par le démon.
+minisign-verify = "0.3"
+sha2 = "0.11"
+
+[dev-dependencies]
+# Signeur minisign factice des tests de release_verify (fixtures
+# réelles, pas des maquettes) — versions déjà présentes via russh.
+ed25519-dalek = "3"
+blake2 = "0.11"
+base64 = "0.22"
