@@ -20,17 +20,18 @@ ssh "$@" "$HOST" 'mkdir -p ~/.local/bin ~/.agentcontrol ~/.config/systemd/user'
 scp "$@" "$BIN" "$HOST:~/.local/bin/agentcontrol-daemon"
 scp "$@" packaging/agentcontrol-daemon.service "$HOST:~/.config/systemd/user/"
 # Never clobber an existing config.toml — redeploys must keep the
-# server's agents/orchestrator settings. The example is still pushed
-# under its own name so it can be diffed after an upgrade.
-# Fail closed: rc=1 is the only "file absent" answer; any other error
-# (ssh/remote failure) aborts instead of risking an overwrite later.
-rc=0
-ssh "$@" "$HOST" 'test -e ~/.agentcontrol/config.toml' || rc=$?
-case $rc in
-  0) echo "config.toml already present on $HOST — left untouched" ;;
-  1) scp "$@" packaging/config.example.toml "$HOST:~/.agentcontrol/config.toml" ;;
-  *) echo "cannot check ~/.agentcontrol/config.toml on $HOST (ssh rc=$rc) — aborting" >&2; exit 1 ;;
-esac
+# server's agents/orchestrator settings. Atomic create-if-absent via
+# remote noclobber (O_EXCL): a config.toml that already exists — or
+# appears mid-deploy — is never overwritten. The example is still
+# pushed under its own name for post-upgrade diffs.
+if ssh "$@" "$HOST" 'set -C; cat > ~/.agentcontrol/config.toml' < packaging/config.example.toml; then
+  echo "config.toml installed from example on $HOST"
+elif ssh "$@" "$HOST" 'test -e ~/.agentcontrol/config.toml'; then
+  echo "config.toml already present on $HOST — left untouched"
+else
+  echo "cannot install config.toml on $HOST — aborting" >&2
+  exit 1
+fi
 scp "$@" packaging/config.example.toml "$HOST:~/.agentcontrol/config.example.toml"
 ssh "$@" "$HOST" '
   systemctl --user daemon-reload
