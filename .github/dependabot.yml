@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    target-branch: "next_release"
+    schedule:
+      interval: "monthly"
+  - package-ecosystem: "cargo"
+    directory: "/client/src-tauri"
+    target-branch: "next_release"
+    schedule:
+      interval: "monthly"
+  - package-ecosystem: "npm"
+    directory: "/client"
+    target-branch: "next_release"
+    schedule:
+      interval: "monthly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "next_release"
+    schedule:
+      interval: "monthly"
