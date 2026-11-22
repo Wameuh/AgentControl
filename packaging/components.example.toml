@@ -1,47 +1,47 @@
-# Composants déclarés — <AGENTCONTROL_HOME>/components.toml
+# Declared components — <AGENTCONTROL_HOME>/components.toml
 #
-# Ce fichier est POSSÉDÉ par le démon : il est réécrit atomiquement par
-# les RPC d'édition (component_upsert / component_remove /
-# component_install). Le modifier à la main ne sert qu'à semer des specs
-# avant le premier démarrage — pour éditer à chaud, passer par les RPC
-# (à terme `acctl comp edit`, cf docs/components-integration.md).
+# This file is OWNED by the daemon: it is atomically rewritten by the
+# editing RPCs (component_upsert / component_remove /
+# component_install). Hand-editing it only makes sense to seed specs
+# before the first start — for hot edits, go through the RPCs
+# (eventually `acctl comp edit`, see docs/components-integration.md).
 #
-# `~`/`~/…` en tête d'un champ chemin est expansé sous le HOME du démon
-# au chargement — la spec persistée porte des chemins absolus.
+# `~`/`~/…` at the head of a path field is expanded under the daemon's
+# HOME at load time — the persisted spec carries absolute paths.
 #
-# Référence complète des kinds/champs : docs/components-integration.md §2.1.
+# Full reference of kinds/fields: docs/components-integration.md §2.1.
 
 # ---------------------------------------------------------------------------
-# agentreviewer — cas d'usage typique : un watcher qui vivait sous
-# supervisord passe sous le cycle de vie du démon (start/stop/restart,
-# healthcheck, logs paginés via component_logs).
-# NB : « backlog-orchestrator » est un nom RÉSERVÉ (composant internal
-# natif) — upsert/install dessus échoue ; sa migration supervisord →
-# interne est dans packaging/INSTALL.md §5.
+# agentreviewer — typical use case: a watcher that used to live under
+# supervisord moves under the daemon's lifecycle (start/stop/restart,
+# healthcheck, paged logs via component_logs).
+# NB: "backlog-orchestrator" is a RESERVED name (native internal
+# component) — upsert/install on it fails; its supervisord → internal
+# migration is in packaging/INSTALL.md §5.
 # ---------------------------------------------------------------------------
 [[components]]
 name = "agentreviewer"
 kind = "process"                    # internal | process | external | tool
 command = ["~/.local/bin/agent-reviewer", "--watch"]
-cwd = "~"                           # défaut : <AGENTCONTROL_HOME>
+cwd = "~"                           # default: <AGENTCONTROL_HOME>
 autostart = true
 restart = "on-failure"              # always | on-failure | never
-restart_sec = 5                     # backoff de base (×2, cap 60 s)
+restart_sec = 5                     # base backoff (×2, cap 60 s)
 healthcheck = { kind = "process" }  # none | process | tcp | http | command
-description = "Watcher de review pilotant ce démon"
+description = "Review watcher driving this daemon"
 
-# Env additionnelle (facultatif). AGENTCONTROL_SOCK/TCP/HOME/COMPONENT
-# sont de toute façon injectées par le démon et PRIMENT sur ce bloc — un
-# composant ne peut pas mentir sur l'adresse de son démon.
+# Additional env (optional). AGENTCONTROL_SOCK/TCP/HOME/COMPONENT are
+# injected by the daemon anyway and OVERRIDE this block — a component
+# cannot lie about its daemon's address.
 [components.env]
-AGENTCONTROL_TCP = "127.0.0.1:7331"  # informatif — écrasé par l'injection
+AGENTCONTROL_TCP = "127.0.0.1:7331"  # informational — overwritten by injection
 
 # ---------------------------------------------------------------------------
-# agentbacklog — kind `tool` : CLI stateless, pas de process long. Sa
-# commande sert de sonde de présence/version (exécutée ~30 s).
+# agentbacklog — `tool` kind: stateless CLI, no long process. Its
+# command doubles as the presence/version probe (run ~every 30 s).
 # ---------------------------------------------------------------------------
 # [[components]]
 # name = "agentbacklog"
 # kind = "tool"
 # command = ["agentbacklog", "--version"]
-# description = "File FIFO de features (SQLite ~/.agentbacklog/backlog.db)"
+# description = "FIFO feature queue (SQLite ~/.agentbacklog/backlog.db)"
