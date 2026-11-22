@@ -111,7 +111,7 @@ Python script, and marked as reference-deployment material.
 ## 5. Implementation history — AgentBacklog items
 
 The component system was broken down into AgentBacklog items
-(`docs/coupling-audit.md` covers the later decoupling series #316-322).
+(`docs/internal/coupling-audit.md` covers the later decoupling series #316-322).
 Order: A (daemon core) → B (editing+catalog) → {C, D, E, F, G}.
 
 | # | Backlog item | Contents | Depends on |
