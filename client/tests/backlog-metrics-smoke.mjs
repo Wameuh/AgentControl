@@ -11,10 +11,12 @@ const EXE = process.env.CHROME_BIN ?? "/usr/bin/chromium";
 // detached:true → kill(-pid) tue tout le groupe ; port éphère lu sur la
 // sortie vite (un port fixe squatté piloterait le build d'un autre
 // worktree — faux négatifs déjà observés).
-const server = spawn("npx", ["vite", "preview", "--port", "0", "--strictPort"], { stdio: ["ignore", "pipe", "pipe"], detached: true });
+// Spawn direct de vite.js (pas de shim npx : un npx résolu de travers
+// restait muet >60 s sur runner CI — ni stdout ni stderr ni exit).
+const server = spawn("node", ["node_modules/vite/bin/vite.js", "preview", "--port", "0", "--strictPort"], { stdio: ["ignore", "pipe", "pipe"], detached: true });
 const BASE = await new Promise((res, rej) => {
   let buf = "", errbuf = "";
-  // Budget large : le cold start npx+vite d'un runner CI peut dépasser
+  // Budget large : le cold start vite d'un runner CI peut dépasser
   // 15 s ; stderr capturé pour diagnostiquer un crash silencieux.
   const to = setTimeout(() => rej(new Error(`vite preview: URL introuvable — stderr: ${errbuf.trim() || "(vide)"}`)), 60000);
   const scan = (d) => {
