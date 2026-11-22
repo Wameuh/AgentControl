@@ -18,8 +18,12 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 /// Champs demandés à `gh pr list|view` — tout `ChangeInfo` tient dedans.
+/// `authorAssociation` n'est PAS un champ `gh --json` : l'association
+/// est résolue à la demande via `GET /pulls/<n>` (voir
+/// `change_author_assoc`).
 const GH_FIELDS: &str = "number,title,body,state,isDraft,headRefName,headRefOid,\
-     baseRefName,url,reviewRequests,reviewDecision,statusCheckRollup";
+     baseRefName,url,reviewRequests,reviewDecision,statusCheckRollup,\
+     author,isCrossRepository";
 
 /// `gh --repo` accepte `HOST/OWNER/REPO` (GHES compris) — forme unique.
 fn repo_arg(host: &str, repo: &str) -> String {
@@ -28,6 +32,7 @@ fn repo_arg(host: &str, repo: &str) -> String {
 
 /// Payload `gh pr …` → ChangeInfo normalisé.
 fn gh_change(v: &Value) -> ChangeInfo {
+    let author = v["author"]["login"].as_str().unwrap_or("").to_string();
     ChangeInfo {
         number: v["number"].as_u64().unwrap_or(0),
         title: v["title"].as_str().unwrap_or("").into(),
@@ -39,6 +44,9 @@ fn gh_change(v: &Value) -> ChangeInfo {
         url: v["url"].as_str().unwrap_or("").into(),
         review: gh_review_state(v),
         ci: gh_ci_state(v),
+        author_id: author.clone(),
+        author,
+        cross_repo: v["isCrossRepository"].as_bool(),
         ..Default::default()
     }
 }
@@ -57,6 +65,16 @@ fn rest_change(v: &Value) -> ChangeInfo {
     } else {
         "closed"
     };
+    // Fork = head.repo plein et différent de base.repo ; head.repo
+    // null (fork supprimé) → inconnu, le gate retombe sur l'assoc.
+    let cross_repo = match (
+        v["head"]["repo"]["full_name"].as_str(),
+        v["base"]["repo"]["full_name"].as_str(),
+    ) {
+        (Some(h), Some(b)) => Some(!h.eq_ignore_ascii_case(b)),
+        _ => None,
+    };
+    let author = v["user"]["login"].as_str().unwrap_or("").to_string();
     ChangeInfo {
         number: v["number"].as_u64().unwrap_or(0),
         title: v["title"].as_str().unwrap_or("").into(),
@@ -66,6 +84,13 @@ fn rest_change(v: &Value) -> ChangeInfo {
         base: v["base"]["ref"].as_str().unwrap_or("").into(),
         head_sha: v["head"]["sha"].as_str().unwrap_or("").into(),
         url: v["html_url"].as_str().unwrap_or("").into(),
+        author_id: author.clone(),
+        author,
+        author_assoc: v["author_association"]
+            .as_str()
+            .unwrap_or("")
+            .to_uppercase(),
+        cross_repo,
         ..Default::default()
     }
 }
@@ -214,6 +239,26 @@ impl ForgeClient for GhCliClient {
 
     fn head_ref(&self, id: &str) -> Option<String> {
         Some(format!("pull/{id}/head"))
+    }
+
+    /// `author_association` n'est pas dans `gh pr list --json` —
+    /// `GET pulls/<n>` à la demande (gate de confiance des modes
+    /// auto, jamais invoqué pour un same-repo).
+    fn change_author_assoc(&self, change: &ChangeInfo) -> String {
+        if !change.author_assoc.is_empty() {
+            return change.author_assoc.clone();
+        }
+        match gh_api(
+            &self.host,
+            &format!("repos/{}/pulls/{}", self.target.repo, change.number),
+            &[],
+        ) {
+            GhCall::Ok(body) => serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v["author_association"].as_str().map(str::to_uppercase))
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
     }
 
     fn verify(&self, id: &str) -> Option<bool> {
@@ -454,6 +499,24 @@ impl ForgeClient for GhRestClient {
             return None;
         }
         Some(self.rollup(&sha)).filter(|s| !s.is_empty())
+    }
+
+    /// `GET /pulls/<n>` à la demande — `author_association` absent du
+    /// listing `?state=` (champ complet du GET unitaire seulement).
+    fn change_author_assoc(&self, change: &ChangeInfo) -> String {
+        if !change.author_assoc.is_empty() {
+            return change.author_assoc.clone();
+        }
+        match self.get(&format!(
+            "/repos/{}/pulls/{}",
+            self.target.repo, change.number
+        )) {
+            Http::Ok(v) => v["author_association"]
+                .as_str()
+                .unwrap_or("")
+                .to_uppercase(),
+            _ => String::new(),
+        }
     }
 
     fn verify(&self, id: &str) -> Option<bool> {

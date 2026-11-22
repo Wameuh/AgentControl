@@ -278,6 +278,25 @@ verdict_changes>` — labels configurable per repo, defaults
 consuming them stay forge-side by design (the repo's merge policy
 must know the chosen label).
 
+**Trust gate on the automatic modes** (`auto_open`/`auto_push`): an
+auto-launched review only fires on a *trusted* change — a source
+branch living in the same repository (`cross_repo == false`: GitHub
+`isCrossRepository`, GitLab `source_project_id == target_project_id`,
+Gerrit has no fork notion — always same-project) **or** an author
+association of `OWNER`/`MEMBER`/`COLLABORATOR` (the same list the
+comment-mode trigger already enforces; the association is resolved
+lazily when the listing doesn't carry it — GitHub `GET /pulls/<n>`
+`author_association`, GitLab `members/all/<author_id>`, Gerrit
+best-effort owner). Anything unknown — deleted fork, missing
+association — counts as **untrusted** (fail-closed): no reviewer
+session is spawned on untrusted content and the change is remembered
+as `skipped_untrusted` in `pr_reviews`, never re-evaluated every tick
+(a later push re-checks trust under `auto_push`; a `comment` trigger
+or an internal `acctl pr review` always wins — a human asking is the
+validation). `auto_review_untrusted=true` (global or per-repo
+override) relaxes the filter — useful on private repos, risky on
+public ones.
+
 Merging a review stays a **GitHub-only permission**: the PR merge hook
 (`/mr review`, CI gates) does not extend to GitLab or Gerrit — the
 registry there is advisory (visibility, attribution, status).

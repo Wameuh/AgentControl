@@ -20,7 +20,12 @@
 //!   d'automatisation externe (« Launching a review ») suit le
 //!   trigger ; `auto_open` = review à la première vue du change
 //!   ouvert ; `auto_push` = re-review à chaque head différent du sha
-//!   reviewé ; `manual` = aucun scan forge (demandes internes
+//!   reviewé — les modes auto ne déclenchent que sur un change DE
+//!   CONFIANCE (branche source dans le même dépôt, ou auteur
+//!   OWNER/MEMBER/COLLABORATOR — `auto_review_untrusted` relâche le
+//!   filtre) : un change non fiable est mémorisé `skipped_untrusted`,
+//!   jamais reviewé ni réévalué à chaque tick ; `manual` = aucun
+//!   scan forge (demandes internes
 //!   `acctl pr review`/RPC seules) ; `off` = même les demandes sont
 //!   refusées.
 //! - La session reviewer `PRReview-<N>` (origin `feature:pr-review`)
@@ -110,6 +115,11 @@ pub(crate) enum EntryState {
     RetryWait,
     Done,
     Failed,
+    /// Change non fiable mémorisé (item #330 — modes auto) : la
+    /// décision n'est pas réévaluée à chaque tick ; `auto_push` la
+    /// réévalue à chaque head, un trigger commentaire ou une demande
+    /// interne passent toujours (déclencheur humain = validation).
+    SkippedUntrusted,
 }
 
 impl EntryState {
@@ -119,6 +129,7 @@ impl EntryState {
             EntryState::RetryWait => "retry_wait",
             EntryState::Done => "done",
             EntryState::Failed => "failed",
+            EntryState::SkippedUntrusted => "skipped_untrusted",
         }
     }
     pub(crate) fn of(v: &Value) -> Self {
@@ -126,6 +137,7 @@ impl EntryState {
             Some("retry_wait") => EntryState::RetryWait,
             Some("done") => EntryState::Done,
             Some("failed") => EntryState::Failed,
+            Some("skipped_untrusted") => EntryState::SkippedUntrusted,
             _ => EntryState::Running,
         }
     }
@@ -140,6 +152,94 @@ fn is_trigger(body: &str, trigger: &str) -> bool {
 /// Le commentaire vient-il d'un auteur autorisé ?
 fn trigger_author_ok(assoc: &str) -> bool {
     TRIGGER_AUTHORS.contains(&assoc)
+}
+
+/// Le change est-il « de confiance » pour un lancement auto ? Fiable
+/// si la branche source vit dans le même dépôt (`cross_repo ==
+/// Some(false)`) OU si l'auteur est OWNER/MEMBER/COLLABORATOR — toute
+/// information inconnue compte comme NON fiable (fail-closed : jamais
+/// de session reviewer sur la PR d'un inconnu sans validation
+/// explicite).
+fn change_trusted(c: &forgesync::ChangeInfo) -> bool {
+    c.cross_repo == Some(false) || trigger_author_ok(&c.author_assoc)
+}
+
+/// L'entrée `pr_reviews` autorise-t-elle un (re)déclenchement en mode
+/// auto ? `None` = première vue du change. Une entrée
+/// `skipped_untrusted` n'est rejouée QUE si le filtre a été relâché
+/// entre-temps (`allow_untrusted` — la confiance n'est alors plus
+/// évaluée, la PR externe redevient candidate). Sinon la
+/// (ré)évaluation n'a lieu que sur head différent en `auto_push` —
+/// `auto_open` ne refeuille jamais une entrée connue (done, failed,
+/// retry_wait ou skipped).
+fn auto_refire(
+    entry: Option<&Value>,
+    mode: cfg::ReviewTriggerMode,
+    head: &str,
+    allow_untrusted: bool,
+) -> bool {
+    let Some(e) = entry else {
+        return true;
+    };
+    if EntryState::of(e) == EntryState::SkippedUntrusted && allow_untrusted {
+        return true;
+    }
+    // head vide = illisible → conservateur, pas de re-review en
+    // boucle ; `skipped` non relâché : l'auto_push réévalue la
+    // confiance sur le nouvel head (l'auteur a pu devenir membre).
+    mode == cfg::ReviewTriggerMode::AutoPush
+        && !head.is_empty()
+        && head != e.get("sha").and_then(Value::as_str).unwrap_or("")
+}
+
+/// Décision du scan pour UN candidat auto — la séquence exacte du
+/// tick (`auto_refire` → gate de confiance) factorisée pour les
+/// tests. `ResolveAssoc` demande au scan de compléter
+/// `change.author_assoc` via `change_author_assoc` (lazy, un appel
+/// forge — jamais pour un same-repo, déjà `Fire` par
+/// `change_trusted`) puis de rejouer `auto_decision` : un assoc
+/// toujours vide retombe `SkipUntrusted` (fail-closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoDecision {
+    /// Lancer la review.
+    Fire,
+    /// Rien à faire ce tick (entrée connue sans refire).
+    Idle,
+    /// `author_assoc` à résoudre par la forge puis réévaluer.
+    ResolveAssoc,
+    /// Non fiable → mémoriser `skipped_untrusted`.
+    SkipUntrusted,
+}
+
+fn auto_decision(
+    entry: Option<&Value>,
+    mode: cfg::ReviewTriggerMode,
+    c: &forgesync::ChangeInfo,
+    allow_untrusted: bool,
+) -> AutoDecision {
+    if !auto_refire(entry, mode, &c.head_sha, allow_untrusted) {
+        return AutoDecision::Idle;
+    }
+    if allow_untrusted || change_trusted(c) {
+        return AutoDecision::Fire;
+    }
+    if c.author_assoc.is_empty() {
+        return AutoDecision::ResolveAssoc;
+    }
+    AutoDecision::SkipUntrusted
+}
+
+/// Entrée `skipped_untrusted` écrite quand `auto_decision` conclut
+/// `SkipUntrusted` — forme unique partagée scan/test.
+fn skipped_entry(last_trigger: u64, head_sha: &str, now: f64, mode: &str) -> Value {
+    json!({
+        "last_trigger_id": last_trigger,
+        "sid": "",
+        "sha": head_sha,
+        "started": now,
+        "state": EntryState::SkippedUntrusted.as_str(),
+        "origin": mode,
+    })
 }
 
 /// Extrait le contenu du bloc `REVIEW_RESULT_BEGIN … END` — recherché
@@ -1161,7 +1261,7 @@ impl Daemon {
         // `comments` exclues en amont par `list_changes` de toute
         // façon) ; `manual`/`off` = aucun scan — les demandes
         // internes de 2a.5 restent la seule voie (`off` les refuse).
-        for (repo, pr_n, head) in self.pr_review_candidates(&cfg).await {
+        for (repo, change) in self.pr_review_candidates(&cfg).await {
             if free == 0 {
                 break;
             }
@@ -1172,6 +1272,7 @@ impl Daemon {
             if !mode.scans() {
                 continue;
             }
+            let pr_n = change.number;
             let key = format!("{repo}#{pr_n}");
             let last_trigger = st
                 .pr_reviews
@@ -1218,30 +1319,55 @@ impl Daemon {
                 // `last_trigger+1` : il ne matche aucun commentaire.
                 _ => {
                     let entry = st.pr_reviews.get(&key);
-                    let new_change = entry.is_none();
-                    // auto_push : head listé différent du sha reviewé
-                    // (head vide = illisible → conservateur, pas de
-                    // re-review en boucle) ; auto_open sur une entrée
-                    // existante ≠ nouvelle ouverture.
-                    let pushed = mode == cfg::ReviewTriggerMode::AutoPush
-                        && !head.is_empty()
-                        && head
-                            != entry
-                                .and_then(|v| v.get("sha"))
-                                .and_then(Value::as_str)
-                                .unwrap_or("");
-                    if !new_change && !pushed {
-                        continue;
+                    let allow_untrusted = cfg.auto_review_untrusted_for(&repo);
+                    // Gate de confiance des modes auto (item #330) :
+                    // une review ne se lance que sur un change fiable
+                    // — same-repo ou auteur OWNER/MEMBER/COLLABORATOR
+                    // (l'assoc est résolue à la demande, jamais pour
+                    // un same-repo). Inconnu = non fiable
+                    // (fail-closed) ; l'entrée `skipped_untrusted`
+                    // mémorise la décision — pas de réévaluation à
+                    // chaque tick. Le mode `comment` et les demandes
+                    // internes ne sont pas filtrés : le déclencheur
+                    // humain fait déjà office de validation.
+                    let mut c = change.clone();
+                    if auto_decision(entry, mode, &c, allow_untrusted) == AutoDecision::ResolveAssoc
+                    {
+                        c.author_assoc = self.pr_change_assoc(&repo, &c, &cfg).await;
+                    }
+                    match auto_decision(entry, mode, &c, allow_untrusted) {
+                        AutoDecision::Idle => continue,
+                        AutoDecision::SkipUntrusted | AutoDecision::ResolveAssoc => {
+                            // ResolveAssoc impossible : assoc a été
+                            // résolu juste au-dessus — "" retombe
+                            // SkipUntrusted. Filet de sécurité quand
+                            // même : traiter comme non fiable.
+                            info!(
+                                "orchestrator: review {key} skipped — \
+                                 untrusted change (mode {}, cross_repo={:?}, \
+                                 author «{}» assoc «{}»)",
+                                mode.as_str(),
+                                c.cross_repo,
+                                c.author,
+                                c.author_assoc
+                            );
+                            st.pr_reviews.insert(
+                                key.clone(),
+                                skipped_entry(last_trigger, &change.head_sha, now, mode.as_str()),
+                            );
+                            continue;
+                        }
+                        AutoDecision::Fire => {}
                     }
                     // Sha de vérité : `list_changes` peut le laisser
                     // vide selon la forge → relecture exacte.
-                    let head_sha = if head.is_empty() {
+                    let head_sha = if change.head_sha.is_empty() {
                         match self.pr_head(&repo, pr_n, &cfg).await {
                             Some(h) => h,
                             None => continue,
                         }
                     } else {
-                        head.clone()
+                        change.head_sha.clone()
                     };
                     (last_trigger + 1, head_sha)
                 }
@@ -1899,9 +2025,14 @@ impl Daemon {
     /// Changes ouverts à reviewer : `list_changes` du transport résolu
     /// filtré à base `integration_branch` par repo routé (registre ∪
     /// remote du workspace), chaque numéro une seule fois — la liste
-    /// forge fait foi pour le statut. Toutes forges à `caps.list` ;
-    /// git nu est exclu (pas de lecture automatique).
-    async fn pr_review_candidates(&self, cfg: &cfg::OrchCfg) -> Vec<(String, u64, String)> {
+    /// forge fait foi pour le statut. Le `ChangeInfo` complet est
+    /// rendu : le gate de confiance des modes auto lit
+    /// `cross_repo`/`author`/`author_assoc` dessus. Toutes forges à
+    /// `caps.list` ; git nu est exclu (pas de lecture automatique).
+    async fn pr_review_candidates(
+        &self,
+        cfg: &cfg::OrchCfg,
+    ) -> Vec<(String, forgesync::ChangeInfo)> {
         // (repo, kind, host) côté client : les entrées du registre
         // portent forge+host directement ; le workspace entre via son
         // remote (pas besoin de `gh repo view`).
@@ -1959,7 +2090,7 @@ impl Daemon {
                     // filtrent pas toutes pareil).
                     if base.is_empty() || c.base.eq_ignore_ascii_case(&base) {
                         if c.number > 0 {
-                            out_v.push((repo.clone(), c.number, c.head_sha));
+                            out_v.push((repo.clone(), c));
                         }
                     }
                 }
@@ -2024,6 +2155,25 @@ impl Daemon {
         self.pr_change(repo, &pr_n.to_string(), cfg)
             .await
             .and_then(|c| (!c.head_sha.is_empty()).then_some(c.head_sha))
+    }
+
+    /// Association de l'auteur d'un change — `change_author_assoc` du
+    /// transport (résolution lazy : un appel forge, uniquement pour
+    /// les candidats non same-repo du gate de confiance). "" =
+    /// inconnu → non fiable au `change_trusted` (fail-closed).
+    async fn pr_change_assoc(
+        &self,
+        repo: &str,
+        change: &forgesync::ChangeInfo,
+        cfg: &cfg::OrchCfg,
+    ) -> String {
+        let Some(client) = self.forge_client(repo, cfg).await else {
+            return String::new();
+        };
+        let c = change.clone();
+        tokio::task::spawn_blocking(move || client.change_author_assoc(&c))
+            .await
+            .unwrap_or_default()
     }
 
     /// Commentaire/note/review-message sur le change (compte local
@@ -2517,6 +2667,195 @@ mod tests {
             c.review_prompt_for("forge/repo"),
             Some("tpl {VERDICT_APPROVED}")
         );
+    }
+
+    // ---- Gate de confiance des modes auto (item #330).
+
+    fn ch(cross_repo: Option<bool>, assoc: &str) -> forgesync::ChangeInfo {
+        forgesync::ChangeInfo {
+            cross_repo,
+            author_assoc: assoc.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Toutes les combinaisons du tableau de l'item : same-repo =
+    /// fiable quel que soit l'auteur ; fork + OWNER/MEMBER/COLLAB =
+    /// fiable ; fork + CONTRIBUTOR/NONE/"" ou origine inconnue =
+    /// non fiable (fail-closed).
+    #[test]
+    fn gate_confiance_change() {
+        // Même dépôt → fiable quel que soit l'assoc (même inconnu).
+        for a in ["OWNER", "CONTRIBUTOR", "NONE", ""] {
+            assert!(change_trusted(&ch(Some(false), a)), "same-repo assoc {a}");
+        }
+        // Fork → seul un auteur habilité rend fiable.
+        for a in TRIGGER_AUTHORS {
+            assert!(change_trusted(&ch(Some(true), a)), "fork assoc {a}");
+        }
+        for a in ["CONTRIBUTOR", "NONE", "FIRST_TIMER", ""] {
+            assert!(!change_trusted(&ch(Some(true), a)), "fork assoc {a}");
+        }
+        // Origine inconnue (forge muette) → seul l'assoc décide.
+        assert!(change_trusted(&ch(None, "MEMBER")));
+        for a in ["CONTRIBUTOR", "NONE", ""] {
+            assert!(!change_trusted(&ch(None, a)), "unknown assoc {a}");
+        }
+    }
+
+    fn ent(state: &str, sha: &str) -> Value {
+        json!({"state": state, "sha": sha})
+    }
+
+    /// Re-déclenchement auto : nouvelle vue = fire ; entrée connue
+    /// refeuillée seulement par auto_push sur head différent ;
+    /// `skipped_untrusted` rejouée si le filtre est relâché, sinon
+    /// réévaluée par auto_push sur nouvel head.
+    #[test]
+    fn auto_refire_regles() {
+        use cfg::ReviewTriggerMode::*;
+        // Première vue → fire dans les deux modes.
+        for m in [AutoOpen, AutoPush] {
+            assert!(auto_refire(None, m, "h1", false), "{m:?} new");
+        }
+        // Entrée existante : auto_open jamais, auto_push sur head
+        // différent seulement (quel que soit l'état non-skipped).
+        for s in ["done", "failed", "retry_wait"] {
+            assert!(
+                !auto_refire(Some(&ent(s, "h1")), AutoOpen, "h2", false),
+                "{s} auto_open"
+            );
+            assert!(
+                !auto_refire(Some(&ent(s, "h1")), AutoPush, "h1", false),
+                "{s} same head"
+            );
+            assert!(
+                auto_refire(Some(&ent(s, "h1")), AutoPush, "h2", false),
+                "{s} new head"
+            );
+        }
+        // Head vide → jamais de refire auto_push.
+        assert!(!auto_refire(Some(&ent("done", "h1")), AutoPush, "", false));
+        // skipped_untrusted : pas de refire auto_open ; auto_push le
+        // réévalue au head près ; filtre relâché → rejouée direct.
+        let sk = ent("skipped_untrusted", "h1");
+        assert!(!auto_refire(Some(&sk), AutoOpen, "h2", false));
+        assert!(!auto_refire(Some(&sk), AutoPush, "h1", false));
+        assert!(auto_refire(Some(&sk), AutoPush, "h2", false));
+        for m in [AutoOpen, AutoPush] {
+            assert!(auto_refire(Some(&sk), m, "h1", true), "{m:?} skipped+allow");
+        }
+        // `skipped_untrusted` est reconnu (≠ Running conservateur).
+        assert_eq!(EntryState::of(&sk), EntryState::SkippedUntrusted);
+    }
+
+    /// Scénario de l'item : `auto_open` sur une PR interne + une PR
+    /// de fork externe — l'interne lance la review (`Fire`), la fork
+    /// est mémorisée `skipped_untrusted` et n'est plus réévaluée aux
+    /// ticks suivants (`Idle`), sans déclencheur humain. La séquence
+    /// rejouée est celle du tick : `auto_decision` → résolution lazy
+    /// de l'assoc → `auto_decision` → `skipped_entry`.
+    #[test]
+    fn scan_auto_filtre_pr_externe() {
+        use cfg::ReviewTriggerMode::*;
+        let internal = forgesync::ChangeInfo {
+            number: 11,
+            head_sha: "aa".into(),
+            author: "wameuh".into(),
+            author_assoc: "OWNER".into(),
+            cross_repo: Some(false),
+            ..Default::default()
+        };
+        let fork = forgesync::ChangeInfo {
+            number: 12,
+            head_sha: "bb".into(),
+            author: "random_ext".into(),
+            cross_repo: Some(true),
+            ..Default::default()
+        };
+        let mut reviews: std::collections::HashMap<String, Value> = Default::default();
+
+        // Tick 1 — même séquence que la boucle du scan.
+        for (key, c) in [("o/r#11", &internal), ("o/r#12", &fork)] {
+            let entry = reviews.get(key);
+            let mut c = c.clone();
+            // Résolution lazy simulée : la forge répond NONE pour
+            // l'auteur externe (le same-repo n'atteint jamais ce
+            // point — Fire direct).
+            if auto_decision(entry, AutoOpen, &c, false) == AutoDecision::ResolveAssoc {
+                c.author_assoc = "NONE".into();
+            }
+            match auto_decision(entry, AutoOpen, &c, false) {
+                AutoDecision::Idle => continue,
+                AutoDecision::SkipUntrusted | AutoDecision::ResolveAssoc => {
+                    reviews.insert(key.into(), skipped_entry(0, &c.head_sha, 1.0, "auto_open"));
+                }
+                AutoDecision::Fire => {
+                    reviews.insert(key.into(), json!({"state": "running", "sha": c.head_sha}));
+                }
+            }
+        }
+        assert_eq!(EntryState::of(&reviews["o/r#11"]), EntryState::Running);
+        assert_eq!(
+            EntryState::of(&reviews["o/r#12"]),
+            EntryState::SkippedUntrusted
+        );
+
+        // Tick 2 — la fork skipée n'est plus jamais réévaluée ; la
+        // running non plus (déjà filtrée en amont par le pool).
+        for (key, c) in [("o/r#11", &internal), ("o/r#12", &fork)] {
+            assert_eq!(
+                auto_decision(reviews.get(key), AutoOpen, c, false),
+                AutoDecision::Idle,
+                "{key} ne doit pas refire en auto_open"
+            );
+        }
+        // Sous auto_push : la fork reste mémorisée au même head, mais
+        // un push d'elle réévalue la confiance — et un
+        // `auto_review_untrusted` activé la fait refeuiller.
+        assert_eq!(
+            auto_decision(reviews.get("o/r#12"), AutoPush, &fork, false),
+            AutoDecision::Idle
+        );
+        let mut new_head = fork.clone();
+        new_head.head_sha = "cc".into();
+        assert_eq!(
+            auto_decision(reviews.get("o/r#12"), AutoPush, &new_head, false),
+            AutoDecision::ResolveAssoc
+        );
+        assert_eq!(
+            auto_decision(reviews.get("o/r#12"), AutoOpen, &fork, true),
+            AutoDecision::Fire,
+            "filtre relâché → la PR skipée redevient candidate"
+        );
+    }
+
+    /// `auto_review_untrusted` : défaut false, global puis override
+    /// par repo (clé chemin complet ET nom court — `review_ov`).
+    #[test]
+    fn gate_param_untrusted() {
+        let mut c = cfg::OrchCfg::default();
+        assert!(!c.auto_review_untrusted_for("o/r"));
+        c.auto_review_untrusted = true;
+        assert!(c.auto_review_untrusted_for("o/r"));
+        // Override false local reprend la main sur un global relâché.
+        c.review.insert(
+            "forge/repo".into(),
+            cfg::ReviewOverride {
+                auto_review_untrusted: Some(false),
+                ..Default::default()
+            },
+        );
+        c.review.insert(
+            "short".into(),
+            cfg::ReviewOverride {
+                auto_review_untrusted: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(!c.auto_review_untrusted_for("forge/repo"));
+        assert!(c.auto_review_untrusted_for("g/short"));
+        assert!(c.auto_review_untrusted_for("a/b"));
     }
 
     /// La garde de base review (`base == cfg.pr_base()`) suit le param

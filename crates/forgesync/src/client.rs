@@ -71,6 +71,20 @@ pub struct ChangeInfo {
     /// Projet résolu par la forge (Gerrit `project` — autorité sur le
     /// repo deviné) ; None = `target.repo` fait foi.
     pub resolved_repo: Option<String>,
+    /// Login/username de l'auteur du change ("" = inconnu).
+    pub author: String,
+    /// Identifiant forge de l'auteur — github = login, gitlab = id
+    /// numérique, gerrit = `_account_id` — sert aux lookups
+    /// d'appartenance (`change_author_assoc`).
+    pub author_id: String,
+    /// Association normalisée quand la forge la fournit dans le
+    /// payload — vocabulaire github : OWNER | MEMBER | COLLABORATOR |
+    /// CONTRIBUTOR | NONE. "" = à résoudre via `change_author_assoc`
+    /// (lazy, un appel forge).
+    pub author_assoc: String,
+    /// Branche source hors du dépôt cible (PR de fork, MR
+    /// cross-project) — None = la forge ne le dit pas.
+    pub cross_repo: Option<bool>,
 }
 
 /// Commentaire/note normalisé — même forme quelle que soit la forge.
@@ -190,6 +204,15 @@ pub trait ForgeClient: Send + Sync {
     /// les notes candidates au trigger).
     fn author_assoc(&self, comment: &ChangeComment) -> String {
         comment.assoc.clone()
+    }
+    /// Association normalisée de l'auteur d'un CHANGE — même
+    /// vocabulaire que `author_assoc` (commentaire). Défaut :
+    /// `author_assoc` du payload ; les forges qui ne l'exposent pas
+    /// dans le listing le résolvent à la demande — un appel par
+    /// change candidat au filtre de confiance des modes auto (jamais
+    /// invoqué pour un same-repo).
+    fn change_author_assoc(&self, change: &ChangeInfo) -> String {
+        change.author_assoc.clone()
     }
     /// Checks du head : pending|success|failure — None = inconnu.
     /// Défaut : `ci` du change quand il est rempli.
