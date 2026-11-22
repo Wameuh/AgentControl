@@ -501,8 +501,9 @@ impl ForgeClient for GhRestClient {
         Some(self.rollup(&sha)).filter(|s| !s.is_empty())
     }
 
-    /// `GET /pulls/<n>` à la demande — `author_association` absent du
-    /// listing `?state=` (champ complet du GET unitaire seulement).
+    /// Le listing `?state=` porte déjà `author_association` (mappé
+    /// par `rest_change`) → early-return ; ce `GET /pulls/<n>` n'est
+    /// que le filet quand le payload ne l'a pas.
     fn change_author_assoc(&self, change: &ChangeInfo) -> String {
         if !change.author_assoc.is_empty() {
             return change.author_assoc.clone();
