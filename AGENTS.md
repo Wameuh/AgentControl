@@ -576,7 +576,11 @@ in both cases:
   that motivates it: `feat: nouveau champ proto (sync)` — a bare
   word (`a major bug`) must not count. **At squash, the element must
   be kept** — GitHub includes subjects in the squash body by default:
-  don't edit it out of the message.
+  don't edit it out of the message. ⚠️ The carrier is the **squash
+  commit subject** on `next_release`: a single-commit PR squashes to
+  the **commit's own message**, not the PR title — a keyword in the
+  PR title alone never reaches the cycle (happened: #421; the
+  follow-up puts the keyword in the commit subject AND body).
 - To **quote** a keyword in prose without triggering it (docs, a
   message talking about the rule), write it **without parentheses**
   ("sync") — `` `(sync)` `` matches even inside backticks, including
