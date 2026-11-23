@@ -157,7 +157,7 @@ impl Daemon {
                 // drop → kill() du shell → reader EIO → reap
                 TermReply::Resp(Response::ok(id, json!({})))
             }
-            _ => return TermReply::Pass,
+            _ => TermReply::Pass,
         }
     }
 

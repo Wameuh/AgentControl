@@ -198,8 +198,10 @@ fn ensure_lock_suit_un_state_dir_deplace() {
     let _ = std::fs::remove_dir_all(&base);
     let d1 = base.join("a");
     let d2 = base.join("b");
-    let mut c = cfg::OrchCfg::default();
-    c.state_dir = d1.display().to_string();
+    let c = cfg::OrchCfg {
+        state_dir: d1.display().to_string(),
+        ..Default::default()
+    };
     let probe = OrchProbe::open(c);
     assert!(matches!(probe.ensure_lock(), LockState::Held));
     // Déplacement à chaud → relock dans d2.
@@ -207,11 +209,15 @@ fn ensure_lock_suit_un_state_dir_deplace() {
     assert!(matches!(probe.ensure_lock(), LockState::Held));
     assert!(d2.join("orchestrator.lock").exists());
     // Un autre probe sur d2 est bloqué ; l'ancien dossier est libre.
-    let mut c2 = cfg::OrchCfg::default();
-    c2.state_dir = d2.display().to_string();
+    let c2 = cfg::OrchCfg {
+        state_dir: d2.display().to_string(),
+        ..Default::default()
+    };
     assert!(matches!(OrchProbe::open(c2).ensure_lock(), LockState::Busy));
-    let mut c3 = cfg::OrchCfg::default();
-    c3.state_dir = d1.display().to_string();
+    let c3 = cfg::OrchCfg {
+        state_dir: d1.display().to_string(),
+        ..Default::default()
+    };
     assert!(matches!(OrchProbe::open(c3).ensure_lock(), LockState::Held));
     let _ = std::fs::remove_dir_all(&base);
 }

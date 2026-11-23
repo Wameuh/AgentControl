@@ -94,6 +94,7 @@ impl Daemon {
             Ok(json!({"queued": true, "resumed": true, "delivery": dlv}))
         }
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn h_peer_spawn(
         self: &Arc<Self>,
         from: String,

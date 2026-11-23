@@ -73,6 +73,7 @@ impl Daemon {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn h_new_session(
         self: &Arc<Self>,
         agent: String,
@@ -1070,15 +1071,17 @@ impl Daemon {
 
     /// Spawn d'une session fraîche en tâche de fond : la requête de
     /// création a déjà répondu (la session est insérée, visible en
-    /// "starting") — process + handshake + config demandée à la création
-    /// + livraison post-spawn (prompt initial / message de délégation)
-    /// s'enchaînent ici au lieu de bloquer le caller.
+    /// "starting") — process + handshake + config demandée à la
+    /// création, livraison post-spawn (prompt initial / message de
+    /// délégation) — tout s'enchaîne ici au lieu de bloquer le caller.
+    ///
     /// Sur échec : event Error + état "dead" — sauf si la session a
     /// changé de main entre-temps : sleep (asleep), kill (dead), un
     /// autre spawn en vol, clear/rebind ("supplanté"), suppression
     /// (sortie de la liste) possèdent déjà leur état — un "dead" posé
     /// ici l'écraserait à tort. La créatrice d'un peer_spawn est
     /// notifiée de l'échec (sinon elle croirait sa fille au travail).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_fresh(
         self: &Arc<Self>,
         s: &Arc<Session>,

@@ -195,7 +195,7 @@ mod tests {
             let trusted = "trusted comment: test".to_string();
             let mut global_msg = Vec::with_capacity(64 + trusted.len() - 17);
             global_msg.extend_from_slice(&sig.to_bytes());
-            global_msg.extend_from_slice(trusted[17..].as_bytes());
+            global_msg.extend_from_slice(&trusted.as_bytes()[17..]);
             let global = self.sk.sign(&global_msg);
             format!(
                 "untrusted comment: test signature\n{}\n{}\n{}",

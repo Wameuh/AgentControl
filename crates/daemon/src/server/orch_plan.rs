@@ -125,7 +125,7 @@ fn is_backlog(m: &SessionMeta, cfg: &cfg::OrchCfg) -> bool {
 // Accesseurs item (JSON agentbacklog ≥ 0.7)
 // ---------------------------------------------------------------------------
 
-fn task_reviewer<'a>(t: &'a Task) -> &'a str {
+fn task_reviewer(t: &Task) -> &str {
     t.get("reviewer_id").and_then(Value::as_str).unwrap_or("")
 }
 fn task_review_round(t: &Task) -> u64 {
@@ -137,10 +137,10 @@ fn task_no_plan(t: &Task) -> bool {
     t.get("no_plan")
         .is_some_and(|v| v.as_i64().is_some_and(|i| i != 0) || v.as_bool() == Some(true))
 }
-pub(crate) fn task_plan_content<'a>(t: &'a Task) -> &'a str {
+pub(crate) fn task_plan_content(t: &Task) -> &str {
     t.get("plan_content").and_then(Value::as_str).unwrap_or("")
 }
-fn task_plan_file<'a>(t: &'a Task) -> &'a str {
+fn task_plan_file(t: &Task) -> &str {
     t.get("plan_file").and_then(Value::as_str).unwrap_or("")
 }
 
@@ -774,6 +774,7 @@ impl Daemon {
     /// `orch_cycle` quand `cfg.plan_review`. Reçoit le même snapshot
     /// que le chemin legacy (tasks `--list --all`, metas, ids, prs,
     /// état persisté cloné) et renvoie les compteurs pour le statut.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn orch_plan_tick(
         self: &Arc<Self>,
         bin: &str,
@@ -1096,7 +1097,7 @@ impl Daemon {
                         .get(&id.to_string())
                         .is_some_and(|ts| now - *ts < REVIEW_RETRY_S)
             })
-            .map(|t| task_id(t))
+            .map(task_id)
             .collect();
         for t in tasks.iter().filter(|t| eligible_ids.contains(&task_id(t))) {
             if !slots.ok() || reviewers_free == 0 {
@@ -1676,6 +1677,7 @@ impl Daemon {
     /// implement_mode (ou nouvel implémenteur si le planner a disparu) ;
     /// denied/conditional : stall si le round max est atteint, release
     /// si le planner est mort, sinon le planner révise.
+    #[allow(clippy::too_many_arguments)]
     async fn plan_apply_verdict(
         self: &Arc<Self>,
         bin: &str,
@@ -1745,7 +1747,7 @@ impl Daemon {
                          {} (dedicated worktree \
                          based on {}). {} Unrecoverable \
                          blocker: --release + explanation.",
-                        round.saturating_sub(1).max(0),
+                        round.saturating_sub(1),
                         rules_text(cfg, task_repo(t), &iws),
                         cfg.pr_base(),
                         task_dod(t).replace("<ID>", &id.to_string()),
@@ -1788,7 +1790,7 @@ impl Daemon {
                             ("ID", key.clone()),
                             ("ITEM", item_body(t)),
                             ("WS", iws.clone()),
-                            ("ROUND", format!("{}", round.saturating_sub(1).max(0))),
+                            ("ROUND", format!("{}", round.saturating_sub(1))),
                             ("PLAN", clip_inline(task_plan_content(t), PLAN_INLINE_MAX)),
                             ("DOD", task_dod(t).replace("<ID>", &key)),
                         ]
@@ -1918,6 +1920,7 @@ impl Daemon {
     /// inclure plan_review/reviewing (un planner conserve son item en
     /// revue) et `nudge_kind` choisit le texte de relance.
     /// Retourne vrai si la session survit (faux après rm).
+    #[allow(clippy::too_many_arguments)]
     async fn plan_session_upkeep(
         self: &Arc<Self>,
         w: &SessionMeta,
@@ -2247,6 +2250,7 @@ impl Daemon {
     /// Entretien d'un `Backlog-P*` : upkeep worker-like puis détection
     /// de soumission de plan (marqueur PLAN_FILE / permission exit-plan)
     /// et auto-réponse aux requêtes pendantes expirées.
+    #[allow(clippy::too_many_arguments)]
     async fn planner_upkeep(
         self: &Arc<Self>,
         w: &SessionMeta,
@@ -2408,7 +2412,6 @@ impl Daemon {
             } else {
                 warn!("orchestrator: submit-plan #{id} (exit-plan) rc={rc} {e}");
             }
-            return;
         }
     }
 

@@ -159,6 +159,21 @@ fn cut_lines(buf: &[u8], base: u64, drop_head: bool) -> (String, u64) {
     }
 }
 
+/// Logge les panics (fichier + stderr via tracing) puis délègue au hook par
+/// défaut qui imprime sur stderr. Sans ça, un panic dans une tâche tokio
+/// tue la tâche silencieusement, et un panic dans main ne laisse qu'une
+/// trace stderr volatile.
+fn install_panic_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // force_capture : capture() honore RUST_BACKTRACE (absente sous
+        // supervisord) → backtrace vide justement au moment du crash.
+        let bt = std::backtrace::Backtrace::force_capture();
+        tracing::error!("panic: {info}\n{bt}");
+        prev(info);
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,19 +237,4 @@ mod tests {
         assert_eq!(off, 20);
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-/// Logge les panics (fichier + stderr via tracing) puis délègue au hook par
-/// défaut qui imprime sur stderr. Sans ça, un panic dans une tâche tokio
-/// tue la tâche silencieusement, et un panic dans main ne laisse qu'une
-/// trace stderr volatile.
-fn install_panic_hook() {
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        // force_capture : capture() honore RUST_BACKTRACE (absente sous
-        // supervisord) → backtrace vide justement au moment du crash.
-        let bt = std::backtrace::Backtrace::force_capture();
-        tracing::error!("panic: {info}\n{bt}");
-        prev(info);
-    }));
 }

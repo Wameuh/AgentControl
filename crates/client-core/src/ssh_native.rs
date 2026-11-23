@@ -347,10 +347,12 @@ async fn connect_auth(
     key: Option<&Path>,
     opts: &Opts,
 ) -> Result<client::Handle<Handler>> {
-    let mut cfg = client::Config::default();
-    cfg.inactivity_timeout = None;
-    cfg.keepalive_interval = Some(Duration::from_secs(30));
-    cfg.keepalive_max = 3;
+    let cfg = client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        keepalive_max: 3,
+        ..Default::default()
+    };
     let addrs = (host, port);
     let seen_fp = Arc::new(std::sync::Mutex::new(None));
     let handler = Handler {
@@ -427,6 +429,7 @@ async fn connect_auth(
 /// au fil de l'eau (progression `step:*`, erreurs lisibles…) — le
 /// retour est `(code, stdout, stderr)` : le résultat métier reste
 /// sur stdout, les messages de diagnostic sur stderr.
+#[allow(clippy::too_many_arguments)]
 pub async fn ssh_exec(
     host: &str,
     port: u16,
@@ -530,8 +533,8 @@ async fn exec_on_io(
     .context("exec timeout")?;
     // Reliquat stderr sans '\n' final → dernière ligne au callback.
     if !err_rest.is_empty() {
-        if let Some(cb) = on_stderr.as_deref_mut() {
-            cb(&String::from_utf8_lossy(&err_rest).to_string());
+        if let Some(cb) = on_stderr {
+            cb(String::from_utf8_lossy(&err_rest).as_ref());
         }
     }
     Ok((

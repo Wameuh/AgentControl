@@ -160,7 +160,7 @@ async fn read_frames(
         }
         match op {
             // Continuation / texte / binaire : agrégat NDJSON.
-            0x0 | 0x1 | 0x2 => {
+            0x0..=0x2 => {
                 msg.extend_from_slice(&payload);
                 if msg.len() > MSG_MAX {
                     let _ = out.try_send((0x8, close_payload(1009)));

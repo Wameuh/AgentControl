@@ -59,6 +59,7 @@ impl Session {
     /// Retour : Ok(true) spawn livré, Ok(false) supplanté en douceur — un
     /// kill/rebind a invalidé la génération après le handshake : la session
     /// appartient à un nouveau cycle (ni config, ni livraison, ni état).
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_agent(
         self: &Arc<Self>,
         command: &[String],
@@ -391,11 +392,8 @@ impl Session {
             let session = Arc::clone(self);
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
-                loop {
-                    match lines.next_line().await {
-                        Ok(Some(line)) => session.handle_agent_line(&line, gen).await,
-                        _ => break,
-                    }
+                while let Ok(Some(line)) = lines.next_line().await {
+                    session.handle_agent_line(&line, gen).await;
                 }
                 session.on_agent_exit(gen).await;
             });
@@ -1516,6 +1514,7 @@ impl Session {
     /// Met aussi à jour `tool_inflight` (statuts Pending/Running = en
     /// vol, Done/Failed = terminé) — le watchdog s'en sert pour
     /// distinguer un long outil de la normale d'un stall d'inférence.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_tool_update(
         &self,
         call_id: String,

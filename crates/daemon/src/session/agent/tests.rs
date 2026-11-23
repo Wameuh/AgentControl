@@ -3,7 +3,7 @@ use crate::journal::Journal;
 use crate::server::CompactSrc;
 use proto::SessionMeta;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn test_compact_src() -> CompactSrc {
     CompactSrc {
@@ -71,7 +71,7 @@ fn tmp_session_cfg(
 /// mode `fail_new`)；session/prompt → end_turn, sauf « live-native »
 /// dont la session a disparu en pleine vie (« Session not found »).
 /// `fail_new` couvre le cas où le repli lui-même échoue (agent cassé).
-fn fake_agent(dir: &PathBuf, fail_new: bool) -> PathBuf {
+fn fake_agent(dir: &Path, fail_new: bool) -> PathBuf {
     let script = dir.join("fake-agent.py");
     let new_branch = if fail_new {
         r#"err(mid, "session/new refused")"#
@@ -126,7 +126,7 @@ for line in sys.stdin:
 /// params, une ligne JSON) et session/load rapporte le mode persisté
 /// côté agent (« default ») — pas celui demandé — via configOptions,
 /// comme le fait Devin au resume.
-fn fake_agent_mode_report(dir: &PathBuf) -> PathBuf {
+fn fake_agent_mode_report(dir: &Path) -> PathBuf {
     let script = dir.join("fake-agent-mode.py");
     let log = dir.join("req.log");
     std::fs::write(
@@ -175,7 +175,7 @@ for line in sys.stdin:
     script
 }
 
-fn script_texts(dir: &PathBuf) -> Vec<String> {
+fn script_texts(dir: &Path) -> Vec<String> {
     let j = Journal::open(dir).unwrap();
     j.read_page(dir, None, 200)
         .unwrap()

@@ -525,6 +525,7 @@ impl Daemon {
         }
         Ok(json!(out))
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn h_pr_track(
         self: &Arc<Self>,
         session: Option<String>,

@@ -6,12 +6,12 @@
 /// Auto-découverte des adaptateurs ACP connus sur le PATH
 /// (`via:auto` dans list_agents — item #261).
 pub(crate) mod agents_auto;
-/// Provisioning à la demande des adaptateurs du registre
-/// (`install_agent_adapter` — npm i -g côté démon, #277).
-mod agents_install;
 /// Profils agents éditables à chaud (composant interne `agents` —
 /// params → `[agents.*]` de config.toml, hot-reload du profil).
 pub(crate) mod agents_cfg;
+/// Provisioning à la demande des adaptateurs du registre
+/// (`install_agent_adapter` — npm i -g côté démon, #277).
+mod agents_install;
 mod cfg;
 mod components;
 /// Watch FS de l'explorateur (auto-refresh) — cycle de vie borné à la
@@ -19,6 +19,9 @@ mod components;
 mod dirwatch;
 /// Bornage workspace réutilisé par l'endpoint HTTP /media|/download.
 pub(crate) mod files;
+/// Forges `[[forges]]` éditables à chaud (composant interne
+/// `prs-registry` — params → config.toml, hot-reload du set).
+pub(crate) mod forges_cfg;
 /// Métriques backlog : journal JSONL échantillonné par le tick
 /// orchestrateur + RPC `backlog_metrics` (série + agrégats).
 pub(crate) mod metrics;
@@ -38,9 +41,6 @@ pub(crate) mod orch_cfg;
 /// profil courant (worker/planner/reviewer ; PRReview-* dans
 /// orch_review.rs).
 pub(crate) mod orch_failover;
-/// Forges `[[forges]]` éditables à chaud (composant interne
-/// `prs-registry` — params → config.toml, hot-reload du set).
-pub(crate) mod forges_cfg;
 /// GC des sessions composant orphelines (item #250) — filet de
 /// sécurité au tick : toute session `feature:pr-review` /
 /// `component:backlog-orchestrator` déréférencée de l'état vivant est
@@ -200,8 +200,15 @@ impl Outbox {
         // le diagnostic d'un incident de ce type ne doit plus coûter
         // une analyse manuelle des compteurs rx/tx (#302).
         if len > GIANT_LINE_BYTES && self.giant_warn_allowed() {
-            let lane = if ch.same_channel(&self.hi) { "resp" } else { "push" };
-            warn!("outbox: giant line {len} B ({lane}{})", giant_line_label(&s));
+            let lane = if ch.same_channel(&self.hi) {
+                "resp"
+            } else {
+                "push"
+            };
+            warn!(
+                "outbox: giant line {len} B ({lane}{})",
+                giant_line_label(&s)
+            );
         }
         if ch.send(s).is_err() {
             self.queued.fetch_sub(len, Ordering::Relaxed);
@@ -353,6 +360,7 @@ impl Daemon {
     /// Renvoie aussi les ids des sessions qui travaillaient au moment où
     /// l'instance précédente s'est arrêtée (état persisté actif) — à
     /// n'utiliser pour la reprise auto que si l'arrêt était brutal.
+    #[allow(clippy::too_many_arguments)]
     pub async fn open(
         root: PathBuf,
         agents: HashMap<String, AgentProfile>,
@@ -412,7 +420,8 @@ impl Daemon {
             let set = forge_live.read().unwrap().set.list_json();
             let rel = {
                 let c = orch_live.cfg.read().unwrap();
-                c.release_pair().map(|(h, b)| (h.to_string(), b.to_string()))
+                c.release_pair()
+                    .map(|(h, b)| (h.to_string(), b.to_string()))
             };
             forgesync::verify_ref(
                 set.as_array().map(Vec::as_slice).unwrap_or(&[]),
@@ -946,9 +955,7 @@ impl Daemon {
             ReqKind::ListAgents => self.h_list_agents().await,
             ReqKind::ModelCosts { agent } => self.h_model_costs(agent).await,
             ReqKind::RefreshAgentCaps { agent } => self.h_refresh_agent_caps(agent).await,
-            ReqKind::InstallAgentAdapter { agent } => {
-                self.h_install_agent_adapter(agent).await
-            }
+            ReqKind::InstallAgentAdapter { agent } => self.h_install_agent_adapter(agent).await,
             ReqKind::ModelCatalog { agent } => self.h_model_catalog(agent).await,
             ReqKind::ListSessions => self.h_list_sessions().await,
             ReqKind::ListSessionsPage { limit, offset } => {
@@ -1777,9 +1784,11 @@ impl Daemon {
 pub(super) fn resolve_cwd(raw: &str) -> Result<String> {
     let cwd = expand_cwd(raw)?;
     if !std::path::Path::new(&cwd).is_dir() {
-        let extra = (cwd != raw)
-            .then(|| format!(" (expanded from « {raw} »)"))
-            .unwrap_or_default();
+        let extra = if cwd != raw {
+            format!(" (expanded from « {raw} »)")
+        } else {
+            Default::default()
+        };
         anyhow::bail!("cwd not found: {cwd}{extra}");
     }
     Ok(cwd)

@@ -157,6 +157,7 @@ impl Components {
     /// Charge components.toml (absent = liste vide), prépare les specs
     /// et le runtime. Ne lance rien — `boot()` traite les orphelins,
     /// démarre les autostarts et la boucle de sondes.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         root: &Path,
         bind_tcp: String,

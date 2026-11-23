@@ -638,6 +638,7 @@ impl OrchProbe {
             let path = dir.join("orchestrator.lock");
             let f = match std::fs::OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .write(true)
                 .open(&path)
             {
@@ -1256,15 +1257,15 @@ pub(crate) type Task = Value;
 pub(crate) fn task_id(t: &Task) -> u64 {
     t.get("id").and_then(Value::as_u64).unwrap_or(0)
 }
-pub(crate) fn task_status<'a>(t: &'a Task) -> &'a str {
+pub(crate) fn task_status(t: &Task) -> &str {
     t.get("status").and_then(Value::as_str).unwrap_or("")
 }
-pub(crate) fn task_agent<'a>(t: &'a Task) -> &'a str {
+pub(crate) fn task_agent(t: &Task) -> &str {
     t.get("agent_id").and_then(Value::as_str).unwrap_or("")
 }
 /// Tag `repo`/workspace de l'item ("" = non taggé → workspace par
 /// défaut). Routage des sessions spawnées pour cet item.
-pub(crate) fn task_repo<'a>(t: &'a Task) -> &'a str {
+pub(crate) fn task_repo(t: &Task) -> &str {
     t.get("repo").and_then(Value::as_str).unwrap_or("")
 }
 /// Priorité d'item — même tri que `agentbacklog --pop`
@@ -1279,19 +1280,19 @@ pub(crate) fn task_priority(t: &Task) -> i64 {
 /// dispatche l'item que sur une entrée du `worker_pool` (ou le rôle
 /// planner en mode plan_review) à ce profil ; absent → item en
 /// attente, jamais re-cueilli par un autre profil.
-pub(crate) fn task_spec_agent<'a>(t: &'a Task) -> &'a str {
+pub(crate) fn task_spec_agent(t: &Task) -> &str {
     t.get("agent").and_then(Value::as_str).unwrap_or("")
 }
 /// Override modèle au spawn — priorité item > entrée pool > cfg rôle.
-pub(crate) fn task_spec_model<'a>(t: &'a Task) -> &'a str {
+pub(crate) fn task_spec_model(t: &Task) -> &str {
     t.get("model").and_then(Value::as_str).unwrap_or("")
 }
 /// Override effort (`thought_level`) au spawn — même priorité.
-pub(crate) fn task_spec_effort<'a>(t: &'a Task) -> &'a str {
+pub(crate) fn task_spec_effort(t: &Task) -> &str {
     t.get("effort").and_then(Value::as_str).unwrap_or("")
 }
 /// Override mode de session au spawn — même priorité.
-pub(crate) fn task_spec_mode<'a>(t: &'a Task) -> &'a str {
+pub(crate) fn task_spec_mode(t: &Task) -> &str {
     t.get("mode").and_then(Value::as_str).unwrap_or("")
 }
 /// `done_when` de l'item : `pr_merged` (défaut — `--done` à la PR de
@@ -1724,7 +1725,7 @@ impl Daemon {
             //    reviewing → dégel en pending (claim-review + verdict
             //    technique + release) — sinon ils restent figés hors
             //    de toute file.
-            self.orch_plan_disabled_unblock(&bin, ws, &tasks, &mut st)
+            self.orch_plan_disabled_unblock(bin, ws, &tasks, &mut st)
                 .await;
 
             // 1. wip orphelines (agent_id = session disparue) → release.
@@ -2644,8 +2645,7 @@ impl Daemon {
                 // Repli : dernier entier de la sortie (le CLI historique
                 // imprimait l'id nu quand --json n'était pas honoré).
                 out.split(|c: char| !c.is_ascii_digit())
-                    .filter(|s| !s.is_empty())
-                    .last()
+                    .rfind(|s| !s.is_empty())
                     .and_then(|s| s.parse().ok())
             })
             .unwrap_or_else(|| {

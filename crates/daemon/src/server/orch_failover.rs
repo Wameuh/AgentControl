@@ -195,6 +195,7 @@ impl Daemon {
     /// (avant le dispatch, pour que le pipeline profite du profil
     /// libéré dans le même tick). Traite workers, planners et
     /// reviewers ; les `PRReview-*` relèvent de `orch_review.rs`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn orch_failover_tick(
         self: &Arc<Self>,
         bin: &str,
@@ -243,6 +244,7 @@ impl Daemon {
 
     /// Worker `Backlog-W*` : réassigne les items `wip`, réattribue
     /// les PRs ouvertes du registre, spawn le remplaçant, rm l'ancien.
+    #[allow(clippy::too_many_arguments)]
     async fn failover_worker(
         self: &Arc<Self>,
         bin: &str,

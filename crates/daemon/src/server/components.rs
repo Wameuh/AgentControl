@@ -1,6 +1,6 @@
 //! Handlers des RPC composants managés (docs/components-integration.md
-//! §2.3) : liste/infos lecture + cycle de vie `process` + tail de log
-//! + édition des specs + catalogue d'intégration. Toute la mécanique
+//! §2.3) : liste/infos lecture, cycle de vie `process`, tail de log,
+//! édition des specs et catalogue d'intégration. Toute la mécanique
 //! est dans `crate::components` — ici on ne fait que router la requête
 //! et formater la réponse.
 

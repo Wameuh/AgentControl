@@ -9,8 +9,8 @@ use proto::{ComponentKind, ComponentSpec};
 
 /// argv de la sonde de version effective : `version_argv` de la spec
 /// > `version_argv` de l'entrée catalogue homonyme > `command` d'un
-/// `tool` (sa commande *est* sa sonde version). `~` est expansé par
-/// `run_version_probe` comme pour les autres argv de la spec.
+/// > `tool` (sa commande *est* sa sonde version). `~` est expansé par
+/// > `run_version_probe` comme pour les autres argv de la spec.
 pub(super) fn version_argv(spec: &ComponentSpec) -> Option<Vec<String>> {
     if let Some(argv) = &spec.version_argv {
         if !argv.is_empty() {

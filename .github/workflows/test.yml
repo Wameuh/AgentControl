@@ -25,9 +25,8 @@ jobs:
   # -----------------------------------------------------------------
   # Tests Rust du workspace racine (crates/* — client/src-tauri a son
   # propre workspace et des deps système, il reste à build.yml).
-  # `cargo test` est le seul check bloquant pour l'instant : fmt et
-  # clippy ont un backlog d'avertissements pré-existants → advisory
-  # (continue-on-error) jusqu'à la PR de nettoyage, puis -D/-W strict.
+  # Les trois checks sont bloquants : fmt --check, test --workspace et
+  # clippy -D warnings (backlog de warnings soldé — les garder propres).
   # -----------------------------------------------------------------
   rust:
     if: github.event.pull_request.draft != true
@@ -39,17 +38,11 @@ jobs:
         with:
           components: "clippy, rustfmt"
       - uses: Swatinem/rust-cache@v2
-      # Advisory : ~110 diffs rustfmt pré-existants — le jour où la base
-      # est propre, retirer continue-on-error pour rendre le check bloquant.
-      - name: cargo fmt (advisory)
-        continue-on-error: true
+      - name: cargo fmt
         run: cargo fmt --all --check
       - name: cargo test
         run: cargo test --workspace --no-fail-fast
-      # Advisory : backlog de warnings clippy pré-existants — même
-      # traitement que fmt.
-      - name: cargo clippy (advisory)
-        continue-on-error: true
+      - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   # -----------------------------------------------------------------

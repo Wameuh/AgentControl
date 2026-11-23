@@ -391,7 +391,10 @@ impl GhRestClient {
             return false;
         }
         matches!(
-            http_send("POST", &self.gql, &self.headers(),
+            http_send(
+                "POST",
+                &self.gql,
+                &self.headers(),
                 &json!({"query": format!(
                     "mutation {{ {mutation}(input: {{pullRequestId: \"{node}\"}}) {{ pullRequest {{ isDraft }} }} }}"
                 )}),

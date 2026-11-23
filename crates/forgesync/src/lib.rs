@@ -165,9 +165,9 @@ pub(crate) fn http_status(
             let Ok(body) = resp.into_string() else {
                 return Http::Down;
             };
-            let body = body.strip_prefix(")]}'").map_or(body.as_str(), |b| {
-                b.trim_start_matches(|c: char| c == '\n' || c == '\'')
-            });
+            let body = body
+                .strip_prefix(")]}'")
+                .map_or(body.as_str(), |b| b.trim_start_matches(['\n', '\'']));
             if body.trim().is_empty() {
                 // Réponse vide (ex. POST Gerrit `:wip`) = succès sans payload.
                 return Http::Ok(Value::Null);

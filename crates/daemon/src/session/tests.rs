@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 
 /// CompactSrc de test : défauts globaux, aucun override agent.
 pub(super) fn test_compact_src() -> CompactSrc {
@@ -52,7 +53,7 @@ pub(super) fn tmp_session(tag: &str) -> (Arc<Session>, PathBuf) {
     )
 }
 
-pub(super) fn kinds(dir: &PathBuf) -> Vec<&'static str> {
+pub(super) fn kinds(dir: &Path) -> Vec<&'static str> {
     let j = Journal::open(dir).unwrap();
     j.read_page(dir, None, 100)
         .unwrap()

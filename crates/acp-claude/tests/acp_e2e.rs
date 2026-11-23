@@ -447,10 +447,8 @@ async fn compact_manual_full_loop() {
                         saw_compact = true;
                     }
                 }
-                "usage_update" => {
-                    if u["used"].as_u64().unwrap_or(0) <= 8000 {
-                        saw_usage_reduced = true;
-                    }
+                "usage_update" if u["used"].as_u64().unwrap_or(0) <= 8000 => {
+                    saw_usage_reduced = true;
                 }
                 _ => {}
             }

@@ -552,9 +552,9 @@ gh run view <id> --log-failed   # if failure
 The `.github/workflows/build.yml` workflow builds: daemon x86_64+aarch64,
 Tauri client Ubuntu+Windows+macOS (arm64 dmg), Android APK, and
 publishes a release on `v*` tags. `.github/workflows/test.yml`
-runs the checks that don't need artifacts: `cargo test --workspace`
-(required `rust` job — fmt/clippy advisory until their warning
-backlog is cleaned), client tests that need no real daemon
+runs the checks that don't need artifacts: `cargo fmt --all --check`,
+`cargo test --workspace` and `cargo clippy -D warnings` (required
+`rust` job), client tests that need no real daemon
 (`js`), and dependency audits (`audit`).
 
 ## Automatic versioning (commit keywords)
@@ -613,8 +613,9 @@ Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
   `cd client/src-tauri && PATH="/tmp/zig-shim:$PATH" cargo check --target x86_64-pc-windows-gnu`
   (`windres` stub in /tmp/zig-shim required).
 - **Daemon tests**: `cargo test --workspace --no-fail-fast` — the
-  required `rust` CI job gates merges on it (fmt/clippy stay
-  advisory until their warning backlog is cleaned).
+  required `rust` CI job gates merges on it, along with
+  `cargo fmt --all --check` and `cargo clippy --workspace
+  --all-targets -- -D warnings` (blocking since the lint cleanup).
 - **Daemon**: `cargo build --release -p agentcontrol-daemon` (build
   only). **Forbidden to touch the live daemon**: no
   restart/stop/redeploy by an agent (`systemctl`, `supervisorctl`,
