@@ -595,12 +595,16 @@ self-maintained bound in all cases:
   don't edit it out of the message. ⚠️ The carrier is the **squash
   commit subject** on `next_release`: a single-commit PR squashes to
   the **commit's own message**, not the PR title — a keyword in the
-  PR title alone never reaches the cycle (happened: #421; the
-  follow-up puts the keyword in the commit subject AND body).
+  PR title alone never reaches the cycle (happened: #421). For
+  multi-commit PRs the squash body carries the original subjects as
+  `* ` bullets — `detect_level` scans **subjects and `* ` bullets of
+  `(#N)` squash commits only**; free body text never counts (a body
+  citing `'(major)'` re-bumped next_release to 1.0.0 — #441, revert
+  #435). Keep the keyword in the squash **subject** to be safe.
 - To **quote** a keyword in prose without triggering it (docs, a
   message talking about the rule), write it **without parentheses**
-  ("sync") — `` `(sync)` `` matches even inside backticks, including
-  in commit bodies (scanned at squash).
+  ("sync") — free commit bodies aren't scanned anymore, but a `* `
+  bullet inside a squash body still is, so keep the safe form there.
 - The rule lives in `client/tools/bump_version.py` (`detect_level`,
   `--detect-level` mode) — source of truth called by `release-bump`
   (version.yml) and `release_notes.py`; don't duplicate it elsewhere.

@@ -56,8 +56,9 @@ B3=$(python3 "$TOOL" --bound HEAD)
 [ "$B3" = "$RB" ]; ok $? "borne = bump (reset) non tagué"
 
 # un body citant '(major)' en texte libre ne doit PAS changer le
-# niveau (incident #334 : #441 citait '(major) de #422' → re-bump
-# 1.0.0) — seuls le sujet et les puces `* ` d'un squash comptent
+# niveau (incident release #334 : le body de #441 citait '(major)
+# de #422' → re-bump 1.0.0, revert #435) — seuls le sujet et les
+# puces `* ` d'un squash comptent
 echo y >> f && git add f
 git commit -qm "docs: precision" -m "le '(major)' de #422 reste annule"
 LVL2=$(git log --format=%x1e%B "$B3..HEAD" | python3 "$TOOL" --detect-level)
