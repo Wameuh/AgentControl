@@ -25,6 +25,13 @@ cd client && npm install && npx tauri build    # desktop app
   `client/tools/release_notes_en.txt`: `<PR number>: <english note>`
   (`<PR>: [skip] <reason>` for internal changes).
 
+## More docs
+
+`AGENTS.md` is the short contributor guide for coding agents;
+[docs/maintainer.md](docs/maintainer.md) holds the maintainer-only
+workflow (releases, deployment, orchestration internals) — handy if
+you're digging deeper, not needed for a regular PR.
+
 ## Security
 
 Found a vulnerability? Please don't open a public issue — see

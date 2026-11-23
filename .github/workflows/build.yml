@@ -347,7 +347,7 @@ jobs:
           if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
             SIGNED=1
           elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "::error::Secrets ANDROID_KEYSTORE_* absents — APK release non signable. Générer le keystore via client/tools/android-upload-keystore.sh puis gh secret set (cf. AGENTS.md § Releases)."
+            echo "::error::Secrets ANDROID_KEYSTORE_* absents — APK release non signable. Générer le keystore via client/tools/android-upload-keystore.sh puis gh secret set (cf. docs/maintainer.md § Releases)."
             exit 1
           else
             echo "::warning::ANDROID_KEYSTORE_BASE64 absent — APK --debug à signature éphémère (build de test, non publié)."
@@ -519,7 +519,7 @@ jobs:
           # ANDROID_KEYSTORE_* pour l'APK). La paire est générée une fois
           # hors CI ; la pubkey voyage dans packaging/agentcontrol.pub.
           if [ -z "${MINISIGN_KEY:-}" ]; then
-            echo "::error::Secret MINISIGN_KEY absent — minisign -G -p packaging/agentcontrol.pub -s <clé hors repo> puis gh secret set MINISIGN_KEY (+ MINISIGN_PASSWORD si chiffrée) ; cf. AGENTS.md § Releases."
+            echo "::error::Secret MINISIGN_KEY absent — minisign -G -p packaging/agentcontrol.pub -s <clé hors repo> puis gh secret set MINISIGN_KEY (+ MINISIGN_PASSWORD si chiffrée) ; cf. docs/maintainer.md § Releases."
             exit 1
           fi
           if grep -q PLACEHOLDER packaging/agentcontrol.pub; then

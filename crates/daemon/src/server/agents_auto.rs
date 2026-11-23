@@ -134,7 +134,7 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
              (ou @zed-industries/codex-acp, archivé) — le CLI `codex` \
              seul n'expose pas ACP",
         // zed-industries/codex-acp est archivé — @agentclientprotocol
-        // est l'adaptateur vivant (cf. Known pitfalls AGENTS.md) :
+        // est l'adaptateur vivant (cf. Known pitfalls docs/maintainer.md) :
         // essayée en premier, la candidate zed reste en repli.
         install: &[
             &["npm", "i", "-g", "@agentclientprotocol/codex-acp"],

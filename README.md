@@ -313,7 +313,8 @@ plus a Tauri 2 front end (vanilla TypeScript).
   [docs/forges.md](docs/forges.md)
 - Manual server setup & systemd unit:
   [packaging/INSTALL.md](packaging/INSTALL.md)
-- Repo workflow & conventions: [AGENTS.md](AGENTS.md)
+- Contributor guide: [AGENTS.md](AGENTS.md) — maintainer workflow:
+  [docs/maintainer.md](docs/maintainer.md)
 
 Build from source:
 
