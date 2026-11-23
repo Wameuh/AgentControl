@@ -58,9 +58,10 @@ jobs:
   #   - pair-sh-test.sh (ssh-keygen + flock — présents sur le runner)
   #   - ensure-daemon-e2e.py (PATH/HOME factices, jamais de vrai démon)
   #   - smoke puppeteer (vite preview + mock tauri, chrome headless)
-  # Les *-e2e.py bootant un vrai binaire démon et les *-e2e.mjs / shots
-  # restent à ajouter une fois fiabilisés — cf. liste d'exclusion dans
-  # le step puppeteer.
+  #   - *-e2e.mjs (puppeteer mocké, même infra vite preview)
+  # Les *-e2e.py bootant un vrai binaire démon tournent dans le job
+  # daemon-e2e ci-dessous ; seuls les *-shots.mjs / android-audit.mjs
+  # (outils de captures manuels) restent hors CI.
   # -----------------------------------------------------------------
   js:
     if: github.event.pull_request.draft != true
