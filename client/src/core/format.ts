@@ -47,12 +47,20 @@ const imgHost = (url: string): string => {
 };
 
 /** Décision de rendu d'une image distante : "img" = <img> direct
- *  (always ou hôte de confiance), "ph" = placeholder cliquable,
- *  "none" = lien seul. La whitelist s'applique au mode click — never
- *  reste absolu (aucun fetch, quel que soit l'hôte). */
+ *  (always, hôte de confiance ou même origine « 'self' » — le daemon
+ *  sert le client, une image à la même adresse n'est pas distante,
+ *  comme data:), "ph" = placeholder cliquable, "none" = lien seul.
+ *  La whitelist s'applique au mode click — never reste absolu pour
+ *  les hôtes distants (aucun fetch, quel que soit l'hôte). */
 const imgRender = (url: string): "img" | "ph" | "none" => {
   const m = imgMode();
   if (m === "always") return "img";
+  try {
+    if (new URL(url).host.toLowerCase() === location.host.toLowerCase())
+      return "img";
+  } catch {
+    /* URL illisible → politique standard. */
+  }
   const host = imgHost(url);
   if (m === "never" || !host) return "none";
   return imgTrustedHosts().some((d) => host === d || host.endsWith(`.${d}`))
@@ -67,13 +75,30 @@ const imgPh = (url: string, alt: string): string =>
   `<button type="button" class="md-img-ph" data-src="${q(url)}"` +
   ` data-alt="${q(alt)}">${esc(t("img_ph", { host: imgHost(url) || url }))}</button>`;
 
+/** Lien simple remplaçant un placeholder ou une image retirée sous
+ *  « never » — même forme que le rendu "none" (texte = alt ou URL). */
+const imgLinkEl = (src: string, label: string): HTMLAnchorElement => {
+  const a = document.createElement("a");
+  a.href = src;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.textContent = label || src;
+  return a;
+};
+
 /** Clic délégué sur un placeholder image (#events chat, #file-md
  *  viewer) : le bouton est remplacé par <a><img></a> — la requête
- *  réseau ne part qu'ici, jamais au rendu. true = clic consommé. */
+ *  réseau ne part qu'ici, jamais au rendu. true = clic consommé.
+ *  La politique est revalidée au geste : « never » reste absolu même
+ *  si le réglage a basculé après le rendu du placeholder. */
 export function expandImgPh(target: HTMLElement): boolean {
   const btn = target.closest<HTMLButtonElement>(".md-img-ph");
   const src = btn?.dataset.src;
   if (!btn || !src) return false;
+  if (imgRender(src) === "none") {
+    btn.replaceWith(imgLinkEl(src, btn.dataset.alt ?? src));
+    return true;
+  }
   const a = document.createElement("a");
   a.href = src;
   a.target = "_blank";
@@ -86,6 +111,33 @@ export function expandImgPh(target: HTMLElement): boolean {
   a.append(img);
   btn.replaceWith(a);
   return true;
+}
+
+/** Ré-applique la politique courante au contenu déjà rendu — appelé à
+ *  l'enregistrement des réglages, le chat/viewer n'étant pas re-rendus :
+ *  « never » est absolu — placeholders restants et <img> distantes
+ *  déjà insérées redeviennent de simples liens (la requête passée ne
+ *  s'annule pas mais plus rien de chargeable n'est exposé) ; « always »
+ *  ou une whitelist élargie ouvre les placeholders restants ; un
+ *  placeholder dont l'hôte reste non fiable est inchangé. */
+export function refreshImgPolicy(root: ParentNode = document): void {
+  root.querySelectorAll<HTMLButtonElement>(".md-img-ph").forEach((btn) => {
+    const src = btn.dataset.src;
+    if (!src) return;
+    const r = imgRender(src);
+    if (r === "img") expandImgPh(btn);
+    else if (r === "none")
+      btn.replaceWith(imgLinkEl(src, btn.dataset.alt ?? src));
+  });
+  root.querySelectorAll<HTMLImageElement>("img.md-img").forEach((img) => {
+    const src = img.getAttribute("src") ?? "";
+    if (!/^https?:/i.test(src) || imgRender(src) !== "none") return;
+    const link = imgLinkEl(src, img.alt);
+    const wrap = img.parentElement;
+    if (wrap?.tagName === "A" && wrap.childNodes.length === 1)
+      wrap.replaceWith(link);
+    else img.replaceWith(link);
+  });
 }
 
 // Chemins de fichiers cliquables → panneau latéral (read_file côté démon)

@@ -9,7 +9,7 @@ import { $, notify } from "../core/dom";
 import { bindLogView } from "../core/logview";
 import { applyTheme, themePref, applyAccent, stageAccent, accentPref, applyAccentStrong, accentStrongPref, applyBgAnim, bgAnimPrefOn, isAndroid, type Accent } from "../core/chrome";
 import { defaultEncoding } from "../core/encoding";
-import { imgMode, imgTrustedHosts } from "../core/format";
+import { imgMode, imgTrustedHosts, refreshImgPolicy } from "../core/format";
 import { cmpVer, connKeyOf, connLabel } from "../core/conn";
 import { call } from "../core/rpc";
 import { setLang, getLang, t, LANGS, type Lang } from "../i18n";
@@ -562,6 +562,9 @@ export class SettingsPanel {
           ($("s-images") as HTMLSelectElement).value,
         );
         this.syncSecStates();
+        // Le contenu déjà rendu n'est pas re-généré : la politique est
+        // ré-appliquée en place (never retire, always/whitelist ouvre).
+        refreshImgPolicy();
       },
       reset: () => {
         ($("s-images") as HTMLSelectElement).value = imgMode();
@@ -576,6 +579,8 @@ export class SettingsPanel {
           .map((h) => h.trim().toLowerCase())
           .filter(Boolean);
         localStorage.setItem("ac-img-hosts", [...new Set(hosts)].join(", "));
+        // Un hôte nouvellement fiable ouvre ses placeholders sans clic.
+        refreshImgPolicy();
       },
       reset: () => {
         ($("s-img-hosts") as HTMLInputElement).value =
