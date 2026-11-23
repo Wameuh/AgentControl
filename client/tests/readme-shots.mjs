@@ -103,7 +103,8 @@ async function openSession(p, frag = "Refactor") {
   await p.click("#sv-agents"); await sleep(400);
 
   // Paramètres (thème/accents, sons, notifications, maj, appairage…).
-  await p.click("#tb-settings");
+  // #tb-settings est masqué sur desktop (menu « Options ») : clic scripté.
+  await p.evaluate(() => document.getElementById("tb-settings").click());
   await p.waitForSelector("#settings-view:not([hidden])", { timeout: 8000 })
     .catch(() => {});
   await shot("desktop-settings", 700);

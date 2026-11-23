@@ -851,9 +851,9 @@ await step("a24-settings", async () => {
   // référentiel visuel de la spec.
   await shot("a13-settings-list");
   await collect("a13-settings-list");
-  // Tap sur la section « Mises à jour » → sous-écran : les autres
-  // sections disparaissent, le titre monte dans l'en-tête.
-  await tap("#s-sec-update > summary", 500);
+  // Tap sur la section « Général » (canal + mises à jour) → sous-écran :
+  // les autres sections disparaissent, le titre monte dans l'en-tête.
+  await tap("#s-sec-general > summary", 500);
   await shot("a13b-settings-section");
   await collect("a13b-settings-section");
   await tap("#s-checkupdate", 800);

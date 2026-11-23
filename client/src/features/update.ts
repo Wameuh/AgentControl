@@ -26,7 +26,7 @@ export const rcChannel = () =>
 // page inerte) des dizaines de secondes après l'action — incompréhensible.
 const FETCH_TIMEOUT = 15_000;
 
-async function remoteVersion(): Promise<string> {
+export async function remoteVersion(): Promise<string> {
   if (rcChannel()) {
     try {
       const r = await fetch(
@@ -289,89 +289,27 @@ export async function daemonCfgFor(ck: string): Promise<SavedConn | null> {
 }
 
 // ---------------------------------------------------------------------------
-// Dialogue « À propos » : point central des versions — client, démon de
-// la connexion active, dernière release — avec un bouton d'update par
-// cible. showModal() part AVANT tout fetch (ouverture <100 ms, rien de
-// synchrone) ; les versions arrivent ensuite et une ligne en échec est
-// masquée, jamais d'état d'erreur.
+// Dialogue « À propos » : versions du client, du démon de la connexion
+// active et de la dernière release — informatif. Les mises à jour vivent
+// dans la fenêtre dédiée (./updates-panel.ts, bouton « Mises à jour… »).
+// showModal() part AVANT tout fetch (ouverture <100 ms) ; une ligne en
+// échec est masquée, jamais d'état d'erreur.
 // ---------------------------------------------------------------------------
 
-/// Remplit la ligne « Daemon » + le bouton d'update associé pour la
-/// version `dv` ("" = statut illisible → « — »). `remote` = dernière
-/// release connue ("" si inconnue → jamais de bouton).
-function fillDaemonLine(
-  ck: string, dv: string, remote: string,
-  dBtn: HTMLButtonElement,
-) {
-  $("about-daemon-row").hidden = false;
-  $("about-daemon-ver").textContent = dv ? `v${dv}` : "—";
-  // "web" = le démon qui sert la SPA — pas de label d'hôte à montrer.
-  $("about-daemon-host").textContent =
-    ck && ck !== "web" ? ` — ${connLabel(ck)}` : "";
-  const newer = !!(dv && remote && cmpVer(remote, dv) > 0);
-  dBtn.hidden = !newer;
-  if (newer) {
-    dBtn.onclick = async () => {
-      dBtn.disabled = true;
-      try {
-        await performDaemonUpdate({
-          conn: ck,
-          target: remote,
-          current: dv,
-          cfg: await daemonCfgFor(ck),
-        });
-      } finally {
-        dBtn.disabled = false;
-      }
-      await refreshDaemonLine(ck, remote, dBtn);
-    };
-  }
-}
-
-/// Après un update démon : le restart coupe la socket — « redémarrage… »
-/// tant que daemon_status ne répond pas, puis la version courante dès
-/// qu'elle revient (update appliquée ou non, le statut fait foi).
-/// Boucle bornée ; le dialogue refermé arrête les polls.
-async function refreshDaemonLine(
-  ck: string, remote: string, dBtn: HTMLButtonElement,
-) {
-  const dlg = $("dlg-about") as HTMLDialogElement;
-  for (let i = 0; i < 15; i++) {
-    const st = await call<Record<string, unknown>>("daemon_status", {
-      conn: ck,
-    }).catch(() => null);
-    const v = typeof st?.version === "string" ? st.version : "";
-    if (v || !dlg.open) {
-      if (dlg.open) fillDaemonLine(ck, v, remote, dBtn);
-      return;
-    }
-    $("about-daemon-ver").textContent = t("about_daemon_restarting");
-    await new Promise((r) => setTimeout(r, 3000));
-  }
-  if (dlg.open) $("about-daemon-ver").textContent = "—";
-}
-
 /// Ouvre le dialogue « À propos » : reset des lignes dynamiques, modal
-/// immédiate, puis remplissage async (version locale, release distante
-/// après showModal, daemon_status de la conn active). `connKey` est
-/// résolu à l'ouverture — la conn liée peut changer entre deux ouvertures.
+/// immédiate, puis remplissage async (version locale, release distante,
+/// daemon_status de la conn active). `connKey` est résolu à l'ouverture.
 export function openAbout(connKey: () => string | null) {
   const dlg = $("dlg-about") as HTMLDialogElement;
   if (dlg.open) return;
-  const appBtn = $("about-update-app") as HTMLButtonElement;
-  const dBtn = $("about-update-daemon") as HTMLButtonElement;
-  // Reset complet : réouverture après update ou changement de conn.
   $("about-client-row").hidden = isWeb;
   $("about-release-row").hidden = true;
   $("about-daemon-row").hidden = true;
-  appBtn.hidden = true;
-  dBtn.hidden = true;
   dlg.showModal();
   void (async () => {
     const ck = connKey();
     const [lv, remote, dst] = await Promise.all([
-      // Web : la « version client » est celle du démon — ligne masquée,
-      // inutile de la requêter.
+      // Web : la « version client » est celle du démon — ligne masquée.
       isWeb ? Promise.resolve("") : getVersion().catch(() => ""),
       remoteVersion().catch(() => ""),
       ck
@@ -380,27 +318,18 @@ export function openAbout(connKey: () => string | null) {
         : Promise.resolve(null),
     ]);
     if (!dlg.open) return;
-    // Web : « client » = le démon qui sert la SPA — ligne masquée, la
-    // version démon suffit (cf. checkBootUpdate qui skip en web).
     if (!isWeb && lv) $("about-version").textContent = `v${lv}`;
     if (remote) {
       $("about-remote-ver").textContent = `v${remote}`;
       $("about-release-row").hidden = false;
-      if (!isWeb && lv && cmpVer(remote, lv) > 0) {
-        appBtn.hidden = false;
-        appBtn.onclick = async () => {
-          appBtn.disabled = true;
-          try {
-            await performClientUpdate(remote);
-          } finally {
-            appBtn.disabled = false;
-          }
-        };
-      }
     }
     if (ck) {
       const dv = typeof dst?.version === "string" ? dst.version : "";
-      fillDaemonLine(ck, dv, remote, dBtn);
+      $("about-daemon-row").hidden = false;
+      $("about-daemon-ver").textContent = dv ? `v${dv}` : "—";
+      // "web" = le démon qui sert la SPA — pas de label d'hôte à montrer.
+      $("about-daemon-host").textContent =
+        ck !== "web" ? ` — ${connLabel(ck)}` : "";
     }
   })();
 }
@@ -460,9 +389,9 @@ async function reportLastUpdateStatus() {
 }
 
 // Check update au boot : version distante (gh release ou package.json sur
-// main) > locale → chip "⬆ vX" dans la titlebar → clic = update (deb+dpkg)
-// ou ouverture de la page releases si aucun asset.
-export function checkBootUpdate() {
+// main) > locale → chip "⬆ vX" dans la titlebar → clic = fenêtre Mises à
+// jour (versions app + démon, bouton d'install — `openPanel`).
+export function checkBootUpdate(openPanel: (chip: HTMLElement) => void) {
   // Pas de client à mettre à jour en mode web : la SPA est livrée par le
   // démon — sa « version » suit celle du binaire qui la sert.
   if (isWeb) return;
@@ -476,14 +405,8 @@ export function checkBootUpdate() {
       b.className = "tb-update";
       b.innerHTML = `${icon("up")} v${esc(remote)}`;
       b.title = t("update_badge_title", { v: remote });
-      b.onclick = () => {
-        b.disabled = true;
-        b.textContent = t("update_installing", { v: remote });
-        performClientUpdate(remote).finally(() => {
-          b.disabled = false;
-          b.innerHTML = `${icon("up")} v${esc(remote)}`;
-        });
-      };
+      b.setAttribute("aria-haspopup", "dialog");
+      b.onclick = () => openPanel(b);
       $("titlebar").insertBefore(b, document.querySelector(".tb-btns"));
     } catch {
       /* pas de gh/réseau → tant pis */

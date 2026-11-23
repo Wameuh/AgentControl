@@ -26,9 +26,22 @@ import type {
   ParamSpec,
 } from "../core/types";
 import type { ConnectionManager } from "./connections";
+import { askUnsaved } from "../core/unsaved";
+import {
+  ParamField,
+  canonJson,
+  paramBool,
+  paramJson,
+  paramList,
+  secLabel,
+  validateParam,
+} from "./params-form";
+import { ORCH_COMPONENT, ParamsView } from "./params-view";
+
+export { ORCH_COMPONENT };
 
 /** Sous-vues du panneau : les deux onglets + éditeur + logs. */
-type Mode = "list" | "catalog" | "edit" | "logs";
+type Mode = "list" | "catalog" | "edit" | "logs" | "params";
 
 const POLL_MS = 3_000;
 /** "default" = sentinelle de regroupement frontend — la passerelle attend
@@ -57,64 +70,6 @@ const LINES = (id: string) =>
     .map((l) => l.trim())
     .filter(Boolean);
 
-/** Valeur chaîne d'un param `bool` (params/default sont en forme
- *  chaîne — mêmes acceptes que la validation démon). */
-function paramBool(v: string): boolean {
-  return ["true", "yes", "on", "1"].includes(v.trim().toLowerCase());
-}
-
-/** Chaîne CSV d'un param `list` → entrées (inverse à la collecte :
- *  les lignes du textarea repartent jointes par ","). */
-function paramList(v: string): string[] {
-  return v.split(",").map((s) => s.trim()).filter(Boolean);
-}
-
-/** Libellé de section du formulaire params — groupes connus de
- *  l'orchestrateur ; un groupe inconnu s'affiche brut (extensible). */
-const SEC_KEYS: Record<string, Key> = {
-  workers: "cp_sec_workers",
-  pipeline: "cp_sec_pipeline",
-  pr_reviews: "cp_sec_pr_reviews",
-  general: "cp_sec_general",
-};
-const secLabel = (g: string) => {
-  const k = SEC_KEYS[g];
-  return k ? t(k) : g;
-};
-
-/** Chaîne stockée d'un param `json` (forme canonique compacte) → JSON
- *  pretty-print pour le textarea ; invalide → la chaîne telle quelle. */
-function paramJson(v: string): string {
-  try {
-    return JSON.stringify(JSON.parse(v), null, 2);
-  } catch {
-    return v;
-  }
-}
-
-/** Tri récursif des clés d'objet — reproduit le canon démon (BTreeMap
- *  serde_json) : comparer des canons côté client évite un patch sans
- *  changement réel (un patch = render → restart d'un process vivant). */
-function sortJson(x: unknown): unknown {
-  if (Array.isArray(x)) return x.map(sortJson);
-  if (x !== null && typeof x === "object") {
-    const o = x as Record<string, unknown>;
-    return Object.fromEntries(
-      Object.keys(o).sort().map((k) => [k, sortJson(o[k])]),
-    );
-  }
-  return x;
-}
-
-/** JSON → forme canonique compacte à clés triées ; null si invalide. */
-function canonJson(v: string): string | null {
-  try {
-    return JSON.stringify(sortJson(JSON.parse(v)));
-  } catch {
-    return null;
-  }
-}
-
 /** Spec vierge d'un nouveau composant (défauts du démon : on-failure/5 s). */
 function defaultSpec(): ComponentSpec {
   return {
@@ -139,6 +94,23 @@ export class ComponentsPanel {
    *  plugin-view, évite l'import circulaire). */
   openView: (name: string, conn: string) => void = () => {};
   private mode: Mode = "list";
+  /** Vue pleine page « Configurer » (paramètres déclarés). */
+  private params = new ParamsView({
+    connParam: () => this.connParam(),
+    pool: (cur, ps) => this.poolEditor(cur, ps, this.paramsCurrent),
+    loadPool: () => this.loadPoolAgents(),
+    statusLine: (it) => this.metaText(it),
+    reload: async (name) => {
+      await this.refreshList(true);
+      return this.items.find((x) => x.name === name) ?? null;
+    },
+    back: () => {
+      this.setMode("list");
+      void this.refreshList(true);
+    },
+  });
+  /** Valeurs courantes de l'item configuré (widget équipe : max_working). */
+  private paramsCurrent: Record<string, string> = {};
   private items: ComponentItem[] = [];
   private catalog: CatalogEntry[] = [];
   /** Première réponse list/catalog reçue — avant ça les vides affichent
@@ -256,6 +228,9 @@ export class ComponentsPanel {
     $("comp-catalog").hidden = m !== "catalog";
     $("comp-editor").hidden = m !== "edit";
     $("comp-logs-view").hidden = m !== "logs";
+    $("comp-params").hidden = m !== "params";
+    $("components-view").classList.toggle("cv-params", m === "params");
+    if (m !== "params") this.params.reset();
     $("comp-tab-list").classList.toggle("on", m === "list");
     $("comp-tab-cat").classList.toggle("on", m === "catalog");
     const browsing = m === "list" || m === "catalog";
@@ -601,31 +576,32 @@ export class ComponentsPanel {
     }
   }
 
-  /** Formulaire des params déclarés d'un item managé — envoyé via
-   *  `component_set_params` (le démon merge, valide, re-rend la config
-   *  et redémarre si le process tourne). */
-  private async configure(it: ComponentItem) {
-    const schema = it.spec.params_schema ?? [];
-    if (!schema.length) return;
-    const vals = await this.paramsDialog(
-      t("comp_params_h", { name: it.name }),
-      schema,
-      it.spec.params ?? {},
-    );
-    if (vals === null) return;
-    try {
-      const r = await call<{
-        config_required?: string[];
-        rendered?: boolean;
-        restarted?: boolean;
-      }>("component_set_params", { name: it.name, params: vals, conn: this.connParam() });
-      if (r.config_required?.length)
-        notify("warn", t("comp_cfg_missing", { l: r.config_required.join(", ") }));
-      else notify("success", t("comp_params_done", { name: it.name }));
-      this.refresh();
-    } catch (err) {
-      notify("error", String(err));
-    }
+  /** « Configurer » : vue pleine page des params déclarés (onglets par
+   *  groupe, filtre, récapitulatif avant `component_set_params`). */
+  private configure(it: ComponentItem) {
+    if (!(it.spec.params_schema?.length ?? 0)) return;
+    this.paramsCurrent = it.spec.params ?? {};
+    this.setMode("params");
+    void this.params.open(it);
+  }
+
+  /** Ouvre directement la configuration d'un composant (menu Options,
+   *  rail des Paramètres → Orchestrateur). */
+  async openParamsOf(name: string) {
+    this.open();
+    if (!this.isOpen()) return;
+    await this.refreshList(true);
+    const it = this.items.find((x) => x.name === name);
+    if (it && (it.spec.params_schema?.length ?? 0) > 0) this.configure(it);
+    else notify("warn", t("comp_params_missing", { name }));
+  }
+
+  /** Fermeture demandée par l'utilisateur (✕, Échap, back, titlebar) :
+   *  des paramètres modifiés non appliqués → Appliquer / Ignorer / Rester. */
+  async requestClose(): Promise<boolean> {
+    if (this.mode === "params" && !(await this.params.confirmLeave())) return false;
+    this.close();
+    return true;
   }
 
   /** Caps `list_agents` pour les dropdowns du widget worker_pool —
@@ -734,6 +710,9 @@ export class ComponentsPanel {
         });
       }
       hidden.value = JSON.stringify(out);
+      // Le porteur masqué n'émet rien seul : la vue pleine page suit
+      // les modifications (pastille « modifié », récapitulatif).
+      hidden.dispatchEvent(new Event("change"));
       totalEl.textContent =
         maxWorking > 0
           ? t("wp_total_active", { n: total, m: maxWorking })
@@ -863,10 +842,11 @@ export class ComponentsPanel {
     return { wrap, hidden };
   }
 
-  /** Dialogue générique piloté par un `ParamSpec[]` — les `secret`
-   *  viennent masqués (« •••••• » en placeholder) : champ laissé vide =
-   *  valeur conservée (on n'envoie pas la clé). Renvoie les saisies
-   *  ({clé: valeur}, vide = retrait) ou null si annulé. */
+  /** Dialogue générique piloté par un `ParamSpec[]` (intégration depuis
+   *  le catalogue — petits schémas ; « Configurer » passe par la vue
+   *  pleine page). Les `secret` viennent masqués (« •••••• ») : champ
+   *  laissé vide = valeur conservée (clé non envoyée). Renvoie les
+   *  saisies ({clé: valeur}, vide = retrait) ou null si annulé. */
   private async paramsDialog(
     title: string,
     schema: ParamSpec[],
@@ -877,15 +857,9 @@ export class ComponentsPanel {
     fields.innerHTML = "";
     $("cp-title").textContent = title;
     dlgErr("cp-err", null);
-    const inputs: {
-      ps: ParamSpec;
-      el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
-      has: boolean;
-    }[] = [];
-    // Widget « équipe » : dropdowns par profil → caps des agents
-    // (une fois par ouverture, seulement si le schéma le demande).
-    if (schema.some((p) => p.key === "worker_pool"))
-      await this.loadPoolAgents();
+    if (schema.some((p) => p.key === "worker_pool")) await this.loadPoolAgents();
+    this.paramsCurrent = current;
+    const inputs: ParamField[] = [];
     let lastGroup: string | null = null;
     for (const ps of schema) {
       // Section : titre quand le groupe change (le démon trie le
@@ -900,72 +874,17 @@ export class ComponentsPanel {
           fields.appendChild(h);
         }
       }
+      const f = new ParamField(ps, current, {
+        pool: (cur, p) => this.poolEditor(cur, p, current),
+      });
       const lab = document.createElement("label");
-      const cur = current[ps.key];
-      const set = cur !== undefined && cur !== "";
       const head = document.createElement("span");
       head.textContent = ps.label + (ps.required ? " *" : "");
-      let el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
       if (ps.kind === "bool") {
-        el = document.createElement("input");
-        el.type = "checkbox";
-        (el as HTMLInputElement).checked =
-          (set ? cur : ps.default) === "true";
         lab.classList.add("chk-row");
-        lab.appendChild(el);
-        lab.appendChild(head);
+        lab.append(f.control, head);
       } else {
-        lab.appendChild(head);
-        if (ps.key === "worker_pool" && ps.kind === "json") {
-          // « Équipe » : table profil/slots/modèle/effort/mode — la
-          // valeur reste le JSON canonique dans un input masqué.
-          const w = this.poolEditor(set ? cur : (ps.default ?? ""), ps, current);
-          lab.appendChild(w.wrap);
-          el = w.hidden;
-        } else if (ps.kind === "enum") {
-          el = document.createElement("select");
-          const opts = ps.choices ?? [];
-          // Valeur à choisir vide : toujours offerte en tête —
-          // requise sans défaut → l'utilisateur doit trancher ; non
-          // requise → « — » = non positionné.
-          if (!ps.required || (!set && !ps.default)) {
-            const o = document.createElement("option");
-            o.value = "";
-            o.textContent = "—";
-            el.appendChild(o);
-          }
-          opts.forEach((c, i) => {
-            const o = document.createElement("option");
-            o.value = c;
-            o.textContent = ps.choice_labels?.[i] || c;
-            el.appendChild(o);
-          });
-          // Valeur stockée hors `choices` (spec éditée à la main ou
-          // liste dynamique périmée) : la conserver plutôt que la
-          // retirer silencieusement.
-          if (set && !opts.includes(cur)) {
-            const o = document.createElement("option");
-            o.value = cur;
-            o.textContent = `${cur} (?)`;
-            el.appendChild(o);
-          }
-          el.value = set ? cur : (ps.default ?? "");
-        } else if (ps.kind === "json") {
-          el = document.createElement("textarea");
-          (el as HTMLTextAreaElement).rows = 4;
-          el.spellcheck = false;
-          el.value = set ? paramJson(cur) : (ps.default ?? "");
-        } else {
-          el = document.createElement("input");
-          el.type = ps.secret ? "password"
-            : ps.kind === "int" ? "number" : "text";
-          el.autocomplete = "off";
-          el.spellcheck = false;
-          if (ps.secret && set) el.placeholder = "••••••";
-          el.value = ps.secret ? "" : (set ? cur : (ps.default ?? ""));
-          if (ps.kind === "int") (el as HTMLInputElement).step = "1";
-        }
-        lab.appendChild(el);
+        lab.append(head, f.control);
       }
       if (ps.description) {
         const d = document.createElement("small");
@@ -974,7 +893,7 @@ export class ComponentsPanel {
         lab.appendChild(d);
       }
       fields.appendChild(lab);
-      inputs.push({ ps, el, has: set });
+      inputs.push(f);
     }
     return await new Promise((resolve) => {
       let decided = false;
@@ -988,52 +907,16 @@ export class ComponentsPanel {
       ($("cp-ok") as HTMLButtonElement).onclick = (ev) => {
         ev.preventDefault();
         const out: Record<string, string> = {};
-        for (const { ps, el, has } of inputs) {
-          const v = ps.kind === "bool"
-            ? ((el as HTMLInputElement).checked ? "true" : "false")
-            : el.value.trim();
-          // secret posé, non retapé → clé absente = conserver la
-          // valeur ; secret requis jamais posé tombe dans le required.
-          if (!v) {
-            if (ps.secret && has) continue;
-            if (ps.required) {
-              dlgErr("cp-err", t("comp_param_required", { k: ps.label }));
-              return;
-            }
-            out[ps.key] = "";
-            continue;
-          }
-          if (ps.kind === "int" && !/^-?\d+$/.test(v)) {
-            dlgErr("cp-err", t("comp_param_badint", { k: ps.label }));
+        for (const f of inputs) {
+          const err = validateParam(f, f.ps.label);
+          if (err) {
+            dlgErr("cp-err", err);
             return;
           }
-          if (ps.kind === "duration"
-              && !/^(\d+(ms|min|s|m|h|d|w)\s*)+$/.test(v)) {
-            dlgErr("cp-err", t("comp_param_baddur", { k: ps.label }));
-            return;
-          }
-          if (ps.kind === "enum" && !ps.open_enum
-              && !(ps.choices ?? []).includes(v)) {
-            dlgErr("cp-err", t("comp_param_badenum", { k: ps.label }));
-            return;
-          }
-          if (ps.kind === "json") {
-            try {
-              JSON.parse(v);
-            } catch {
-              dlgErr("cp-err", t("comp_param_badjson", { k: ps.label }));
-              return;
-            }
-          }
-          if (ps.validation) {
-            try {
-              if (!new RegExp(ps.validation).test(v)) {
-                dlgErr("cp-err", t("comp_param_badfmt", { k: ps.label }));
-                return;
-              }
-            } catch { /* regex démon-seule : le serveur revalide */ }
-          }
-          out[ps.key] = v;
+          const v = f.read();
+          // secret posé, non retapé → clé absente = conserver la valeur.
+          if (!v && f.ps.secret && f.has) continue;
+          out[f.ps.key] = v;
         }
         close(out);
       };
@@ -1582,19 +1465,28 @@ export class ComponentsPanel {
     // derrière le tiroir (même motif que btn-connect).
     $("tb-components").onclick = () => {
       nav.closeDrawer();
-      this.toggle();
+      if (this.isOpen()) void this.requestClose();
+      else this.open();
     };
-    $("comp-close").onclick = () => this.close();
+    $("comp-close").onclick = () => void this.requestClose();
     // Échap ferme le panneau — sauf si un dialogue est ouvert par-dessus.
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && this.isOpen() && !document.querySelector("dialog[open]"))
-        this.close();
+        void this.requestClose();
     });
-    $("comp-tab-list").onclick = () => {
+    // Back Android avec des paramètres modifiés : même question que le ✕.
+    nav.addBackGuard((id) => {
+      if (id !== "components" || this.mode !== "params" || !this.params.dirty()) return true;
+      void this.requestClose();
+      return false;
+    });
+    $("comp-tab-list").onclick = async () => {
+      if (this.mode === "params" && !(await this.params.confirmLeave())) return;
       this.setMode("list");
       void this.refreshList(true);
     };
-    $("comp-tab-cat").onclick = () => {
+    $("comp-tab-cat").onclick = async () => {
+      if (this.mode === "params" && !(await this.params.confirmLeave())) return;
       this.setMode("catalog");
       // Toujours re-fetch (refresh=false : détection locale rejouée,
       // sondes upstream cachées) — sinon le badge « installé » resterait

@@ -1,0 +1,97 @@
+/* Titlebar desktop : un bouton « Options » libellé remplace les icônes
+   carte / journaux / composants / paramètres / à propos. Les boutons
+   d'origine restent dans le DOM (cliqués par le menu, le ⋮ Android et
+   les tests) mais ne s'affichent plus. */
+body:not(.android) #tb-map, body:not(.android) #tb-logs,
+body:not(.android) #tb-components, body:not(.android) #tb-settings,
+body:not(.android) #tb-about { display: none; }
+body.android #tb-options { display: none; }
+.tb-btns #tb-options {
+  display: inline-flex; align-items: center; gap: 6px; margin-right: 6px;
+  padding: 4px 9px 4px 8px; border: 1px solid var(--line); border-radius: 7px;
+  color: var(--ink); font-size: 12px; line-height: 1;
+}
+.tb-btns #tb-options[aria-expanded="true"] { background: rgba(var(--tint-rgb), .1); border-color: var(--line-strong); }
+#tb-options .tb-chev .ic { width: 11px; height: 11px; color: var(--dim); }
+#tb-options > span { display: inline-flex; }
+
+/* Menu Options (ancré sous le bouton) */
+#tb-menu-pop {
+  position: fixed; z-index: 85; min-width: 250px;
+  display: flex; flex-direction: column; padding: 5px;
+  background: var(--panel-solid); border: 1px solid var(--line-strong);
+  border-radius: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
+  animation: tbm-in .14s cubic-bezier(.2, .8, .2, 1);
+}
+@keyframes tbm-in { from { opacity: 0; transform: translateY(-4px); } }
+#tb-menu-pop button {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  border: 0; background: transparent; border-radius: 7px;
+  padding: 7px 10px; color: var(--ink); font-size: 13px; text-align: left;
+}
+#tb-menu-pop button:hover:not(:disabled), #tb-menu-pop button:focus-visible {
+  background: rgba(var(--accent-rgb), .14); border-color: transparent; outline: none;
+}
+#tb-menu-pop button .ic { width: 15px; height: 15px; color: var(--dim); flex: none; }
+#tb-menu-pop .tbm-l { flex: 1; min-width: 0; }
+#tb-menu-pop .tbm-hint { color: var(--dim); font-size: 11.5px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tb-menu-pop .tbm-kbd {
+  font-family: Mono, ui-monospace, monospace; font-size: 10.5px; color: var(--dim);
+  border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px;
+}
+#tb-menu-pop hr { border: 0; border-top: 1px solid var(--line); margin: 4px 6px; width: auto; }
+
+/* Pastille de version : ouvre la fenêtre Mises à jour (plus d'install direct). */
+.tb-update[aria-expanded="true"] { animation: none; }
+
+/* Fenêtre « Mises à jour » */
+#upd-pop {
+  position: fixed; z-index: 86; width: 380px; max-width: calc(100vw - 16px);
+  display: flex; flex-direction: column; gap: 12px; padding: 14px 16px 12px;
+  background: var(--panel-solid); border: 1px solid var(--line-strong);
+  border-radius: 12px; box-shadow: 0 16px 40px rgba(0, 0, 0, .5);
+  animation: tbm-in .16s cubic-bezier(.2, .8, .2, 1);
+}
+.upd-head { display: flex; align-items: center; justify-content: space-between; }
+.upd-head h4 { margin: 0; font-size: 14px; font-weight: 600; }
+.upd-x { border: 0; background: transparent; padding: 4px; color: var(--dim); border-radius: 6px; }
+.upd-x .ic { width: 14px; height: 14px; display: block; }
+.upd-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; align-items: center;
+  padding-bottom: 12px; border-bottom: 1px solid var(--line);
+}
+.upd-l { font-size: 13px; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#upd-daemon-host { color: var(--dim); }
+.upd-v { grid-column: 1; font-family: Mono, ui-monospace, monospace; font-size: 11.5px; color: var(--dim); }
+.upd-row > button { grid-row: 1 / span 2; grid-column: 2; font-size: 12px; padding: 5px 12px; border-radius: 8px; }
+#upd-chan-row { grid-template-columns: minmax(0, 1fr) auto; }
+#upd-chan-row .s-seg { grid-row: 1; grid-column: 2; }
+.upd-status { margin: 0; font-size: 12.5px; color: var(--muted); }
+.upd-status.ok { color: var(--ok); }
+.upd-status.err { color: var(--err); }
+.upd-foot { display: flex; justify-content: space-between; gap: 10px; }
+.upd-foot .link {
+  border: 0; background: transparent; padding: 0; color: var(--accent);
+  font-size: 12.5px; text-decoration: underline; text-underline-offset: 3px;
+}
+.upd-foot .link:hover:not(:disabled) { background: transparent; color: var(--ink); }
+body.android #upd-pop {
+  left: 0; right: 0; bottom: 0; top: auto; width: auto; max-width: none;
+  border-radius: 16px 16px 0 0; padding-bottom: calc(14px + env(safe-area-inset-bottom));
+}
+
+/* Dialogue « modifications non enregistrées » */
+#dlg-unsaved { max-width: 440px; }
+#dlg-unsaved .dlg-msg { margin: 0; color: var(--muted); font-size: 13px; }
+
+/* Barre latérale étroite : onglets en icônes seules (libellé en infobulle)
+   au lieu de « A… » / « D… » tronqués. */
+#side-view.sv-narrow .sv .sv-ic + span { display: none; }
+#side-view.sv-narrow .sv { justify-content: center; }
+
+@media (prefers-reduced-motion: reduce) {
+  #tb-menu-pop, #upd-pop { animation: none; }
+}
+
+/* Thème clair : voir la note en fin de settings.css. */
+:root button.upd-x, :root .upd-foot button.link { background: transparent; }
