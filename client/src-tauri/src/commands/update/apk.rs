@@ -58,7 +58,18 @@ pub(super) async fn fetch_apk(
             "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
         ))
         .or_else(|_| {
-            super::gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest")
+            // Repli `latest` : le tag demandé est introuvable — on
+            // journalise la release réellement retenue (tag_name) pour
+            // que le client.log dise quelle version sera installée.
+            super::gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest").map(
+                |r| {
+                    super::ulog(format!(
+                        "apk: tag v{tag} introuvable — repli releases/latest ({})",
+                        r["tag_name"].as_str().unwrap_or("?")
+                    ));
+                    r
+                },
+            )
         })?;
         let (aname, url) = apk_asset(&rel)
             .ok_or_else(|| "update-failed:download:no .apk in the release".to_string())?;

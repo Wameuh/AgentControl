@@ -291,7 +291,7 @@ export const es: Record<Key, string> = {
   update_android_permission: "Android necesita permiso para instalar apps — activa « instalar apps de orígenes desconocidos » para AgentControl en Ajustes y vuelve a iniciar la actualización",
   upd_android_h: "Actualización Android — reinstalación necesaria",
   upd_android_warn: "Esta versión no puede actualizarse en el lugar (firma de depuración o clave ajena): Android rechazará la instalación. Actualizar implica desinstalar la app primero, lo que borra TODOS los datos — conexiones, claves, vinculaciones. Habrá que volver a vincular por QR después.",
-  upd_android_go: "Descargar de todos modos",
+  upd_android_go: "Instalar de todos modos",
   update_partial: "v{v} instalada pero no se pudo reiniciar: {reason}",
   updfail_other: "Actualización fallida",
   updfail_check: "No se pudo comprobar la release",

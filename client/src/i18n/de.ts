@@ -291,7 +291,7 @@ export const de: Record<Key, string> = {
   update_android_permission: "Android braucht die Erlaubnis, Apps zu installieren — aktiviere « Apps aus unbekannten Quellen installieren » für AgentControl in den Einstellungen und starte das Update erneut",
   upd_android_h: "Android-Update — Neuinstallation nötig",
   upd_android_warn: "Diese Version kann nicht direkt aktualisiert werden (Debug-Signatur oder fremder Schlüssel): Android lehnt die Installation ab. Das Update erfordert zuerst die Deinstallation der App, wodurch ALLE Daten gelöscht werden — Verbindungen, Schlüssel, Kopplungen. Danach ist eine neue Kopplung per QR-Code nötig.",
-  upd_android_go: "Trotzdem herunterladen",
+  upd_android_go: "Trotzdem installieren",
   update_partial: "v{v} installiert, aber Neustart fehlgeschlagen: {reason}",
   updfail_other: "Update fehlgeschlagen",
   updfail_check: "Das Release konnte nicht geprüft werden",

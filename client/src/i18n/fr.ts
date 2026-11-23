@@ -288,7 +288,7 @@ export const fr: Record<Key, string> = {
   update_android_permission: "Android a besoin d'autoriser l'installation d'apps — activez « installer des applications inconnues » pour AgentControl dans les réglages, puis relancez la mise à jour",
   upd_android_h: "Mise à jour Android — réinstallation requise",
   upd_android_warn: "Cette version ne peut pas se mettre à jour en place (signature de debug ou clé étrangère) : Android refusera l'installation. La mise à jour impose de désinstaller l'app d'abord, ce qui efface TOUTES les données — connexions, clés, appairages. Un nouvel appairage par QR code sera nécessaire ensuite.",
-  upd_android_go: "Télécharger quand même",
+  upd_android_go: "Installer quand même",
   update_partial: "v{v} installée mais relance impossible : {reason}",
   updfail_other: "Échec de la mise à jour",
   updfail_check: "La release n'a pas pu être vérifiée",

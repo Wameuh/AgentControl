@@ -2,13 +2,13 @@
   <!-- Update APK : l'app télécharge + vérifie l'artefact release
        elle-même (update_client → fetch_apk, I1) puis l'installeur
        système est lancé sur une URI FileProvider — permission
-       « installer des applications inconnques » propre à l'app
+       « installer des applications inconnues » propre à l'app
        (le flux navigateur historique exigeait ce droit du
        navigateur à la place). -->
   <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
   <application>
     <provider
-      android:name="androidx.core.content.FileProvider"
+      android:name="dev.agentcontrol.device.AcDeviceFileProvider"
       android:authorities="${applicationId}.acdevice"
       android:exported="false"
       android:grantUriPermissions="true">
