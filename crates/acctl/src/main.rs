@@ -995,9 +995,14 @@ async fn main() -> Result<()> {
             .await?
         ),
         "steps" => {
-            // acctl steps set [--session S] <spec>   — spec = "a:todo,b:wip,…"
-            //   (statuts todo|in_progress|wip|done|abandoned|abandon) ou JSON
-            //   '[{"name":..,"status":..}]' ; "-" ou "[]" vide la liste.
+            // acctl steps set [--session S] <spec> [<spec>…] — chaque
+            //   argument positionnel est une entrée : spec CSV
+            //   "a:todo,b:wip,…" (statuts todo|in_progress|wip|done|
+            //   abandoned|abandon), JSON '[{"name":..,"status":..}]',
+            //   ou un "nom:statut" seul ; les arguments sont joints par
+            //   ',' — JAMAIS ' ' : "a:done" "b:done" fusionnerait en UN
+            //   nom d'étape géant (rsplit ':' absorbe les ':' internes)
+            //   — régression #349. "-" ou "[]" vide la liste.
             // acctl steps get [--session S]  — liste courante.
             // Session = --session ou $AGENTCONTROL_SESSION.
             if args.len() < 2 {
@@ -1023,7 +1028,7 @@ async fn main() -> Result<()> {
                 .context("no session: --session S or AGENTCONTROL_SESSION")?;
             match args[1].as_str() {
                 "set" => {
-                    let spec = rest.join(" ");
+                    let spec = steps_set_spec(&rest);
                     if spec.is_empty() {
                         bail!("steps set [--session S] <spec>");
                     }
@@ -1254,6 +1259,17 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Spec effectif de `steps set` : les arguments positionnels sont des
+/// entrées `nom:statut` — joints par ',' (un argument = une entrée,
+/// un spec CSV peut aussi tout porter seul). Jamais ' ' : "a:done"
+/// "b:done" fusionnerait en UN nom d'étape unique — rsplit_once(':')
+/// sur le spec prend le DERNIER ':' comme séparateur de statut et
+/// absorbe tous les ':' internes dans le nom (régression #349 :
+/// W269 affichait une seule étape au nom géant au lieu de la liste).
+fn steps_set_spec(rest: &[String]) -> String {
+    rest.join(",")
+}
+
 /// Parse le spec de `acctl steps set` en Vec<SessionStep> :
 ///   "-" ou "[]"            → liste vide (clear)
 ///   '[{"name":..,"status":..}]' → JSON complet (statuts canoniques
@@ -1317,5 +1333,70 @@ fn parse_step_status(s: &str) -> Result<proto::StepStatus> {
         "done" | "complete" | "completed" | "finished" => Ok(proto::StepStatus::Done),
         "abandoned" | "abandon" | "skip" | "skipped" => Ok(proto::StepStatus::Abandoned),
         other => bail!("unknown step status '{other}' — expected todo|in_progress|done|abandoned"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Régression #349 : `steps set "a:done" "b:done" …` (un argument
+    /// par étape) ne doit PAS fusionner en une seule étape au nom
+    /// géant — chaque argument positionnel est une entrée.
+    #[test]
+    fn steps_set_spec_one_entry_per_arg() {
+        let spec = steps_set_spec(&args(&[
+            "Lire regles:done",
+            "Worktree + reproduire:done",
+            "Auditer e2e.mjs:in_progress",
+            "CI verte + merge:todo",
+        ]));
+        let steps = parse_steps_spec(&spec).unwrap();
+        assert_eq!(steps.len(), 4);
+        assert_eq!(steps[0].name, "Lire regles");
+        assert_eq!(steps[0].status, proto::StepStatus::Done);
+        assert_eq!(steps[2].status, proto::StepStatus::InProgress);
+        assert_eq!(steps[3].status, proto::StepStatus::Todo);
+        // Un spec CSV dans un seul argument reste supporté.
+        assert_eq!(steps_set_spec(&args(&["a:todo,b:wip"])), "a:todo,b:wip");
+    }
+
+    /// Garde-fou du mode compact : nom:statut, statut après le DERNIER
+    /// ':' (un nom peut contenir ':'), alias acceptés, JSON complet.
+    #[test]
+    fn parse_steps_spec_compact_json_aliases() {
+        let steps = parse_steps_spec("a:b:c:todo,fait:wip,ok:skip,-x:done").unwrap();
+        assert_eq!(steps[0].name, "a:b:c");
+        assert_eq!(steps[0].status, proto::StepStatus::Todo);
+        assert_eq!(steps[1].status, proto::StepStatus::InProgress);
+        assert_eq!(steps[2].status, proto::StepStatus::Abandoned);
+        assert_eq!(steps[3].status, proto::StepStatus::Done);
+
+        let steps = parse_steps_spec("-").unwrap();
+        assert!(steps.is_empty());
+        let steps = parse_steps_spec("[]").unwrap();
+        assert!(steps.is_empty());
+
+        let steps = parse_steps_spec(
+            r#"[{"name":"un","status":"in_progress"},{"name":"deux","status":"done"}]"#,
+        )
+        .unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].status, proto::StepStatus::InProgress);
+    }
+
+    /// Entrées malformées refusées (statut inconnu, pas de ':', nom
+    /// vide, entrée vide) — jamais de liste partielle silencieuse.
+    #[test]
+    fn parse_steps_spec_rejects_malformed() {
+        assert!(parse_steps_spec("a:pending").is_err()); // statut inconnu
+        assert!(parse_steps_spec("sans statut").is_err()); // pas de ':'
+        assert!(parse_steps_spec(":todo").is_err()); // nom vide
+        assert!(parse_steps_spec("a:todo,,b:done").is_err()); // entrée vide
+        assert!(parse_steps_spec("").is_err());
     }
 }
