@@ -645,8 +645,15 @@ Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
   `ssh host`.
 - App-generated ed25519 key: `<base>/agentcontrol_ed25519` — on Android
   `client_core::init_paths(app_data_dir)` since HOME is absent.
-- `ureq`, `tauri-plugin-shell`: desktop-only (target cfg in src-tauri/
-  Cargo.toml); `check_update`/`update_client` return Err on Android.
+- `ureq` is shared (ensure_daemon pushes verified artefacts on
+  Android too). `check_update`/`update_client` work on Android:
+  `update_client` downloads the release APK into the app cache,
+  verifies it like the other platforms (`SHA256SUMS` minisign +
+  sha256, I1) then hands the path to the ac-device plugin, which
+  launches the system installer via FileProvider + intent
+  (`REQUEST_INSTALL_PACKAGES` is the app's own permission — the
+  « unknown apps » settings screen is opened when missing and the
+  command returns `permission_required`).
 - CI APK: aarch64 signed by the CI release keystore when the
   `ANDROID_KEYSTORE_*` secrets exist, `--debug` fallback otherwise —
   `v*` tags fail without them (cf. § Releases → Android APK signing).
