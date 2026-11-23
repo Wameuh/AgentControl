@@ -48,6 +48,11 @@ acctl steps get
   after the **last** `:` (a name may contain `:`).
   Accepted aliases: `wip`, `in-progress` → `in_progress`;
   `complete`, `finished` → `done`; `skip`, `skipped` → `abandoned`.
+- One spec argument is the documented form. You may also pass several
+  positional args — each becomes one entry (`"a:todo" "b:done"` = two
+  steps) — but a step **name must never contain a comma**: it would be
+  split into two entries (comma is the entry separator, there is no
+  escaping).
 - JSON form also accepted:
   `acctl steps set '[{"name":"Tests","status":"in_progress"}]'`
 - Clear the list: `acctl steps set -` (or `[]`).
