@@ -39,10 +39,22 @@ const PATCH = `(() => {
       return new Promise((r) => setTimeout(r, d)).then(() => inv(cmd, args));
     }
     if (cmd === "disconnect") { window.__calls.disconnect.push(args?.conn); window.__live.delete(args?.conn); }
-    return inv(cmd, args).then((r) =>
-      cmd === "call" && args?.method === "list_sessions" && Array.isArray(r)
-        ? r.map((s) => ({ ...s, conn: args?.conn ?? [...window.__live].pop() ?? "local" }))
-        : r);
+    const ck = () => args?.params?.conn ?? args?.conn ?? [...window.__live].pop() ?? "local";
+    return inv(cmd, args).then((r) => {
+      if (cmd !== "call") return r;
+      // Les objets porteurs d'une clé conn (sessions, métas, entrées du
+      // registre PR) sont retaggés sur la conn de la page — list_sessions
+      // l'était déjà ; session_info.meta (app.current) et pr_list
+      // alimentent capable()/badges sur la même clé, sans ça ils
+      // pointaient vers la conn mockée en dur (« ssh:pi5.local:22 »).
+      if (args?.method === "list_sessions" && Array.isArray(r))
+        return r.map((s) => ({ ...s, conn: ck() }));
+      if (args?.method === "session_info" && r?.meta)
+        return { ...r, meta: { ...r.meta, conn: ck() } };
+      if (args?.method === "pr_list" && Array.isArray(r))
+        return r.map((x) => ({ ...x, conn: ck() }));
+      return r;
+    });
   };
 })();`;
 const initPage = async (saved, cliConn, delays = {}) => {

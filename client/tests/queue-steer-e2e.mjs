@@ -6,7 +6,7 @@
 //   capability absente   → bouton masqué (vieux démon)
 // Usage : npm run build && node tests/queue-steer-e2e.mjs
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
 
@@ -68,6 +68,7 @@ const MOCK = `(function () {
         case "call": return p.then(() => rpc(args.method, args.params ?? {}));
         case "subscribe": return p.then(() => null);
         case "saved_connections": case "ssh_hosts": return p.then(() => []);
+        case "other_instances": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAA x");
         case "check_update": return p.then(() => { throw new Error("offline"); });
         default: return p.then(() => null);
@@ -76,10 +77,7 @@ const MOCK = `(function () {
   };
 })();`;
 
-const PORT = 4197;
-const server = spawn("npx", ["vite", "preview", "--port", String(PORT), "--strictPort"], { stdio: "ignore" });
-process.on("exit", () => server.kill());
-await new Promise((r) => setTimeout(r, 1800));
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: true, args: ["--no-sandbox"] });
 const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
@@ -100,7 +98,7 @@ const steerBtns = () => p.evaluate(() =>
 const barTxt = () => p.evaluate(() => document.getElementById("queue-bar").textContent);
 const steerCalls = () => p.evaluate(() => window.__rpc.filter((c) => c.method === "queue_steer"));
 
-await p.goto(`http://localhost:${PORT}/`, { waitUntil: "networkidle0" });
+await p.goto(BASE + "/", { waitUntil: "networkidle0" });
 await p.waitForSelector("#btn-connect", { timeout: 15000 });
 await click("#btn-connect"); await sleep(300);
 // kind=local : les capabilities sont enregistrées sous la clé "local"
@@ -182,7 +180,7 @@ await p2.setViewport({ width: 1280, height: 860 });
 p2.on("pageerror", (e) => console.log("[pageerror2]", e.message));
 await p2.evaluateOnNewDocument(MOCK);
 await p2.evaluateOnNewDocument(() => { window.__withCap = false; });
-await p2.goto(`http://localhost:${PORT}/`, { waitUntil: "networkidle0" });
+await p2.goto(BASE + "/", { waitUntil: "networkidle0" });
 await p2.waitForSelector("#btn-connect", { timeout: 15000 });
 await p2.evaluate(() => document.getElementById("btn-connect").click());
 await sleep(300);

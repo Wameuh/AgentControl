@@ -3,12 +3,14 @@
 // et groupe (valide + refusé), rename/dissolve en sous-arbre.
 // Usage : node tests/grptree-smoke.mjs   (après npm run build)
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const EXE = process.env.CHROME_BIN ?? "/usr/bin/chromium";
-const server = spawn("npx", ["vite", "preview", "--port", "4198", "--strictPort"], { stdio: "ignore" });
-await new Promise((r) => setTimeout(r, 1800));
+// Clé conn réelle des sessions mock + conn bound (host "pi5.local" tapé
+// dans le formulaire, sans user@ — c-user porte le user séparément).
+const CK = "ssh:pi5.local:22";
+const { base } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: EXE, headless: true, args: ["--no-sandbox"] });
 const mock = readFileSync("tests/tauri-mock.js", "utf8");
 // Patch du mock : pré-seede des chemins hiérarchiques dans list_sessions
@@ -36,13 +38,13 @@ const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
 await p.evaluateOnNewDocument(mock);
 await p.evaluateOnNewDocument(patch);
-await p.goto("http://localhost:4198/#desktop", { waitUntil: "domcontentloaded" });
+await p.goto(`${base}/#desktop`, { waitUntil: "domcontentloaded" });
 await p.waitForSelector("#btn-connect", { timeout: 15000 });
 // Groupe vide imbriqué stocké : "Vide/Nested" → "Vide" rendu implicitement.
-await p.evaluate(() => localStorage.setItem("ac-groups:local", JSON.stringify(["Vide/Nested"])));
+await p.evaluate((k) => localStorage.setItem(`ac-groups:${k}`, JSON.stringify(["Vide/Nested"])), CK);
 await p.evaluate(() => document.querySelector("#btn-connect")?.click());
 await sleep(300);
-await p.type("#c-host", "me@pi5.local");
+await p.type("#c-host", "pi5.local");
 await p.evaluate(() => document.querySelector("#c-go")?.click());
 await sleep(900);
 
@@ -86,7 +88,7 @@ const drop = (payload, targetPath) => p.evaluate(({ d, tp }) => {
     : document.querySelector(sel)?.closest(".grp-sub");
   t?.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
 }, { d: payload, tp: targetPath });
-const stored = () => p.evaluate(() => JSON.parse(localStorage.getItem("ac-groups:local") ?? "[]"));
+const stored = () => p.evaluate((k) => JSON.parse(localStorage.getItem(`ac-groups:${k}`) ?? "[]"), CK);
 const lsGet = (k) => p.evaluate((x) => localStorage.getItem(x), k);
 
 // ---------- A. Rendu initial ----------
@@ -101,7 +103,7 @@ ok((await rowIndent("Reduce context")) === 14, "A8 session gDepth1 → 14px");
 
 // ---------- B. Collapse ----------
 await clickHdr("Prod"); await sleep(400);
-ok((await lsGet("ac-grp-local::Prod")) === "1", "B1 clé collapse par chemin complet");
+ok((await lsGet(`ac-grp-${CK}::Prod`)) === "1", "B1 clé collapse par chemin complet");
 ok(await hdrHidden("Prod/Web") === true, "B2 header enfant masqué sous parent plié");
 ok(await rowVisible("Refactor") === false && await rowVisible("Reduce context") === false, "B3 sessions du sous-arbre masquées");
 ok(await hdrHidden("Serveur pi") === false, "B4 arbre voisin intact");
@@ -119,7 +121,7 @@ await sleep(300);
 await rclkHdr("Prod"); await sleep(300);
 const btns = await p.evaluate(() => [...document.querySelectorAll("#sctx button")].map((b) => b.textContent));
 ok(btns.some((x) => /sub-group/i.test(x)), "D1 entrée « New sub-group » présente");
-ok(btns.length === 4, "D2 menu = 4 entrées (sess, sub-group, rename, dissolve)");
+ok(btns.length === 5, "D2 menu = 5 entrées (sess, sub-group, rename, dissolve, dissolve+del)");
 await p.evaluate(() => [...document.querySelectorAll("#sctx button")].find((b) => /sub-group/i.test(b.textContent))?.click());
 await sleep(400);
 ok((await p.evaluate(() => document.querySelector("#g-name")?.value)) === "Prod/", "D3 dlg prérempli « Prod/ »");
@@ -130,23 +132,25 @@ ok(await hdr("Prod/API"), "D4 sous-groupe Prod/API créé");
 ok((await stored()).includes("Prod/API") && (await stored()).includes("Prod"), "D5 chemins stockés (ancêtre présent)");
 
 // ---------- E. Drag groupe → autre groupe ----------
-await drop({ kind: "group", path: "Prod/Web", conn: "local" }, "Vide");
+await drop({ kind: "group", path: "Prod/Web", conn: CK }, "Vide");
 await sleep(700);
 ok(await hdr("Vide/Web") && !(await hdr("Prod/Web")), "E1 Prod/Web déplacé sous Vide");
 ok(await rowVisible("Refactor"), "E2 session du sous-arbre suit le déplacement");
 ok((await stored()).includes("Vide/Web") && !(await stored()).includes("Prod/Web"), "E3 chemins stockés remappés");
 
 // ---------- F. Drag groupe → refusé dans son sous-arbre ----------
-await drop({ kind: "group", path: "Prod", conn: "local" }, "Prod/API");
+await drop({ kind: "group", path: "Prod", conn: CK }, "Prod/API");
 await sleep(500);
 ok(await hdr("Prod") && await hdr("Prod/API"), "F1 drop dans son propre sous-arbre refusé");
 ok(!(await stored()).includes("Prod/API/Prod"), "F2 aucun chemin absurde créé");
 
 // ---------- G. Drag session → sous-groupe + dégroupage ----------
-await drop({ kind: "session", id: "s2", conn: "local" }, "Vide/Web");
+await drop({ kind: "session", id: "s2", conn: CK }, "Vide/Web");
 await sleep(700);
-ok((await rowIndent("Fix login")) === 28, "G1 session déposée dans sous-groupe (28px)");
-await drop({ kind: "session", id: "s2", conn: "local" }, null);
+// s2 spawned_by s1 : la sous-session niche sous son parent (même groupe)
+// → 28px de groupe + 14px de nesting = 42px.
+ok((await rowIndent("Fix login")) === 42, "G1 session déposée dans sous-groupe, nichée (42px)");
+await drop({ kind: "session", id: "s2", conn: CK }, null);
 await sleep(700);
 ok((await rowIndent("Fix login")) === 0, "G2 session déposée à la racine (dégroupée)");
 
@@ -175,5 +179,5 @@ ok(await rowVisible("Write unit tests"), "I3 session dégroupée reste dans la l
 ok(!(await stored()).some((g) => g.startsWith("Serveur pi")), "I4 chemins stockés purgés");
 
 console.log(`\n${fails === 0 ? "SMOKE OK" : "SMOKE FAIL"} — ${fails} échec(s)`);
-await b.close(); server.kill();
+await b.close();
 process.exit(fails ? 1 : 0);

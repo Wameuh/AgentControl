@@ -639,6 +639,9 @@ export class SettingsPanel {
       reset: () => {
         ($("s-snd") as HTMLInputElement).checked = sndEnabled();
       },
+      // Grisage des sous-options sans attendre Enregistrer — retour
+      // visuel immédiat du master (annulable comme tout le staging).
+      preview: () => this.syncSndOpts(),
     });
     for (const k of ["done", "question", "error"] as SoundKind[]) {
       this.stage(`s-snd-${k}`, {
@@ -721,6 +724,7 @@ export class SettingsPanel {
       reset: () => {
         ($("s-notif") as HTMLInputElement).checked = notifEnabled();
       },
+      preview: () => this.syncNotifOpts(),
     });
     for (const k of ["done", "question", "error"] as AlertKind[]) {
       this.stage(`s-notif-${k}`, {

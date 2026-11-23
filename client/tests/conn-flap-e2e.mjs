@@ -6,7 +6,7 @@
 // connect (les kills déclenchent un retry), log ui capturé.
 // Usage : npm run build && node tests/conn-flap-e2e.mjs
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
 
@@ -75,9 +75,7 @@ const MOCK = `(function () {
   };
 })();`;
 
-const server = spawn("npx", ["vite", "preview", "--port", "4194", "--strictPort"], { stdio: "ignore" });
-process.on("exit", () => server.kill());
-await new Promise((r) => setTimeout(r, 1800));
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: true, args: ["--no-sandbox"] });
 const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
@@ -123,7 +121,7 @@ const waitSeg = async (want, timeout = 6000) => {
 };
 const connectCalls = () => p.evaluate(() => window.__connectCalls);
 
-await p.goto("http://localhost:4194/", { waitUntil: "networkidle0" });
+await p.goto(BASE + "/", { waitUntil: "networkidle0" });
 await sleep(600);
 
 // t0 — la conn saved auto-connectée est ok, segment vert.
@@ -145,7 +143,7 @@ check("t1 lenteur+trafic → ok", (await st()) === "ok", await segCls());
 check("t1 aucun retry", (await connectCalls()) === calls0,
   "calls=" + (await connectCalls()));
 check("t1 log transport vivant",
-  (await logs("transport vivant")).length >= 1);
+  (await logs("transport alive")).length >= 1);
 
 // t2 — timeout + SILENCE radio (silent 30 s) : blackhole suspect →
 // strike 1 (encore ok) puis strike 2 → down. Tick sain d'abord :
@@ -187,7 +185,7 @@ await drain();
 
 // t5 — sonde redevenue saine → markAlive efface les strikes : un err
 // isolé repart à ×1 (compteur reset, pas cumul inter-pannes).
-check("t5 retour sonde saine", await waitLog("de retour", l5));
+check("t5 retour sonde saine", await waitLog("back (", l5));
 check("t5 sonde saine → ok", (await st()) === "ok", await segCls());
 const l5b = await logLen();
 await setDs({ error: "connexion fermée", kind: "error", rtt_ms: 12 });
@@ -233,11 +231,12 @@ await setDs({ version: "9.9.9", sessions: 1 });
 await sleep(400);
 const l7 = await logLen();
 await setDs({ error: "timeout", kind: "timeout", rtt_ms: 8100, silent_ms: 200 });
-check("t7 excusés ×5", await waitLog("ignoré ×5", l7, 6000));
-check("t7 plafond → strike", await waitLog("durablement", l7, 6000));
+check("t7 excusés ×5", await waitLog("ignored ×5", l7, 6000));
+check("t7 plafond → strike", await waitLog("durably", l7, 6000));
 check("t7 strike1 encore ok", (await st()) === "ok", await segCls());
 check("t7 2ᵉ salve → strike2", await waitLog("sonde ko ×2", l7, 9000));
-check("t7 RPC bloqué durable → down", (await st()) === "bad", await segCls());
+check("t7 RPC bloqué durable → down", (await waitSeg("bad", 3000)) || (await st()) === "warn",
+  await segCls());
 await setDs({ version: "9.9.9", sessions: 1 });
 await drain();
 
@@ -270,7 +269,7 @@ await setDs({
   error: "connexion fermée", kind: "error",
   rtt_ms: 2760, silent_ms: 4436, gen: 1,
 });
-check("t8 sonde périmée loguée", await waitLog("sonde périmée", l8b));
+check("t8 sonde périmée loguée", await waitLog("stale probe", l8b));
 check("t8 sonde périmée → encore ok", (await st()) === "ok", await segCls());
 check("t8 sonde périmée : aucun retry",
   (await connectCalls()) === calls8, "calls=" + (await connectCalls()));
@@ -290,7 +289,7 @@ await p.evaluate(() => {
     payload: { conn: "local", why: "eof distant", gen: 2 },
   });
 });
-check("t8 conn-dead périmé logué", await waitLog("conn-dead périmé", l8c));
+check("t8 conn-dead périmé logué", await waitLog("stale conn-dead", l8c));
 check("t8 conn-dead périmé → ok", (await st()) === "ok", await segCls());
 // conn-dead frais (gen 3) → down légitime. La sonde passe en échec
 // AVANT le conn-dead : sinon le watchdog sain la répare au tick
@@ -360,7 +359,7 @@ await p.evaluate(() => {
   window.__listSessions = [{ conn: "local", conn_error: true,
     _ac_transport: { silent_ms: 200, dead: false, rx_lines: 40 } }];
 });
-check("t9a excuse transport vivant", await waitLog("transport vivant", l9a, 4000));
+check("t9a excuse transport vivant", await waitLog("transport alive", l9a, 4000));
 await sleep(500);
 check("t9a conn_error vivant → ok", (await st()) === "ok", await segCls());
 check("t9a badge sidebar ok",

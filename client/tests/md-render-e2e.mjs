@@ -4,10 +4,14 @@
 // Usage : npm run build && node tests/md-render-e2e.mjs
 //   (chromium via $CHROMIUM ou /usr/bin/chromium)
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
+// Origine du preview (port libre) — l'image « self » du mock DOIT la
+// partager exactement ; la variante https reste une origine distante.
+const { server, base: BASE } = await startVitePreview();
+const HOST = new URL(BASE).host;
 
 // N6 : PNG 1×1 factice — servi en intercept pour example.com et posé
 // dans dist/ pour l'image « 'self' » (même origine que le client).
@@ -55,8 +59,8 @@ const MOCK = `(function () {
       text: "Image : ![x](https://example.com/a.png)\\n" +
             "Lien nu : https://example.com/b.png\\n" +
             "Port : ![y](https://example.com:8443/c.png)\\n" +
-            "Self : ![z](http://localhost:4185/d.png)\\n" +
-            "XScheme : ![w](https://localhost:4185/e.png)" },
+            "Self : ![z](${BASE}/d.png)\\n" +
+            "XScheme : ![w](https://${HOST}/e.png)" },
   ];
   function rpc(method, args) {
     switch (method) {
@@ -128,8 +132,6 @@ const MOCK = `(function () {
 // Image « 'self' » : servie par vite preview sur l'origine du client —
 // doit charger dans tous les modes (jamais « distante »).
 writeFileSync("dist/d.png", PNG1);
-const server = spawn("npx", ["vite", "preview", "--port", "4185", "--strictPort"], { stdio: "ignore" });
-await new Promise((r) => setTimeout(r, 1800));
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: "new", args: ["--no-sandbox"] });
 const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
@@ -145,7 +147,7 @@ const extSniff = (r) => {
   if (u.startsWith("https://example.com")) {
     extReqs.push(u);
     r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
-  } else if (u.startsWith("https://localhost:4185/")) {
+  } else if (u.startsWith(`https://${HOST}/`)) {
     // Même hôte, schéma différent : distante — servie comme example.com
     // pour l'<img> (comptée séparément des hits example.com).
     r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
@@ -168,7 +170,7 @@ const click = (sel) => p.evaluate((s) => document.querySelector(s)?.click(), sel
 
 // Panneau assez large → split côte-à-côte (fv-row) en édition md.
 await p.evaluateOnNewDocument(() => localStorage.setItem("ac-filepanel-w", "1100"));
-await p.goto("http://localhost:4185/", { waitUntil: "networkidle0" });
+await p.goto(`${BASE}/`, { waitUntil: "networkidle0" });
 await p.waitForSelector("#btn-connect", { timeout: 15000 });
 await click("#btn-connect"); await sleep(300);
 await p.type("#c-host", "me@pi5.local"); await click("#c-go"); await sleep(900);
@@ -347,13 +349,13 @@ p2.on("request", (r) => {
   if (u.startsWith("https://example.com")) {
     extReqs2.push(u);
     r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
-  } else if (u.startsWith("https://localhost:4185/")) {
+  } else if (u.startsWith(`https://${HOST}/`)) {
     r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
   } else r.continue().catch(() => {});
 });
 await p2.evaluateOnNewDocument(MOCK);
 const reopen2 = async (mode, hosts) => {
-  await p2.goto("http://localhost:4185/", { waitUntil: "networkidle0" });
+  await p2.goto(`${BASE}/`, { waitUntil: "networkidle0" });
   // Pref posée après le load (localStorage accessible) mais avant
   // l'ouverture de session — imgMode() n'est lu qu'au rendu du message.
   await p2.evaluate((m, h) => {
@@ -396,8 +398,8 @@ check("N6 never(\"0\") : 0 placeholder / seule « self » en <img>",
 check("N6 never : les liens simples restent",
   (await p2.evaluate(() => document.querySelectorAll('#events a[href^="https://example.com"]').length)) === 3);
 check("N6 never : https://même-hôte reste un simple lien (pas « self »)",
-  (await p2.evaluate(() =>
-    document.querySelectorAll('#events a[href="https://localhost:4185/e.png"]').length)) === 1);
+  (await p2.evaluate((h) =>
+    document.querySelectorAll(`#events a[href="https://${h}/e.png"]`).length, HOST)) === 1);
 await sleep(300);
 check("N6 never : aucune requête", extReqs2.length === 0, extReqs2.join(","));
 
