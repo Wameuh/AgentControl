@@ -54,7 +54,9 @@
 - The keyword rides in the **squash commit subject** — keep it in
   the commit subject itself; a keyword only in the PR title never
   reaches the cycle. Source of truth: `client/tools/bump_version.py`
-  (`detect_level`).
+  (`detect_level`; `--bound` picks the scan bound — last tagged bump
+  or newest `(reset`/`revert bump` marker, covered by
+  `client/tests/bump-bound-test.sh`).
 
 ## Code conventions
 
