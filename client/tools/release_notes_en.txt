@@ -238,4 +238,4 @@ sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart
 433: Fixed PR reviewer sessions failing to start when the reviewer's agent differs from the globally configured agent — the global effort setting is no longer applied to an agent that does not support it.
 445: Android app updates now work in-app — the APK is downloaded and signature-verified by the app itself, then handed to the system installer (with a one-time "install unknown apps" permission prompt) instead of requiring a manual download.
 447: [skip] internal release-bump tooling fix, no user-facing change
-449: Agents waiting on PR CI now get an explicit "rebase required" signal when the base branch moves and the PR turns conflicting, instead of hanging until the wait times out.
+449: [skip] internal CI-wait tooling, no user-facing change
