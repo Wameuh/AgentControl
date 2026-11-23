@@ -83,6 +83,7 @@ jobs:
           node tests/errcode-test.mjs
           sh tests/pair-sh-test.sh
           python3 tests/ensure-daemon-e2e.py
+          sh tests/bump-bound-test.sh
       - name: Build client (vite preview des tests puppeteer)
         working-directory: client
         run: npm run build

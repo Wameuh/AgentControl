@@ -567,11 +567,16 @@ artifacts on PRs (APK and dmg suffixed `-<sha>`).
 
 **No per-PR bump** — the version only moves at release. The level
 is decided by **parenthesized keywords in commit subjects**
-scanned over the cycle. Scan bound = last `chore: bump version`
-**whose `vX.Y.Z` tag exists** on `next_release`, otherwise (post-reset:
-nr no longer has a bump commit, its history = `main`'s) **last
-semver tag**, which is then an ancestor of nr — self-maintained bound
-in both cases:
+scanned over the cycle. Scan bound (`bump_version.py --bound`, shared
+with `client/tests/bump-bound-test.sh`) = last `chore: bump version`
+**whose `vX.Y.Z` tag exists** on `next_release`, **or the newest
+`(reset` / `revert bump` commit even untagged** — a cancelled bump
+must not let the range fall back to the previous tag and re-apply the
+cancelled cycle's keywords (incident #435/#436: a premature ready
+re-bumped 1.0.0 on #422's `(major)` despite the revert), otherwise
+(post-reset: nr no longer has a bump commit, its history = `main`'s)
+**last semver tag**, which is then an ancestor of nr —
+self-maintained bound in all cases:
 
 - `(major)` → **major** (exceptional, major release decision);
   `(sync)` → **minor**; nothing → **patch**
