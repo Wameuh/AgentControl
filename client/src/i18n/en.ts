@@ -596,6 +596,7 @@ export const en = {
   mem_role_gpu: "gpu",
   mem_role_other: "other processes",
   mem_smaps_of: "{what} address space",
+  mem_smaps_pss: "proportional",
   mem_smaps_anon: "heap",
   mem_smaps_priv: "private",
   mem_smaps_shared: "shared",
