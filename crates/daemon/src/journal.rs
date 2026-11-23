@@ -36,7 +36,7 @@ pub struct Journal {
 /// serait un faux.
 pub enum FirstPost {
     /// Premier `user_message` du cycle (seq/ts/texte intacts).
-    Found(Event),
+    Found(Box<Event>),
     /// La tête du journal a été supprimée par la compaction.
     Truncated,
     /// Pas de `user_message` dans la fenêtre scannée.
@@ -319,7 +319,7 @@ impl Journal {
                 if spawn_prompt || legacy_prompt {
                     continue;
                 }
-                return Ok(FirstPost::Found(ev));
+                return Ok(FirstPost::Found(Box::new(ev)));
             }
         }
         Ok(FirstPost::Empty)

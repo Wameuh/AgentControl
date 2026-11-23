@@ -246,7 +246,7 @@ pub fn list_sessions() -> Vec<Value> {
             ));
         }
     }
-    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.sort_by_key(|a| std::cmp::Reverse(a.0));
     out.truncate(50);
     out.into_iter().map(|(_, v)| v).collect()
 }

@@ -169,9 +169,7 @@ fn price_of(detail: &str) -> Option<String> {
     }
     // « Free » n'est reconnu que comme token entier (virgule ou ·) —
     // « Sidekick: Free » ne doit PAS le déclencher.
-    let free = detail
-        .split(|c| c == '·' || c == ',')
-        .any(|t| t.trim() == "Free");
+    let free = detail.split(['·', ',']).any(|t| t.trim() == "Free");
     free.then(|| "Free".to_string())
 }
 

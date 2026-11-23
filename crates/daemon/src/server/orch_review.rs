@@ -1528,6 +1528,7 @@ impl Daemon {
     /// = cause DÉFINITIVE, fail-fast `review failed` sans retry (la
     /// ref ne réapparaîtra pas seule — pousser un commit la recrée) ;
     /// toute autre erreur = transitoire bornée.
+    #[allow(clippy::too_many_arguments)]
     async fn pr_review_launch_fail(
         self: &Arc<Self>,
         key: &str,
@@ -1569,6 +1570,7 @@ impl Daemon {
     /// Pendant `retry_wait` l'entrée ne compte ni dans le pool ni comme
     /// review en cours : un NOUVEAU trigger est servi immédiatement —
     /// le retry ne masque jamais une commande explicite.
+    #[allow(clippy::too_many_arguments)]
     async fn pr_review_transient_fail(
         self: &Arc<Self>,
         key: &str,
@@ -1621,6 +1623,7 @@ impl Daemon {
     /// texte reconstruit contre le head COURANT (jamais d'APPROVED
     /// stale), retry borné à 4 — abandon → `Failed` + tentative de
     /// commentaire d'échec.
+    #[allow(clippy::too_many_arguments)]
     async fn pr_review_post_attempt(
         self: &Arc<Self>,
         key: &str,
@@ -2088,10 +2091,8 @@ impl Daemon {
                     // Base allowlistée — même garde que `--base` de
                     // `gh pr list` (filtre côté client, les API ne
                     // filtrent pas toutes pareil).
-                    if base.is_empty() || c.base.eq_ignore_ascii_case(&base) {
-                        if c.number > 0 {
-                            out_v.push((repo.clone(), c));
-                        }
+                    if (base.is_empty() || c.base.eq_ignore_ascii_case(&base)) && c.number > 0 {
+                        out_v.push((repo.clone(), c));
                     }
                 }
             }
@@ -2290,7 +2291,7 @@ impl Daemon {
                 ),
             ],
         );
-        let n: u64 = st_counter(&key);
+        let n: u64 = st_counter(key);
         // `*_model`/`*_effort` par rôle : vide → repli global (même
         // sémantique que les autres rôles pipeline).
         let model = cfg.model_or(&cfg.pr_reviewer_model).to_string();

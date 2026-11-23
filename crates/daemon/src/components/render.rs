@@ -279,7 +279,7 @@ fn toml_literal(ps: &ParamSpec, value: &str) -> Result<String> {
             v.split(',')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .map(|s| toml_str(s))
+                .map(toml_str)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),

@@ -443,11 +443,10 @@ const CMD_PATH_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 /// auto-discovery, spawn). Les misses (binaire absent) sont cachés
 /// aussi — ce sont eux qui coûtent le plus : le scan balaaye tous
 /// les dossiers. Borné par la variété des argv[0] vus (~dizaines).
-fn cmd_path_cache(
-) -> &'static std::sync::Mutex<HashMap<String, (std::time::Instant, Option<PathBuf>)>> {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<String, (std::time::Instant, Option<PathBuf>)>>,
-    > = std::sync::OnceLock::new();
+type CmdPathCache = std::sync::Mutex<HashMap<String, (std::time::Instant, Option<PathBuf>)>>;
+
+fn cmd_path_cache() -> &'static CmdPathCache {
+    static CACHE: std::sync::OnceLock<CmdPathCache> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -473,7 +472,10 @@ pub(crate) fn command_path(cmd: &str) -> Option<std::path::PathBuf> {
     cmd_path_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(cmd.to_string(), (std::time::Instant::now(), resolved.clone()));
+        .insert(
+            cmd.to_string(),
+            (std::time::Instant::now(), resolved.clone()),
+        );
     resolved
 }
 
@@ -597,7 +599,7 @@ mod tests {
         std::fs::write(&bin, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let found = command_path_in("ac-test-agent-xyz", &[bin_dir.clone()]);
+        let found = command_path_in("ac-test-agent-xyz", std::slice::from_ref(&bin_dir));
         let _ = std::fs::remove_dir_all(&home);
         assert_eq!(found.as_deref(), Some(bin.as_path()));
     }
@@ -663,7 +665,7 @@ mod tests {
         // Le cwd du test ne contient pas `./ac-rel-agent-xyz` : le
         // littéral relatif ne résout rien — et les dossiers ne sont
         // pas fouillés pour un argv[0] à séparateur.
-        let found = command_path_in("./ac-rel-agent-xyz", &[dir.clone()]);
+        let found = command_path_in("./ac-rel-agent-xyz", std::slice::from_ref(&dir));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(found.is_none());
     }

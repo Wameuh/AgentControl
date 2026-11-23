@@ -272,10 +272,10 @@ fn sync_root(root: &Path, skills: &[Skill]) {
     // cachées ; même sinon ce n'est pas un dossier de skill (pas de
     // SKILL.md). On ne le crée que s'il a quelque chose à porter —
     // une racine où tout a collisionné ne doit pas apparaître.
-    if dirty || (!manifest.is_empty() && !manifest_path(root).exists()) {
-        if std::fs::create_dir_all(root).is_ok() {
-            write_manifest(root, &manifest);
-        }
+    if (dirty || (!manifest.is_empty() && !manifest_path(root).exists()))
+        && std::fs::create_dir_all(root).is_ok()
+    {
+        write_manifest(root, &manifest);
     }
 }
 

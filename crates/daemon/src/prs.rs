@@ -600,6 +600,7 @@ fn extract_repo_num_refs(text: &str) -> Vec<(String, u64)> {
 ///    contient `mergedAt`/`"merged":false` sans être un merge ;
 ///  - « will be » / « queued » = auto-merge différé, pas un fait ;
 ///  - négations (« was not merged ») ignorées.
+///
 /// Dernier statut vu gagne par référence dans le texte.
 pub fn extract_state_refs(text: &str, forges: &Forges) -> Vec<(PrRef, &'static str)> {
     let mut out: Vec<(PrRef, &'static str)> = Vec::new();

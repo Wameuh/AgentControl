@@ -2,6 +2,7 @@
 //! le protocole NDJSON existant au navigateur (AC#14).
 //!
 //! Endpoints :
+//! ```text
 //! - `GET /*`              → fichiers statiques de la SPA (+ fallback
 //!                          index.html — routing côté client)
 //! - `GET /ping`           → 204 sans auth (sonde de tunnel SSH)
@@ -19,6 +20,7 @@
 //! - `GET /download`       → fichier/dossier (zip) en `attachment`
 //! - `GET /plugin/<n>/<p>`  → assets d'une vue plugin (token de bridge
 //!                          éphémère, CSP bornée — plugin.rs)
+//! ```
 //!
 //! Sécurité :
 //! - bind loopback uniquement — l'accès distant passe par `ssh -L`,
@@ -39,7 +41,7 @@ mod ws;
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
@@ -319,9 +321,9 @@ async fn serve_static(
 
 /// Joint un chemin URL à web_dir en restant dedans : percent-decode,
 /// refus des `..`/séparateurs Windows/encodages imbriqués.
-fn safe_join(base: &PathBuf, url_path: &str) -> Option<PathBuf> {
+fn safe_join(base: &Path, url_path: &str) -> Option<PathBuf> {
     let decoded = pct_decode(url_path.split('?').next().unwrap_or(""));
-    let mut out = base.clone();
+    let mut out = base.to_path_buf();
     for c in std::path::Path::new(&decoded).components() {
         match c {
             Component::Normal(seg) => {

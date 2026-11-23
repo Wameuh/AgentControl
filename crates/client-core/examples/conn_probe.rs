@@ -47,9 +47,7 @@ async fn main() -> Result<()> {
             let (user, host) = auth
                 .split_once('@')
                 .map(|(u, h)| (u.to_string(), h.to_string()))
-                .unwrap_or_else(|| {
-                    (std::env::var("USER").unwrap_or_else(|_| "dev".into()), auth)
-                });
+                .unwrap_or_else(|| (std::env::var("USER").unwrap_or_else(|_| "dev".into()), auth));
             let key_path = args
                 .iter()
                 .position(|a| a == "-k")
@@ -84,7 +82,11 @@ async fn main() -> Result<()> {
         // Vérifie que close() solde les appels et libère le transport.
         c.call(ReqKind::DaemonStatus).await?;
         c.close();
-        println!("close(): dead={} why={:?}", *c.dead.borrow(), c.death_reason());
+        println!(
+            "close(): dead={} why={:?}",
+            *c.dead.borrow(),
+            c.death_reason()
+        );
         match c.call(ReqKind::DaemonStatus).await {
             Err(e) => println!("call post-close: {e:#} (attendu)"),
             Ok(_) => println!("call post-close: réponse inattendue"),

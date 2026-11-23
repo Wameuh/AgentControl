@@ -430,13 +430,11 @@ impl ProbeIo {
             let Ok(v) = serde_json::from_str::<Value>(&l) else {
                 continue;
             };
-            if self.note(&v, stdin).await {
-                if v.get("id").and_then(Value::as_u64) == Some(id) {
-                    if let Some(e) = v.get("error") {
-                        anyhow::bail!("acp {method}: {}", acp::acp_error_string(e));
-                    }
-                    return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+            if self.note(&v, stdin).await && v.get("id").and_then(Value::as_u64) == Some(id) {
+                if let Some(e) = v.get("error") {
+                    anyhow::bail!("acp {method}: {}", acp::acp_error_string(e));
                 }
+                return Ok(v.get("result").cloned().unwrap_or(Value::Null));
             }
         }
     }

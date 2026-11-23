@@ -1,11 +1,12 @@
 //! acp-claude — adaptateur ACP maison pour le CLI `claude`.
 //!
 //! Spawn `claude -p --input-format stream-json --output-format
-//! stream-json` par session ACP et traduit le protocole SDK (messages
-//! + canal de contrôle) vers la surface ACP consommée par le démon
-//! AgentControl : prompts streaming, tool calls, permissions,
-//! configOptions, usage_update (jauge contexte + auto-compact),
-//! compaction_update, session/list, session/load avec replay JSONL.
+//! stream-json` par session ACP et traduit le protocole SDK
+//! (messages + canal de contrôle) vers la surface ACP consommée par
+//! le démon AgentControl : prompts streaming, tool calls,
+//! permissions, configOptions, usage_update (jauge contexte +
+//! auto-compact), compaction_update, session/list, session/load
+//! avec replay JSONL.
 
 mod claude;
 mod permission;

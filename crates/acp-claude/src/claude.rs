@@ -7,7 +7,7 @@ use crate::tools;
 use acp_core::{Conn, RpcError};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -365,7 +365,7 @@ fn headers_obj(v: Option<&Value>) -> Option<Value> {
 /// <acp_id>` (id qu'on contrôle → sessionId ACP == session native).
 pub async fn spawn(
     acp_id: &str,
-    cwd: &PathBuf,
+    cwd: &Path,
     mcp_servers: &Value,
     conn: Arc<Conn>,
     resume: Option<&str>,

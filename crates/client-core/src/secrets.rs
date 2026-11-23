@@ -54,12 +54,9 @@ fn boxed() -> Option<&'static dyn SecretBox> {
 pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> io::Result<()> {
     let bytes = match boxed() {
         Some(b) => {
-            let ct = b.seal(data).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("seal {}: {e:#}", path.display()),
-                )
-            })?;
+            let ct = b
+                .seal(data)
+                .map_err(|e| io::Error::other(format!("seal {}: {e:#}", path.display())))?;
             let mut v = Vec::with_capacity(MAGIC.len() + ct.len());
             v.extend_from_slice(MAGIC);
             v.extend_from_slice(&ct);

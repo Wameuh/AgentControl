@@ -55,10 +55,14 @@ pub enum InMsg {
     Notification { method: String, params: Value },
 }
 
+/// Corrélation réponse ↔ requête : les réponses JSON-RPC entrantes
+/// sont routées vers le oneshot posé à l'émission.
+type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, RpcError>>>>>;
+
 /// Connexion ACP : moitié écriture (stdout) + corrélation des réponses.
 pub struct Conn {
     tx: mpsc::UnboundedSender<String>,
-    pending: Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, RpcError>>>>>,
+    pending: Pending,
     next_id: AtomicU64,
 }
 
@@ -82,33 +86,24 @@ impl Conn {
         });
 
         let (itx, irx) = mpsc::channel::<InMsg>(1024);
-        let pending: Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, RpcError>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         {
             let pending = pending.clone();
             tokio::spawn(async move {
                 let stdin = BufReader::new(tokio::io::stdin());
                 let mut lines = stdin.lines();
-                loop {
-                    match lines.next_line().await {
-                        Ok(Some(line)) => {
-                            let line = line.trim().to_string();
-                            if line.is_empty() {
-                                continue;
-                            }
-                            let Ok(v) = serde_json::from_str::<Value>(&line) else {
-                                continue;
-                            };
-                            match classify(v, &pending) {
-                                Some(m) => {
-                                    if itx.send(m).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                None => {}
-                            }
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let line = line.trim().to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    if let Some(m) = classify(v, &pending) {
+                        if itx.send(m).await.is_err() {
+                            break;
                         }
-                        _ => break,
                     }
                 }
                 // stdin fermé (démon mort / kill) : éveille les appels

@@ -93,7 +93,10 @@ fn ls(items: &[Value]) {
         } else {
             ver.to_string()
         };
-        let pid = st["pid"].as_u64().map(|p| p.to_string()).unwrap_or_else(|| "-".into());
+        let pid = st["pid"]
+            .as_u64()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into());
         let up = fmt_uptime(st["uptime_s"].as_u64().unwrap_or(0));
         let restarts = st["restarts"].as_u64().unwrap_or(0);
         let src = match it["source"].as_str() {
@@ -200,13 +203,18 @@ fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
         Some(s) => split_argv(s, "--cmd")?,
         None => Vec::new(),
     };
-    if matches!(kind, proto::ComponentKind::Process | proto::ComponentKind::Tool)
-        && command.is_empty()
+    if matches!(
+        kind,
+        proto::ComponentKind::Process | proto::ComponentKind::Tool
+    ) && command.is_empty()
     {
-        bail!("--cmd \"<argv>\" required for kind={}", match kind {
-            proto::ComponentKind::Process => "process",
-            _ => "tool",
-        });
+        bail!(
+            "--cmd \"<argv>\" required for kind={}",
+            match kind {
+                proto::ComponentKind::Process => "process",
+                _ => "tool",
+            }
+        );
     }
     let healthcheck = match flag_val(args, "--hc") {
         Some(s) => parse_healthcheck(s)?,
@@ -215,16 +223,14 @@ fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
     // Mêmes gardes que check_usable/check_editable côté démon : une
     // sonde `process` exige un pid managé, et un `external` sans sonde
     // ne serait jamais sondé — inerte à vie.
-    if matches!(healthcheck, proto::Healthcheck::Process)
-        && kind != proto::ComponentKind::Process
-    {
+    if matches!(healthcheck, proto::Healthcheck::Process) && kind != proto::ComponentKind::Process {
         bail!("--hc process requires kind=process (managed pid)");
     }
-    if kind == proto::ComponentKind::External
-        && matches!(healthcheck, proto::Healthcheck::None)
-    {
-        bail!("kind=external without a probe would stay inert — pass \
-               --hc tcp:ADDR|http:URL|cmd:\"<argv>\"");
+    if kind == proto::ComponentKind::External && matches!(healthcheck, proto::Healthcheck::None) {
+        bail!(
+            "kind=external without a probe would stay inert — pass \
+               --hc tcp:ADDR|http:URL|cmd:\"<argv>\""
+        );
     }
     let mut env = std::collections::HashMap::new();
     for kv in flag_vals(args, "--env") {
@@ -284,8 +290,17 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
     // Un flag à valeur en dernière position est une erreur d'usage —
     // mieux qu'une absorption silencieuse.
     const VAL_FLAGS: [&str; 11] = [
-        "--kind", "--cmd", "--hc", "--env", "--cwd", "--desc", "--tail",
-        "--set", "--vargv", "--vmin", "--view-dir",
+        "--kind",
+        "--cmd",
+        "--hc",
+        "--env",
+        "--cwd",
+        "--desc",
+        "--tail",
+        "--set",
+        "--vargv",
+        "--vmin",
+        "--view-dir",
     ];
     if let Some(f) = args.last().filter(|a| VAL_FLAGS.contains(&a.as_str())) {
         bail!("{f} missing value");
@@ -419,10 +434,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             let v = c
                 .call(proto::ReqKind::ComponentSetParams {
                     name: name.into(),
-                    params: std::collections::HashMap::from([(
-                        key.clone(),
-                        value.clone(),
-                    )]),
+                    params: std::collections::HashMap::from([(key.clone(), value.clone())]),
                 })
                 .await?;
             let missing = v["config_required"]
@@ -484,8 +496,17 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             )?;
             let f = &args[3..];
             const VAL: [&str; 11] = [
-                "--desc", "--kind", "--cmd", "--hc", "--env", "--cwd",
-                "--restart", "--rsec", "--vargv", "--vmin", "--view-dir",
+                "--desc",
+                "--kind",
+                "--cmd",
+                "--hc",
+                "--env",
+                "--cwd",
+                "--restart",
+                "--rsec",
+                "--vargv",
+                "--vmin",
+                "--view-dir",
             ];
             if let Some(x) = f.last().filter(|a| VAL.contains(&a.as_str())) {
                 bail!("{x} missing value");
@@ -493,17 +514,23 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             let info = c
                 .call(proto::ReqKind::ComponentInfo { name: name.into() })
                 .await?;
-            let mut spec: proto::ComponentSpec =
-                serde_json::from_value(info["spec"].clone())
-                    .context("comp edit: unreadable spec in component_info")?;
+            let mut spec: proto::ComponentSpec = serde_json::from_value(info["spec"].clone())
+                .context("comp edit: unreadable spec in component_info")?;
             if info["catalog"].as_bool().unwrap_or(false) {
                 // Composant catalogue : la spec interne est scellée —
                 // même borne que le formulaire client (params via
                 // `comp set`, internals = propriété de l'entrée). Le
                 // démon refuserait aussi l'upsert ; erreur claire ici.
                 const SEALED: [&str; 10] = [
-                    "--kind", "--cmd", "--hc", "--env", "--cwd",
-                    "--restart", "--rsec", "--vargv", "--vmin",
+                    "--kind",
+                    "--cmd",
+                    "--hc",
+                    "--env",
+                    "--cwd",
+                    "--restart",
+                    "--rsec",
+                    "--vargv",
+                    "--vmin",
                     "--view-dir",
                 ];
                 // Scan pairwise — un flag à valeur consomme le token
@@ -543,8 +570,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 if !envs.is_empty() {
                     let mut env = std::collections::HashMap::new();
                     for kv in envs {
-                        let (k, v) =
-                            kv.split_once('=').context("--env K=V expected")?;
+                        let (k, v) = kv.split_once('=').context("--env K=V expected")?;
                         anyhow::ensure!(!k.is_empty(), "--env K=V expected (empty key)");
                         env.insert(k.to_string(), v.to_string());
                     }
@@ -574,14 +600,12 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                         .transpose()?;
                 }
                 if let Some(v) = flag_val(f, "--vmin") {
-                    spec.min_version =
-                        (!v.trim().is_empty()).then(|| v.to_string());
+                    spec.min_version = (!v.trim().is_empty()).then(|| v.to_string());
                 }
                 // Vide = retrait de la déclaration (retombe sur la
                 // convention components/<name>/web/ côté démon).
                 if let Some(v) = flag_val(f, "--view-dir") {
-                    spec.view_dir =
-                        (!v.trim().is_empty()).then(|| v.to_string());
+                    spec.view_dir = (!v.trim().is_empty()).then(|| v.to_string());
                 }
             }
             if let Some(v) = flag_val(f, "--desc") {
@@ -589,10 +613,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             }
             let on = f.iter().any(|a| a == "--autostart");
             let off = f.iter().any(|a| a == "--no-autostart");
-            anyhow::ensure!(
-                !(on && off),
-                "--autostart et --no-autostart sont exclusifs"
-            );
+            anyhow::ensure!(!(on && off), "--autostart et --no-autostart sont exclusifs");
             if on {
                 spec.autostart = true;
             }

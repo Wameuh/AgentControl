@@ -360,7 +360,6 @@ impl Components {
                         version_min,
                         version_outdated,
                         config_required,
-                        ..Default::default()
                     },
                     None => ComponentStatus {
                         version,

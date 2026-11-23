@@ -667,10 +667,16 @@ mod tests {
             "[::1]:7331",
             "localhost:7331",
         ] {
-            assert!(check_loopback("t", a, None).await.is_ok(), "{a} should pass");
+            assert!(
+                check_loopback("t", a, None).await.is_ok(),
+                "{a} should pass"
+            );
         }
         for a in ["0.0.0.0:7331", "192.168.1.10:7331", "[::]:7331"] {
-            assert!(check_loopback("t", a, None).await.is_err(), "{a} should fail");
+            assert!(
+                check_loopback("t", a, None).await.is_err(),
+                "{a} should fail"
+            );
         }
     }
 }

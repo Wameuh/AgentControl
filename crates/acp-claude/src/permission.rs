@@ -181,7 +181,7 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: Value, req
             // ExitPlanMode → « keep planning » : deny + interrupt.
             send_deny(shared, &ctrl_rid, "user chose to keep planning");
         }
-        (Some("selected"), _) | (Some("cancelled"), _) | _ => {
+        _ => {
             // reject / cancelled / erreur client → deny interrupt.
             send_deny(shared, &ctrl_rid, "user refused permission");
         }

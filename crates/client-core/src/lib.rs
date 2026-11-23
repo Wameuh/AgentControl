@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use proto::{ReqKind, Request, Response};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -125,7 +125,7 @@ impl LogWriter {
 }
 
 /// client.log → .1, .1 → .2, … au-delà de `keep` : supprimé.
-fn rotate_logs(dir: &PathBuf, keep: usize) {
+fn rotate_logs(dir: &Path, keep: usize) {
     let _ = std::fs::remove_file(dir.join(format!("client.log.{keep}")));
     for i in (1..keep).rev() {
         let src = dir.join(format!("client.log.{i}"));
@@ -1115,9 +1115,7 @@ pub fn classify_connect_stage2(
             // refermé = le démon a lâché la connexion ; une session morte
             // avec raison (disconnect, keepalive) reste un problème
             // transport/session.
-            Transport::SshNative { .. }
-                if death_reason.contains("direct-tcpip channel closed") =>
-            {
+            Transport::SshNative { .. } if death_reason.contains("direct-tcpip channel closed") => {
                 "daemon-absent"
             }
             // unix : socket accepté puis EOF = démon mort après accept.

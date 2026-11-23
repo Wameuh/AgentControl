@@ -166,10 +166,9 @@ fn normalize_workspace_vide() {
 #[test]
 fn normalize_rules_files_invalide() {
     // Globale : entrées invalides filtrées, valides conservées.
-    let mut c: OrchCfg = toml::from_str(
-        r#"rules_files = ["AGENTS.md", "/etc/motd", "../up.md", "docs/r.md"]"#,
-    )
-    .unwrap();
+    let mut c: OrchCfg =
+        toml::from_str(r#"rules_files = ["AGENTS.md", "/etc/motd", "../up.md", "docs/r.md"]"#)
+            .unwrap();
     c.normalize();
     assert_eq!(c.rules_files, ["AGENTS.md", "docs/r.md"]);
     // Toute invalide → défaut ; séparateurs/drive Windows refusés
