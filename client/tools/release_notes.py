@@ -121,7 +121,7 @@ def find_bound(ref):
 def bump_level(rev_range):
     # Règle mots-clés → niveau : detect_level de bump_version.py fait
     # foi (version.yml l'appelle en --detect-level) — pas de duplicata.
-    return detect_level(git("log", "--format=%B", rev_range))
+    return detect_level(git("log", "--format=%x1e%B", rev_range))
 
 
 def next_version(rev_range):
