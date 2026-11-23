@@ -107,6 +107,43 @@ jobs:
           done
 
   # -----------------------------------------------------------------
+  # Garde-fou taille de fichiers (N4) : la convention AGENTS.md fixe
+  # « Files ≤ 1000 lines » mais ~20 fichiers la dépassent déjà — on ne
+  # peut donc pas faire échouer le check sur l'existant. À la place,
+  # chaque PR signale (::warning::, annotation sur le fichier) les
+  # fichiers .rs/.ts touchés qui dépassent 1000 lignes ET qui grossissent
+  # par rapport à la base : la dérive est visible sans bloquer personne.
+  # PR uniquement (pas de base comparable sur push) ; fetch-depth: 0
+  # requis pour le merge-base du diff A...B.
+  # -----------------------------------------------------------------
+  size-guard:
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft != true
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fichiers > 1000 lignes en croissance (warning)
+        run: |
+          git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- '*.rs' '*.ts' \
+            | while IFS= read -r f; do
+                [ -f "$f" ] || continue
+                n=$(wc -l < "$f")
+                # Fichier absent de la base (nouveau) : baseline 0 — un
+                # `git show` direct echouerait et `bash -e -o pipefail`
+                # interromprait le job.
+                if git cat-file -e "origin/${{ github.base_ref }}:$f" 2>/dev/null; then
+                  b=$(git show "origin/${{ github.base_ref }}:$f" | wc -l)
+                else
+                  b=0
+                fi
+                if [ "$n" -gt 1000 ] && [ "$n" -gt "$b" ]; then
+                  echo "::warning file=$f::$n lines (> 1000, was $b)"
+                fi
+              done
+
+  # -----------------------------------------------------------------
   # Audit des dépendances : advisories Rust (Cargo.lock) + npm
   # (client/package-lock.json, prod uniquement, sévérité high+).
   # Les advisories non exploités/acceptés sont ignorés avec motif dans
