@@ -555,6 +555,21 @@ fn error_classify() {
     assert_eq!(classify_error("insufficient_quota"), "quota");
     assert_eq!(classify_error("You have run out of credits"), "quota");
     assert_eq!(classify_error("credit balance is too low"), "quota");
+    // Fenêtre glissante (Codex : « usage limit … try again in … ») :
+    // une échéance de reset exploitable → throttle `rate_limit`,
+    // JAMAIS `quota` — la panne se lève seule à l'heure annoncée.
+    assert_eq!(
+        classify_error(
+            "You've hit your usage limit. Try again in 3 hours 12 minutes (at 3:05 PM)."
+        ),
+        "rate_limit"
+    );
+    assert_eq!(
+        classify_error("usage limit reached — resets in 45 minutes"),
+        "rate_limit"
+    );
+    // « usage limit » SANS échéance parsable → forfait, bloqué.
+    assert_eq!(classify_error("You've hit your usage limit"), "quota");
     assert_eq!(classify_error("Invalid params: model foo"), "model");
     assert_eq!(classify_error("model not found"), "model");
     // codex-acp : refus de modèle ChatGPT-account (backend 400).

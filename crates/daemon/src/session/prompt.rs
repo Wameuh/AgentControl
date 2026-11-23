@@ -59,19 +59,26 @@ pub(super) fn classify_error(msg: &str) -> &'static str {
     // de profil agent. Volontairement restrictif : le « quota »
     // générique et les fenêtres de modèle gratuit Devin (« free
     // model rate limit … reset in … ») restent `rate_limit`.
-    if m.contains("usage limit")
-        || m.contains("usage_limit")
-        || m.contains("upgrade your plan")
-        || m.contains("monthly cycle")
-        || m.contains("billing cycle")
-        || m.contains("insufficient_quota")
-        || m.contains("insufficient quota")
-        || m.contains("out of credits")
-        || m.contains("insufficient credits")
-        || m.contains("credit balance")
-        || m.contains("credits exhausted")
-        || m.contains("spend limit")
-        || m.contains("spend_limit")
+    // Garde-fou fenêtre glissante : un message qui porte AUSSI une
+    // échéance de reset exploitable (« usage limit … try again in
+    // 3 hours », Codex) est un throttle à horizon — `rate_limit`,
+    // pas un forfait mort. Seule l'absence d'échéance fait basculer
+    // en `quota`.
+    let has_reset = parse_reset_at(msg, std::time::SystemTime::now()).is_some();
+    if !has_reset
+        && (m.contains("usage limit")
+            || m.contains("usage_limit")
+            || m.contains("upgrade your plan")
+            || m.contains("monthly cycle")
+            || m.contains("billing cycle")
+            || m.contains("insufficient_quota")
+            || m.contains("insufficient quota")
+            || m.contains("out of credits")
+            || m.contains("insufficient credits")
+            || m.contains("credit balance")
+            || m.contains("credits exhausted")
+            || m.contains("spend limit")
+            || m.contains("spend_limit"))
     {
         return "quota";
     }
@@ -82,6 +89,14 @@ pub(super) fn classify_error(msg: &str) -> &'static str {
         || m.contains("quota")
         || m.contains("too many requests")
         || m.contains("resource exhausted")
+        // « usage limit »/« spend limit » AVEC échéance parsable :
+        // fenêtre glissante (Codex « try again in 3 hours ») — le
+        // quota de forfait a été écarté plus haut, c'est un retry.
+        || (has_reset
+            && (m.contains("usage limit")
+                || m.contains("usage_limit")
+                || m.contains("spend limit")
+                || m.contains("spend_limit")))
     {
         return "rate_limit";
     }
