@@ -62,7 +62,7 @@ auto_resume = true
 # provider's equivalent) is never overwritten as long as its name does
 # not collide with an embedded skill. For a skill to be embedded in the
 # daemon (distributed to every install), add it in the AgentControl
-# repo under skills/<name>/SKILL.md — see AGENTS.md.
+# repo under skills/<name>/SKILL.md — see docs/maintainer.md.
 # ---------------------------------------------------------------------------
 # provision_skills = true
 

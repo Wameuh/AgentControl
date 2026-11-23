@@ -303,8 +303,10 @@ Prerequisites:
 - **Branch conventions** — worker/reviewer prompts assume the repo's
   own integration workflow (feature branch → PR on the integration
   branch → automated review → merge). The convention itself lives
-  in the repo's `AGENTS.md`; a repo without one falls back to the
-  generic git flow described by the prompt.
+  in the repo's rules file(s) — `rules_files` (default
+  `AGENTS.md,CLAUDE.md`, per-repo override) picks which; a repo
+  without one falls back to the generic git flow described by the
+  prompt.
 
 Optional knobs: `plan_review` (plan→review→implementation pipeline —
 needs agentbacklog ≥ 0.7), `pr_review` (native `/mr review` serving),

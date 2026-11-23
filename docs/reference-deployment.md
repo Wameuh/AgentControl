@@ -89,10 +89,20 @@ AgentControl = "/workspace"
 ```
 
 Items tagged `AgentControl` are worked in `/workspace` (this repo);
-untagged items fall back to the default `workspace`. The `AGENTS.md`
-workflow (`next_release` → `main`, worktrees under `~/worktrees/`,
+untagged items fall back to the default `workspace`. The rules-file
+workflow (`docs/maintainer.md` via `rules_files` —
+`next_release` → `main`, worktrees under `~/worktrees/`,
 review/merge rules) is the rules contract read by every spawned
-session.
+session. This repo splits its rules: `AGENTS.md` is the short
+contributor guide and `docs/maintainer.md` the full maintainer
+workflow — the deployment sets `rules_files` so orchestrated workers
+read the maintainer doc first (`AGENTS.md` stays the fallback and the
+default for external repos):
+
+```bash
+acctl comp set backlog-orchestrator \
+  rules_files "docs/maintainer.md,AGENTS.md"
+```
 
 ## 4. Rollout notes — supervisord → internal orchestrator
 
