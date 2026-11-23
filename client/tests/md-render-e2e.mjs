@@ -464,6 +464,33 @@ check("N6 save never : les 3 liens simples + conversions restent",
 check("N6 save never : « self » épargnée par le sweep", (await im2()) === 1);
 await p2.evaluate(() => document.getElementById("settings-close")?.click());
 await sleep(300);
+
+// « always » → « click » à chaud : les <img> distantes déjà rendues
+// rétrogradent en placeholders — sinon un lazy-load hors écran
+// partirait sans geste (review P2). « self » reste affichée.
+extReqs2.length = 0;
+await reopen2("always", null);
+await p2.evaluate(() => document.getElementById("tb-settings")?.click());
+await sleep(400);
+await p2.evaluate(() => {
+  const s = document.getElementById("s-images");
+  s.value = "click";
+  s.dispatchEvent(new Event("change", { bubbles: true }));
+});
+await sleep(200);
+await p2.evaluate(() => document.getElementById("s-save")?.click());
+await sleep(500);
+check("N6 save click : <img> distantes rétrogradées en placeholders",
+  (await ph2()) === 4 && (await im2()) === 1, `ph=${await ph2()} img=${await im2()}`);
+check("N6 save click : les liens example.com restent",
+  (await p2.evaluate(() =>
+    document.querySelectorAll('#events a[href^="https://example.com"]').length)) === 3);
+await p2.evaluate(() => document.getElementById("settings-close")?.click());
+await sleep(300);
+await p2.evaluate(() => document.querySelector("#events .md-img-ph")?.click());
+await sleep(500);
+check("N6 save click : placeholder rétrogradé charge au clic",
+  extReqs2.some((u) => u.includes("a.png")), extReqs2.join(","));
 await p2.close();
 
 console.log(`\n${pass} PASS, ${fail} FAIL`);

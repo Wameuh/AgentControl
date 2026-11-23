@@ -114,13 +114,25 @@ export function expandImgPh(target: HTMLElement): boolean {
   return true;
 }
 
+/** Version DOM de imgPh — pour la rétrogradation <img>→placeholder
+ *  du sweep réglages (même bouton que le rendu, dataset/textContent). */
+const imgPhEl = (src: string, alt: string): HTMLButtonElement => {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "md-img-ph";
+  b.dataset.src = src;
+  b.dataset.alt = alt;
+  b.textContent = t("img_ph", { host: imgHost(src) || src });
+  return b;
+};
+
 /** Ré-applique la politique courante au contenu déjà rendu — appelé à
  *  l'enregistrement des réglages, le chat/viewer n'étant pas re-rendus :
  *  « never » est absolu — placeholders restants et <img> distantes
- *  déjà insérées redeviennent de simples liens (la requête passée ne
- *  s'annule pas mais plus rien de chargeable n'est exposé) ; « always »
- *  ou une whitelist élargie ouvre les placeholders restants ; un
- *  placeholder dont l'hôte reste non fiable est inchangé. */
+ *  déjà insérées redeviennent de simples liens ; « click » rétrograde
+ *  les <img> distantes non fiables en placeholders (un lazy-load
+ *  différé ne doit pas partir sans geste) ; « always » ou une
+ *  whitelist élargie ouvre les placeholders restants. */
 export function refreshImgPolicy(root: ParentNode = document): void {
   root.querySelectorAll<HTMLButtonElement>(".md-img-ph").forEach((btn) => {
     const src = btn.dataset.src;
@@ -132,12 +144,17 @@ export function refreshImgPolicy(root: ParentNode = document): void {
   });
   root.querySelectorAll<HTMLImageElement>("img.md-img").forEach((img) => {
     const src = img.getAttribute("src") ?? "";
-    if (!/^https?:/i.test(src) || imgRender(src) !== "none") return;
-    const link = imgLinkEl(src, img.alt);
+    if (!/^https?:/i.test(src)) return;
+    const r = imgRender(src);
+    if (r === "img") return;
+    const nodes: Node[] =
+      r === "none"
+        ? [imgLinkEl(src, img.alt)]
+        : [imgLinkEl(src, img.alt), imgPhEl(src, img.alt)];
     const wrap = img.parentElement;
     if (wrap?.tagName === "A" && wrap.childNodes.length === 1)
-      wrap.replaceWith(link);
-    else img.replaceWith(link);
+      wrap.replaceWith(...nodes);
+    else img.replaceWith(...nodes);
   });
 }
 
