@@ -3,8 +3,8 @@
 // syntaxique, diffs, tailles/compteurs. Fonctions pures (DOM pour esc()).
 // ---------------------------------------------------------------------------
 
-import { esc, q } from "./dom";
-import { t } from "../i18n";
+import { esc, q } from "./escape.ts";
+import { t } from "../i18n/index.ts";
 
 // Option « images en ligne » (Settings) : politique de chargement des
 // images DISTANTES (http/https) dans les rendus markdown et linkify —
@@ -167,7 +167,7 @@ export function linkify(escaped: string): string {
   // par FILE_RE ni corrompues par le markup)
   const urls: string[] = [];
   let work = escaped.replace(/https?:\/\/[^\s<\x00]+/g, (m) => {
-    const clean = m.replace(/(?:&(?:quot|#39|lt|gt);|[.,;:!?)\]])+$/, "");
+    const clean = trimUrlEnd(m);
     const r = IMG_URL_RE.test(clean) ? imgRender(clean) : "none";
     const inner =
       r === "img"
@@ -185,6 +185,26 @@ export function linkify(escaped: string): string {
     return `<span class="flink" data-path="${q(clean)}">${clean}</span>${m.slice(clean.length)}`;
   });
   return work.replace(/\x00U(\d+)\x00/g, (_m, i: string) => urls[+i]);
+}
+
+// Ponctuation/entity finale écartée d'une URL nue — les ')' ne sont
+// retirées que si elles déséquilibrent les parenthèses de l'URL
+// (https://x/a_(b) reste entier, https://x/a) perd son ')' orphelin).
+const URL_TRAIL = /(?:&(?:quot|#39|lt|gt);|[.,;:!?\]])+$/;
+function trimUrlEnd(u: string): string {
+  let s = u;
+  for (;;) {
+    const n = s.replace(URL_TRAIL, "");
+    if (n === s) break;
+    s = n;
+  }
+  while (s.endsWith(")")) {
+    const open = (s.match(/\(/g) ?? []).length;
+    const close = (s.match(/\)/g) ?? []).length;
+    if (close <= open) break;
+    s = s.slice(0, -1).replace(URL_TRAIL, "");
+  }
+  return s;
 }
 
 /** Colorise les lignes de diff (+add / -del / @@ hunks) dans le texte. */
@@ -241,6 +261,154 @@ export function highlight(code: string, ext: string): string {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Liens inline […](…) / ![…](…) — parseur manuel sur le texte échappé.
+// Les regex historiques ([^)]* pour l'URL, [^\]]* pour le texte)
+// cassaient sur les destinations à parenthèses (wikipedia…), les textes
+// à crochets imbriqués, les destinations <…> avec espaces et les titres.
+// Formes acceptées (proche CommonMark) :
+//   [t](https://x/y_(z))          parenthèses équilibrées dans la dest
+//   [t](<mon fichier.md>)         destination entre <…> (espaces admis)
+//   [t](docs/a.md "titre")        titre optionnel "…" '…' (…)
+//   [a [b] c](https://x)          crochets équilibrés dans le texte
+// Destinataire :
+//   http(s)         → <a target=_blank> / <img> selon la politique image
+//   chemin (pas de schéma URI, hors #ancre) → .flink data-path — le
+//                     viewer de fichiers les ouvre (résolution relative
+//                     au dossier du .md) ; dans le chat ils restent
+//                     stylés comme les chemins nus de linkify
+//   #ancre, autre schéma (mailto:, javascript:…) → libellé seul, JAMAIS
+//                     d'href : initExternalLinks n'ouvre que http(s) et
+//                     la webview naviguerait sur le relatif.
+// ---------------------------------------------------------------------------
+
+const MD_WS = new Set([" ", "\t", "\n", "\r"]);
+const MD_SCHEME = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+// `C:\…`/`C:/…` ressemble à un schéma mais est un chemin Windows.
+const MD_WIN_PATH = /^[a-zA-Z]:[\\/]/;
+
+interface MdLink {
+  end: number; // index juste après le ')' final
+  bang: boolean; // préfixe '!' → image
+  text: string; // libellé (échappé, crochets internes conservés)
+  dest: string; // destination (échappée, <…> et titre retirés)
+  title: string | null;
+}
+
+/// Parse « […](…) » ou « ![…](…) » à partir de s[i] ('[' ou '!').
+/// null = pas un lien valide → le texte reste tel quel (jamais de
+/// réparation à l'aveugle : une parenthèse orpheline casse le match).
+function mdLinkAt(s: string, i: number): MdLink | null {
+  const bang = s[i] === "!";
+  const b = bang ? i + 1 : i;
+  if (s[b] !== "[") return null;
+  // Texte du lien : crochets équilibrés (un '[' interne doit être fermé).
+  let j = b + 1;
+  let depth = 1;
+  while (j < s.length && depth) {
+    if (s[j] === "[") depth++;
+    else if (s[j] === "]") depth--;
+    j++;
+  }
+  if (depth || s[j] !== "(") return null;
+  const text = s.slice(b + 1, j - 1);
+  // Destination : <…> (&lt;…&gt; après échappement, espaces admis) ou
+  // suite sans blanc ni ')' non appariée.
+  let k = j + 1;
+  while (k < s.length && MD_WS.has(s[k])) k++;
+  let dest = "";
+  if (s.startsWith("&lt;", k)) {
+    const gt = s.indexOf("&gt;", k + 4);
+    if (gt < 0) return null;
+    dest = s.slice(k + 4, gt);
+    k = gt + 4;
+  } else {
+    const d0 = k;
+    let p = 0;
+    while (k < s.length) {
+      const c = s[k];
+      if (c === "(") p++;
+      else if (c === ")") {
+        if (!p) break;
+        p--;
+      } else if (MD_WS.has(c)) break;
+      k++;
+    }
+    dest = s.slice(d0, k);
+    if (!dest) return null;
+  }
+  // Espaces puis ')' — ou titre optionnel ("…" '…' (…) sans imbrication)
+  // puis ')'.
+  while (k < s.length && MD_WS.has(s[k])) k++;
+  let title: string | null = null;
+  if (s[k] !== ")") {
+    const open = s[k];
+    let close = -1;
+    if (open === '"' || open === "'") close = s.indexOf(open, k + 1);
+    else if (open === "(") {
+      const e = s.indexOf(")", k + 1);
+      if (e >= 0 && !s.slice(k + 1, e).includes("(")) close = e;
+    }
+    if (close < 0) return null;
+    title = s.slice(k + 1, close);
+    k = close + 1;
+    while (k < s.length && MD_WS.has(s[k])) k++;
+    if (s[k] !== ")") return null;
+  }
+  if (!dest) return null;
+  return { end: k + 1, bang, text, dest, title };
+}
+
+/// HTML d'un lien/image parsé — null = « libellé seul » (ancre ou
+/// schéma non-http) : le texte est recopié brut pour garder le gras.
+function mdLinkHtml(l: MdLink): string | null {
+  const { bang, text, dest, title } = l;
+  if (/^https?:\/\//i.test(dest)) {
+    if (!bang) {
+      const ttl = title ? ` title="${q(title)}"` : "";
+      return `<a href="${q(dest)}" target="_blank" rel="noopener noreferrer"${ttl}>${text}</a>`;
+    }
+    const r = imgRender(dest);
+    return r === "img"
+      ? `<a href="${q(dest)}" target="_blank" rel="noopener noreferrer">` +
+          `<img class="md-img" src="${q(dest)}" alt="${q(text)}" loading="lazy"></a>`
+      : `<a href="${q(dest)}" target="_blank" rel="noopener noreferrer">${text || dest}</a>` +
+          (r === "ph" ? imgPh(dest, text) : "");
+  }
+  // Ancre ou schéma non-http (mailto:, javascript:, data:…) : jamais
+  // d'href — la navigation relative/media: casserait la webview.
+  if (dest.startsWith("#") || (MD_SCHEME.test(dest) && !MD_WIN_PATH.test(dest)))
+    return null;
+  // Chemin → .flink : cliquable dans le viewer (relatif au dossier du
+  // fichier), simplement stylé dans le chat — même sort que les chemins
+  // nus produits par linkify.
+  const label = bang ? text || dest : text;
+  return `<span class="flink" data-path="${q(dest)}">${label}</span>`;
+}
+
+/// Remplace chaque […](…) / ![…](…) valide par son HTML via `stash`
+/// (les marqueurs \x00B imbriqués — code inline dans le libellé — sont
+/// résolus au fixpoint final, comme les anciens placeholders).
+function mdLinks(work: string, stash: (html: string) => string): string {
+  let out = "";
+  let i = 0;
+  while (i < work.length) {
+    const c = work[i];
+    if (c === "[" || (c === "!" && work[i + 1] === "[")) {
+      const l = mdLinkAt(work, i);
+      if (l) {
+        const html = mdLinkHtml(l);
+        out += html === null ? l.text : stash(html);
+        i = l.end;
+        continue;
+      }
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
 /** Rendu markdown minimal et sûr : échappement HTML d'abord, blocs de code
  *  et liens extraits en placeholders (ni linkify ni inline-md ne les corrompt). */
 export function mdRender(src: string): string {
@@ -256,31 +424,16 @@ export function mdRender(src: string): string {
   // 2) échappement du reste
   work = esc(work);
 
-  // 3) images ![alt](https://…) avant les liens (le ![…] matcherait […](…))
-  work = work.replace(
-    /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g,
-    (_m, alt: string, url: string) => {
-      const r = imgRender(url);
-      return r === "img"
-        ? stash(
-            `<a href="${q(url)}" target="_blank" rel="noopener noreferrer">` +
-              `<img class="md-img" src="${q(url)}" alt="${q(alt)}" loading="lazy"></a>`,
-          )
-        : stash(
-            `<a href="${q(url)}" target="_blank" rel="noopener noreferrer">${alt || url}</a>` +
-              (r === "ph" ? imgPh(url, alt) : ""),
-          );
-    },
-  );
+  // 3) images ![…](…) et liens […](…) — parseur manuel (le texte est
+  //    déjà échappé) : parenthèses équilibrées dans la destination,
+  //    forme <…> et titre optionnel, crochets imbriqués équilibrés.
+  //    http(s) → <a>/<img> ; chemin (relatif, /abs, ~/) → .flink
+  //    (ouvrable dans le viewer) ; ancre #… ou autre schéma → libellé
+  //    seul — jamais d'href non-http (initExternalLinks les ignorerait
+  //    et la webview naviguerait sur le relatif).
+  work = mdLinks(work, stash);
 
-  // 4) liens markdown [t](https://…) → placeholder (avant linkify)
-  work = work.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
-    (_m, tx: string, url: string) =>
-      stash(`<a href="${q(url)}" target="_blank" rel="noopener noreferrer">${tx}</a>`),
-  );
-
-  // 5) inline : gras / italique / barré
+  // 4) inline : gras / italique / barré
   work = work
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\b__([^_]+)__\b/g, "<strong>$1</strong>")
@@ -288,10 +441,10 @@ export function mdRender(src: string): string {
     .replace(/(?<![\w_])_([^_\n]+)_(?![\w_])/g, "<em>$1</em>")
     .replace(/~~([^~]+)~~/g, "<del>$1</del>");
 
-  // 6) chemins de fichiers cliquables (hors blocs extraits)
+  // 5) chemins de fichiers cliquables (hors blocs extraits)
   work = linkify(work);
 
-  // 7) structure de blocs : headers, hr, citations, tables, listes, paragraphes
+  // 6) structure de blocs : headers, hr, citations, tables, listes, paragraphes
   const lines = work.split("\n");
   const isBlockStart = (l: string) =>
     /^\x00B\d+\x00\s*$/.test(l.trim()) ||
@@ -372,8 +525,8 @@ export function speechText(src: string): string {
   return src
     .replace(/```[\s\S]*?(?:```|$)/g, " ")
     .replace(/`([^`\n]+)`/g, "$1")
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/!\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\((?:[^()]|\([^()]*\))*\)/g, "$1")
     .replace(/<[^>]+>/g, " ")
     .replace(/https?:\/\/\S+/g, " ")
     .replace(/^#{1,6}\s+/gm, "")
