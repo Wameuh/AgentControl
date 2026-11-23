@@ -20,6 +20,7 @@ import { t, type Key } from "../i18n";
 
 interface Smaps {
   rss_mb?: number | null;
+  pss_mb?: number | null;
   anon_mb?: number | null;
   shared_mb?: number | null;
   private_mb?: number | null;
@@ -35,7 +36,12 @@ interface ProcMember {
 interface ProcGroup {
   role: string;
   count: number;
+  /** Somme brute des RSS des membres (pages partagées comptées en
+   *  double entre process). */
   rss_mb: number;
+  /** Total comptable (Pss — pages partagées réparties) quand le
+   *  démon l'a mesuré ; prioritaire sur rss_mb à l'affichage. */
+  pss_mb?: number | null;
   name?: string;
   smaps?: Smaps | null;
   members?: ProcMember[];
@@ -94,6 +100,7 @@ function smapsLine(s: Smaps): string {
   const push = (labelKey: Key, v?: number | null) => {
     if (typeof v === "number") parts.push(`${t(labelKey)} ${mb(v)}`);
   };
+  push("mem_smaps_pss", s.pss_mb);
   push("mem_smaps_anon", s.anon_mb);
   push("mem_smaps_priv", s.private_mb);
   push("mem_smaps_shared", s.shared_mb);
@@ -119,7 +126,13 @@ function renderProcs(body: HTMLElement, data: MemBreakdown | null) {
     const dimParts: string[] = [];
     if (p.count > 1) dimParts.push(`×${p.count}`);
     if (p.name) dimParts.push(p.name);
-    row(sec, label, mb(p.rss_mb), dimParts.join(" · ") || undefined);
+    // pss_mb = total sans double comptage des pages partagées ; la
+    // somme RSS brute reste visible en sous-ligne pour le détail.
+    const shown = p.pss_mb ?? p.rss_mb;
+    if (p.pss_mb != null && p.pss_mb !== p.rss_mb) {
+      dimParts.push(`RSS ${mb(p.rss_mb)}`);
+    }
+    row(sec, label, mb(shown), dimParts.join(" · ") || undefined);
     if (p.smaps) {
       const line = smapsLine(p.smaps);
       if (line) {

@@ -599,6 +599,7 @@ export const es: Record<Key, string> = {
   mem_role_gpu: "gpu",
   mem_role_other: "otros procesos",
   mem_smaps_of: "espacio de {what}",
+  mem_smaps_pss: "proporcional",
   mem_smaps_anon: "heap",
   mem_smaps_priv: "privado",
   mem_smaps_shared: "compartido",

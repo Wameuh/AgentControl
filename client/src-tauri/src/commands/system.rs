@@ -160,10 +160,10 @@ fn mem_role(name: &str, cmdline: &str) -> &'static str {
     "other"
 }
 
-/// `/proc/<pid>/smaps_rollup` → champs kB convertis en Mo (1 décimale).
+/// `/proc/<pid>/smaps_rollup` → champs kB (bruts, non convertis).
 /// `None` hors Linux, si le fichier est illisible (permissions, noyau
 /// sans CONFIG_*) ou si le process a disparu entre-temps.
-fn smaps_rollup(pid: u32) -> Option<Value> {
+fn smaps_rollup_kb(pid: u32) -> Option<std::collections::HashMap<String, f64>> {
     let text = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?;
     let mut m = std::collections::HashMap::new();
     for line in text.lines() {
@@ -181,6 +181,14 @@ fn smaps_rollup(pid: u32) -> Option<Value> {
     if m.is_empty() {
         return None;
     }
+    Some(m)
+}
+
+/// `/proc/<pid>/smaps_rollup` → champs kB convertis en Mo (1 décimale).
+/// `None` hors Linux, si le fichier est illisible (permissions, noyau
+/// sans CONFIG_*) ou si le process a disparu entre-temps.
+fn smaps_rollup(pid: u32) -> Option<Value> {
+    let m = smaps_rollup_kb(pid)?;
     let mb = |k: &str| {
         m.get(k).map(|kb| ((kb / 1024.0) * 10.0).round() / 10.0)
     };
@@ -192,11 +200,30 @@ fn smaps_rollup(pid: u32) -> Option<Value> {
     };
     Some(json!({
         "rss_mb": mb("Rss"),
+        "pss_mb": mb("Pss"),
         "anon_mb": mb("Anonymous"),
         "shared_mb": pair("Shared_Clean", "Shared_Dirty"),
         "private_mb": pair("Private_Clean", "Private_Dirty"),
         "swap_mb": mb("Swap"),
     }))
+}
+
+/// Mémoire « comptable » d'un process pour les totaux de groupe :
+/// `Pss` de smaps_rollup quand lisible — les pages partagées y sont
+/// comptées proportionnellement entre les processus qui les
+/// mappent, donc la somme des groupes ne double-compte plus les
+/// bibliothèques communes (WebKit, polices, cache…) ; RSS sinon
+/// (plateforme sans /proc, process disparu, permissions).
+fn accounted_mb(rss_mb: f64, pss_mb: Option<f64>) -> f64 {
+    pss_mb.unwrap_or(rss_mb)
+}
+
+/// Somme des mémoires comptables d'un groupe — helper pur, testé.
+fn group_accounted_mb(members: &[(f64, Option<f64>)]) -> f64 {
+    members
+        .iter()
+        .map(|&(rss, pss)| accounted_mb(rss, pss))
+        .sum()
 }
 
 /// Répartition mémoire du client, calculée À L'APPEL (clic sur
@@ -206,6 +233,11 @@ fn smaps_rollup(pid: u32) -> Option<Value> {
 /// groupe quand lisible (Linux — `/proc/<pid>/smaps_rollup`). Le web
 /// process est typiquement le plus gros : c'est LA réponse au « 400
 /// MB » de la barre, qui n'affiche que le RSS du process hôte.
+/// Chaque groupe expose `rss_mb` (somme brute) et `pss_mb` (total
+/// comptable — Pss de smaps_rollup : les pages partagées sont
+/// réparties entre les processus, plus de double comptage) ; les
+/// threads du process ne sont pas des membres (leur RSS serait
+/// celle du process entier, répétée).
 /// Hors Linux ou sans enfant identifiable : `procs` ne contient que
 /// `app` — dégradé gracieux, jamais d'erreur.
 #[tauri::command]
@@ -219,8 +251,16 @@ pub(crate) async fn mem_breakdown(state: State<'_, AppState>) -> Result<Value, S
 
     // Descendants du pid courant via parent() (sysinfo 0.32 n'expose
     // pas children() — on reconstruit l'arbre depuis la map complète).
+    // Les threads sont exclus : sysinfo énumère /proc/<pid>/task/<tid>
+    // comme des « process » enfants du leader (thread_kind = Userland),
+    // avec la RSS du process ENTIER — les compter en membres et en
+    // somme de groupe multipliait la mémoire affichée (~87 lignes à
+    // valeur identique dans le panneau).
     let mut kids: std::collections::HashMap<u32, Vec<u32>> = Default::default();
     for (p, pr) in sys.processes() {
+        if pr.thread_kind().is_some() {
+            continue;
+        }
         if let Some(pp) = pr.parent() {
             kids.entry(pp.as_u32()).or_default().push(p.as_u32());
         }
@@ -240,6 +280,10 @@ pub(crate) async fn mem_breakdown(state: State<'_, AppState>) -> Result<Value, S
     struct Group {
         count: usize,
         rss: u64,
+        // (rss_mb, pss_mb) par membre — la somme « comptable » (Pss
+        // quand lisible) évite de compter les pages partagées en
+        // double entre les groupes.
+        mem: Vec<(f64, Option<f64>)>,
         biggest: Option<(u32, String, u64)>,
         members: Vec<Value>,
     }
@@ -257,21 +301,27 @@ pub(crate) async fn mem_breakdown(state: State<'_, AppState>) -> Result<Value, S
             .join(" ");
         let role = mem_role(&name, &cmdline);
         let rss = pr.memory();
+        let rss_mb = rss as f64 / 1_048_576.0;
+        let pss_mb = smaps_rollup_kb(dp)
+            .and_then(|m| m.get("Pss").copied())
+            .map(|kb| kb / 1024.0);
         let g = groups.entry(role).or_default();
         g.count += 1;
         g.rss += rss;
+        g.mem.push((rss_mb, pss_mb));
         if g.biggest.as_ref().map(|&(_, _, r)| rss > r).unwrap_or(true) {
             g.biggest = Some((dp, name.clone(), rss));
         }
         g.members.push(json!({
             "pid": dp,
             "name": name,
-            "rss_mb": (rss as f64 / 1_048_576.0 * 10.0).round() / 10.0,
+            "rss_mb": (rss_mb * 10.0).round() / 10.0,
         }));
     }
 
-    // Une ligne par groupe, triée par RSS décroissante — le plus gros
-    // process (typiquement le web content) est lu en premier.
+    // Une ligne par groupe, triée par mémoire comptable décroissante —
+    // le plus gros process (typiquement le web content) est lu en
+    // premier.
     let host = sys.process(pid).ok_or("process not found")?;
     let mut procs = vec![json!({
         "role": "app",
@@ -282,7 +332,6 @@ pub(crate) async fn mem_breakdown(state: State<'_, AppState>) -> Result<Value, S
         "members": [],
     })];
     let mut rest: Vec<(&'static str, Group)> = groups.into_iter().collect();
-    rest.sort_by_key(|(_, g)| std::cmp::Reverse(g.rss));
     for (role, mut g) in rest {
         let (big_pid, big_name, _) = g.biggest.take().unwrap_or((0, String::new(), 0));
         g.members.sort_by(|a, b| {
@@ -291,20 +340,28 @@ pub(crate) async fn mem_breakdown(state: State<'_, AppState>) -> Result<Value, S
                 .partial_cmp(&a["rss_mb"].as_f64())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        // `rss_mb` = somme brute (informe), `pss_mb` = total comptable
+        // quand au moins un membre a exposé Pss — le frontend affiche
+        // pss_mb en priorité : les pages partagées ne sont plus
+        // additionnées en double.
+        let pss_seen = g.mem.iter().any(|(_, p)| p.is_some());
         procs.push(json!({
             "role": role,
             "count": g.count,
             "rss_mb": (g.rss as f64 / 1_048_576.0 * 10.0).round() / 10.0,
+            "pss_mb": if pss_seen {
+                Some((group_accounted_mb(&g.mem) * 10.0).round() / 10.0)
+            } else {
+                None
+            },
             "name": big_name,
             "smaps": if big_pid != 0 { smaps_rollup(big_pid) } else { None },
             "members": g.members,
         }));
     }
     procs.sort_by(|a, b| {
-        b["rss_mb"]
-            .as_f64()
-            .partial_cmp(&a["rss_mb"].as_f64())
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let key = |v: &Value| v["pss_mb"].as_f64().or_else(|| v["rss_mb"].as_f64());
+        key(b).partial_cmp(&key(a)).unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(json!({ "procs": procs }))
 }
@@ -399,6 +456,23 @@ mod tests {
         // Contre-exemple : la version f32 sérialise la queue binaire.
         let bad = json!({ "cpu": (cpu_f32 * 10.0).round() / 10.0 });
         assert_ne!(bad["cpu"].to_string(), "33.3");
+    }
+
+    /// Pages partagées : deux process qui mappent la même lib ont une
+    /// RSS qui la compte chacun ; leur Pss la répartit. Le total de
+    /// groupe doit suivre le Pss quand il existe, pas la somme des RSS.
+    #[test]
+    fn group_total_prefers_pss_over_rss() {
+        // Process A : 400 RSS / 300 Pss ; B : 200 RSS / 150 Pss
+        // (50 Mo de pages communes partagées entre les deux).
+        let members = [(400.0, Some(300.0)), (200.0, Some(150.0))];
+        assert_eq!(group_accounted_mb(&members), 450.0);
+        // Sans Pss lisible (non-Linux, process disparu) : repli RSS.
+        let members = [(400.0, None), (200.0, None)];
+        assert_eq!(group_accounted_mb(&members), 600.0);
+        // Mixte : chaque membre contribue par sa meilleure mesure.
+        let members = [(400.0, Some(300.0)), (200.0, None)];
+        assert_eq!(group_accounted_mb(&members), 500.0);
     }
 }
 
