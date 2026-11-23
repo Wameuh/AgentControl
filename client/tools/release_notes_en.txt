@@ -229,3 +229,10 @@ sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart
 441: [skip] CI-internal fix of the release-bump scan bound (revert/reset markers), no user-facing change
 442: Provider quota handling split in two — Devin free-model windows now honor the announced reset time (composed durations like "4 hours 20 minutes" up to 24h, no more retries before the reset, 8h backoff when no reset is parseable), while exhausted plans/credits (Cursor monthly usage limit, "upgrade your plan", insufficient_quota) become a durable "quota" error state with no auto-retry instead of looping; PR reviews on a quota-blocked reviewer fail explicitly and provider failover covers both kinds.
 443: Markdown links in agent replies now render correctly — URLs with parentheses, link texts with brackets, angle-bracket destinations, titles and relative/file links all parse; file links open in the side viewer.
+412: [skip] internal CI test workflow, no user-facing change
+414: Automatic PR reviews now run only on trusted changes — pull requests from forks or authors without a trusted association no longer spawn reviewer sessions, so untrusted diff content never reaches a review agent; human-triggered reviews are unaffected.
+423: The orchestrator's model dropdowns now offer the real Devin model catalog — model, planner, reviewer and per-worker model fields become pickers backed by the probed list instead of free text.
+424: Backend errors (updates, pairing, file and session operations) now show translated messages in all four UI languages instead of raw English text, and orchestrator agent prompts are now written in English.
+430: The backlog orchestrator's workflow rules file is now configurable — a `rules_files` parameter (default `AGENTS.md,CLAUDE.md`) controls which repo files are injected into agent prompts, with per-repo overrides.
+432: [skip] internal release-bump CI fix, no user-facing change
+433: Fixed PR reviewer sessions failing to start when the reviewer's agent differs from the globally configured agent — the global effort setting is no longer applied to an agent that does not support it.
