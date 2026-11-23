@@ -35,9 +35,12 @@ export const imgTrustedHosts = (): string[] =>
     .map((h) => h.trim().toLowerCase())
     .filter(Boolean);
 
+/** Hôte d'une URL distante — `hostname` (sans port) : la whitelist
+ *  fait confiance à un domaine, pas à un couple hôte:port —
+ *  `example.com` couvre `example.com:8443` et ses sous-domaines. */
 const imgHost = (url: string): string => {
   try {
-    return new URL(url).host.toLowerCase();
+    return new URL(url).hostname.toLowerCase();
   } catch {
     return "";
   }
