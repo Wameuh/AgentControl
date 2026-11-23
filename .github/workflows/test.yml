@@ -144,10 +144,10 @@ jobs:
               done
 
   # -----------------------------------------------------------------
-  # Audit des dépendances : advisories Rust (Cargo.lock) + npm
-  # (client/package-lock.json, prod uniquement, sévérité high+).
-  # Les advisories non exploités/acceptés sont ignorés avec motif dans
-  # .cargo/audit.toml ; le lockfile client/src-tauri n'est pas couvert.
+  # Audit des dépendances : advisories Rust (Cargo.lock racine ET
+  # client/src-tauri — workspace séparé) + npm (client/package-lock.json,
+  # prod uniquement, sévérité high+). Un advisory non exploité/accepté
+  # s'ignore avec motif dans .cargo/audit.toml (à recréer au besoin).
   # -----------------------------------------------------------------
   audit:
     if: github.event.pull_request.draft != true
@@ -163,6 +163,14 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      # Lockfile du workspace séparé client/src-tauri (tauri) — les
+      # ignores .cargo/audit.toml ne s'y appliquent pas : un futur
+      # advisory non exploité y vivrait dans son propre
+      # client/src-tauri/.cargo/audit.toml.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: client/src-tauri
       # npm ci + audit sur le lockfile client — setup-node explicite
       # plutôt que le Node préinstallé du runner (version non garantie).
       - uses: actions/setup-node@v4
