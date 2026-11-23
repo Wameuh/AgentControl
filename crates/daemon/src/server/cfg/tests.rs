@@ -159,6 +159,44 @@ fn normalize_workspace_vide() {
     assert_eq!(c.workspace, "/custom/ws");
 }
 
+/// `rules_files` édité à la main dans config.toml passe par
+/// `normalize` sans `apply_patch` : les entrées hors forme
+/// (absolu, `..`, vide) sont rejetées — globales ET overrides —
+/// et une liste entièrement invalide retombe sur le défaut.
+#[test]
+fn normalize_rules_files_invalide() {
+    // Globale : entrées invalides filtrées, valides conservées.
+    let mut c: OrchCfg = toml::from_str(
+        r#"rules_files = ["AGENTS.md", "/etc/motd", "../up.md", "docs/r.md"]"#,
+    )
+    .unwrap();
+    c.normalize();
+    assert_eq!(c.rules_files, ["AGENTS.md", "docs/r.md"]);
+    // Toute invalide → défaut ; séparateurs/drive Windows refusés
+    // aussi (portable quel que soit l'OS qui vérifie).
+    let mut c: OrchCfg = toml::from_str(
+        r#"rules_files = ["/abs.md", "a/../b.md", "", "..\\up.md", "C:\\x\\r.md", "\\\\srv\\r.md", "C:r.md"]"#,
+    )
+    .unwrap();
+    c.normalize();
+    assert_eq!(c.rules_files, ["AGENTS.md", "CLAUDE.md"]);
+    // Override par repo : même filtre, vide = hérite du global.
+    let mut c: OrchCfg = toml::from_str(
+        r#"[review."o/r"]
+        rules_files = ["/etc/shadow", "docs/maintainer.md"]"#,
+    )
+    .unwrap();
+    c.normalize();
+    assert_eq!(c.rules_files_for("o/r"), ["docs/maintainer.md"]);
+    let mut c: OrchCfg = toml::from_str(
+        r#"[review."o/r"]
+        rules_files = ["../x.md"]"#,
+    )
+    .unwrap();
+    c.normalize();
+    assert_eq!(c.rules_files_for("o/r"), ["AGENTS.md", "CLAUDE.md"]);
+}
+
 /// `state_dir` : chemin custom pris tel quel, `~` expandé comme
 /// les cwd de session (expand_cwd).
 #[test]

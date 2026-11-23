@@ -26,6 +26,8 @@ fn prompts_pipeline_sans_workflow_en_dur() {
             "Verdict:",
             "ac-<feat>",
             "worktrees/ac",
+            "AGENTS.md",
+            "CLAUDE.md",
         ] {
             assert!(!tpl.contains(b), "« {b} » dans un prompt intégré");
         }
@@ -34,8 +36,8 @@ fn prompts_pipeline_sans_workflow_en_dur() {
 
 #[test]
 fn workflow_pairs_substituent_la_config() {
-    let get = |c: &cfg::OrchCfg, k: &str| {
-        workflow_pairs(c)
+    let get = |c: &cfg::OrchCfg, repo: &str, ws: &str, k: &str| {
+        workflow_pairs(c, repo, ws)
             .iter()
             .find(|(x, _)| *x == k)
             .unwrap()
@@ -45,18 +47,50 @@ fn workflow_pairs_substituent_la_config() {
     let mut c = cfg_default();
     // Défauts : BASE = integration_branch, WORKTREE_DIR =
     // worktree_dir ; pr_review off → renvoi aux règles du repo ;
-    // merge_rule vide → « règles du repo ».
-    assert_eq!(get(&c, "BASE"), c.integration_branch);
-    assert_eq!(get(&c, "WORKTREE_DIR"), c.worktree_dir);
-    assert!(get(&c, "REVIEW_TRIGGER").contains("repo's rules"));
-    assert!(get(&c, "MERGE_RULE").contains("repo's rules"));
+    // merge_rule vide → « règles du repo » ; RULES = rules_files
+    // (aucun n'existe sous /w → le premier de la liste fait foi).
+    assert_eq!(get(&c, "", "/w", "BASE"), c.integration_branch);
+    assert_eq!(get(&c, "", "/w", "WORKTREE_DIR"), c.worktree_dir);
+    assert!(get(&c, "", "/w", "REVIEW_TRIGGER").contains("repo's rules"));
+    assert!(get(&c, "", "/w", "MERGE_RULE").contains("repo's rules"));
+    assert_eq!(
+        get(&c, "", "/w", "RULES"),
+        "/w/AGENTS.md, or /w/CLAUDE.md as a fallback"
+    );
     // Review native servie → trigger commentaire injecté tel quel.
     c.pr_review = true;
     c.pr_review_trigger = "/please review".into();
-    assert!(get(&c, "REVIEW_TRIGGER").contains("/please review"));
+    assert!(get(&c, "", "/w", "REVIEW_TRIGGER").contains("/please review"));
     // merge_rule posé → texte injecté tel quel.
     c.merge_rule = "merge en squash toi-meme".into();
-    assert_eq!(get(&c, "MERGE_RULE"), "merge en squash toi-meme");
+    assert_eq!(get(&c, "", "/w", "MERGE_RULE"), "merge en squash toi-meme");
+    // rules_files override global puis par repo — le premier
+    // existant est cité (ici /tmp/x réel), le reste en fallback.
+    let dir = std::env::temp_dir().join(format!("ac-rules-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("x.md"), "x").unwrap();
+    let w = dir.display().to_string();
+    c.merge_rule.clear();
+    c.rules_files = vec!["x.md".into(), "y.md".into()];
+    assert_eq!(
+        get(&c, "", &w, "RULES"),
+        format!("{w}/x.md, or {w}/y.md as a fallback")
+    );
+    c.rules_files = vec!["none.md".into(), "x.md".into(), "y.md".into()];
+    assert_eq!(
+        get(&c, "", &w, "RULES"),
+        format!("{w}/x.md, or {w}/y.md as a fallback")
+    );
+    c.review.insert(
+        "r".into(),
+        cfg::ReviewOverride {
+            rules_files: vec!["z.md".into()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(get(&c, "o/r", &w, "RULES"), format!("{w}/z.md"));
+    assert_eq!(get(&c, "r", &w, "RULES"), format!("{w}/z.md"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

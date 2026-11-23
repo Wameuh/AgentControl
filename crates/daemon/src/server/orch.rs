@@ -70,13 +70,15 @@ pub(crate) const DESC_MAX: usize = 4000;
 /// sans `--claim` : l'item n'est pas connu au spawn, le worker le
 /// `--pop` lui-même dans `cfg.workspace`). Neutre de workflow : les
 /// règles de branches/PR/review/CI/merge sont déléguées au fichier de
-/// règles du workspace (AGENTS.md/CLAUDE.md) — seuls les mécanismes
+/// règles du workspace (`rules_files` — AGENTS.md/CLAUDE.md par
+/// défaut) — seuls les mécanismes
 /// produit (file agentbacklog, waiters ac-wait, étapes acctl) sont
 /// récités. Placeholders : `{WS}` `{BASE}` `{REVIEW_TRIGGER}`
-/// `{WORKTREE_DIR}` `{MERGE_RULE}` `{DOD}` (cf. `workflow_pairs`).
+/// `{WORKTREE_DIR}` `{MERGE_RULE}` `{RULES}` `{DOD}` (cf.
+/// `workflow_pairs`).
 const PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — not by a human agent or a parent session.]
 
-You are an autonomous worker on the workspace {WS}. Start by reading {WS}/AGENTS.md (or {WS}/CLAUDE.md as a fallback) — the repo's branch, PR, review, CI and merge rules live there and take precedence; absent that, apply the repository's conventions.
+You are an autonomous worker on the workspace {WS}. Start by reading {RULES} — the repo's branch, PR, review, CI and merge rules live there and take precedence; absent that, apply the repository's conventions.
 
 MISSION — a single task (one worker = one item, no loop):
 
@@ -86,7 +88,7 @@ MISSION — a single task (one worker = one item, no loop):
 
 2. Implement the task following its description to the letter: dedicated git worktree under {WORKTREE_DIR} based on the repo's integration branch ({BASE}) — NEVER in the main checkout {WS} — spec, requested checks. Optional: local diff review before pushing if a local review tool is available.
 
-3. Contribution cycle: apply the workflow described in the repo's rules ({WS}/AGENTS.md or CLAUDE.md) — typically branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> handle each round (fix, push, rerun the review) -> review settled -> mark the PR ready -> wait for the required GREEN checks on the head.
+3. Contribution cycle: apply the workflow described in the repo's rules ({RULES}) — typically branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> handle each round (fix, push, rerun the review) -> review settled -> mark the PR ready -> wait for the required GREEN checks on the head.
 
    Any wait > ~1 min (review verdict, CI checks, merge, delay) goes through an ac-wait waiter — arm `ac-wait --name "<t>" --interval 60 -- <cheap command>`, end your turn (or `acctl sleep "$AGENTCONTROL_SESSION"` to actually sleep), the ping wakes you when the condition lands. Never a blocking `--watch`, a long `sleep` or a poll loop inside a tool call.
 
@@ -106,14 +108,14 @@ Absolute rules: never stop/restart/touch the agentcontrol-daemon daemon; no secr
 /// `{REPO}` (tag de l'item, « (non taggé) » sinon), `{ID}` et `{ITEM}`
 /// (titre + description inline), `{DOD}` (règle --done), plus les
 /// placeholders « workflow repo » de `workflow_pairs` : `{BASE}`
-/// `{REVIEW_TRIGGER}` `{WORKTREE_DIR}` `{MERGE_RULE}`. `cfg.prompt`
-/// remplace ce template et reçoit les mêmes substitutions. Les règles
-/// de workflow vivent dans le fichier de règles DU WORKSPACE ROUTÉ
-/// (AGENTS.md/CLAUDE.md) — rien n'est codé en dur pour un repo
-/// particulier.
+/// `{REVIEW_TRIGGER}` `{WORKTREE_DIR}` `{MERGE_RULE}` `{RULES}`.
+/// `cfg.prompt` remplace ce template et reçoit les mêmes
+/// substitutions. Les règles de workflow vivent dans le fichier de
+/// règles DU WORKSPACE ROUTÉ (`rules_files` — AGENTS.md/CLAUDE.md par
+/// défaut) — rien n'est codé en dur pour un repo particulier.
 const WORKER_PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — not by a human agent or a parent session.]
 
-You are an autonomous worker on the workspace {WS} (repo {REPO}). Start by reading {WS}/AGENTS.md (or {WS}/CLAUDE.md as a fallback) — the repo's branch, PR, review, CI and merge rules live there and take precedence; absent that, apply the repository's conventions.
+You are an autonomous worker on the workspace {WS} (repo {REPO}). Start by reading {RULES} — the repo's branch, PR, review, CI and merge rules live there and take precedence; absent that, apply the repository's conventions.
 
 ## ASSIGNED ITEM — your single task
 {ITEM}
@@ -128,7 +130,7 @@ MISSION — a single task:
 
 2. Implement the task following its description to the letter: dedicated git worktree under {WORKTREE_DIR} based on the repo's integration branch ({BASE}) — NEVER in the main checkout {WS} — spec, requested checks. Optional: local diff review before pushing if a local review tool is available.
 
-3. Contribution cycle (per the repo's rules — {WS}/AGENTS.md or CLAUDE.md): branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> handle each round (fix, push, rerun the review) -> review settled -> mark the PR ready -> wait for the required GREEN checks on the head. Any wait > ~1 min (review verdict, CI checks, merge, delay) goes through an ac-wait waiter if the AgentControl daemon exposes one — never a blocking `--watch` or a poll loop inside a tool call.
+3. Contribution cycle (per the repo's rules — {RULES}): branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> handle each round (fix, push, rerun the review) -> review settled -> mark the PR ready -> wait for the required GREEN checks on the head. Any wait > ~1 min (review verdict, CI checks, merge, delay) goes through an ac-wait waiter if the AgentControl daemon exposes one — never a blocking `--watch` or a poll loop inside a tool call.
 
 4. Drive your PR to merge: {MERGE_RULE} ; if merging stays with the user, watch until the effective merge via an ac-wait waiter (cheap read-only condition: PR state per the repo's forge CLI; wrap a pipe in bash -c).
 
@@ -180,7 +182,7 @@ const MANAGER_TITLE_PREFIX: &str = "Manager · ";
 /// pas de --done, pas d'implémentation). Surcharge :
 /// `[backlog_orchestrator] manager_prompt` (mêmes placeholders :
 /// `{REPO}` `{WS}` `{BASE}` `{REVIEW_TRIGGER}` `{WORKTREE_DIR}`
-/// `{MERGE_RULE}`).
+/// `{MERGE_RULE}` `{RULES}`).
 const MANAGER_PROMPT: &str = r#"[Session created automatically by AgentControl's "Manager" feature — not by a human agent or a parent session.]
 
 You are the Manager of the {REPO} workspace (cwd {WS}): the steward of the shared AgentBacklog queue. You are given natural-language requests; you turn them into backlog items the autonomous workers (orchestrator-driven "Backlog-W*" sessions) can execute.
@@ -189,7 +191,7 @@ MISSIONS:
 
 1. FILE AN ITEM — for each feature/fix request:
    agentbacklog --add "<concise title>" --desc "<description>" --repo {REPO}
-   Title: one actionable line (convention: [bug]/[feature] + object). The description is the worker's specification — provide: context (symptoms, files/modules/investigation leads inside {WS}), the requested checks (precise builds/tests), and a reminder of the repo's contribution cycle — its rules are in {WS}/AGENTS.md (or CLAUDE.md): dedicated worktree under {WORKTREE_DIR} based on {BASE}, review ({REVIEW_TRIGGER}), merge ({MERGE_RULE}).
+   Title: one actionable line (convention: [bug]/[feature] + object). The description is the worker's specification — provide: context (symptoms, files/modules/investigation leads inside {WS}), the requested checks (precise builds/tests), and a reminder of the repo's contribution cycle — its rules are in {RULES}: dedicated worktree under {WORKTREE_DIR} based on {BASE}, review ({REVIEW_TRIGGER}), merge ({MERGE_RULE}).
    A request that chains steps or depends on an existing item: split into ordered sub-items via --depends-on <ID> (and --depend ID DEP afterwards). A big vague request: an exploration/breakdown item first.
    Do not duplicate: agentbacklog --list --json before adding.
 
@@ -2201,12 +2203,10 @@ impl Daemon {
                         ("DOD", task_dod(t).replace("<ID>", &id.to_string())),
                     ]
                     .into_iter()
-                    .chain(orch_plan::workflow_pairs(cfg))
+                    .chain(orch_plan::workflow_pairs(cfg, repo, &cwd))
                     .collect();
-                    let prompt = orch_plan::fill(
-                        cfg.prompt.as_deref().unwrap_or(WORKER_PROMPT),
-                        &pairs,
-                    );
+                    let prompt =
+                        orch_plan::fill(cfg.prompt.as_deref().unwrap_or(WORKER_PROMPT), &pairs);
                     st.counter += 1;
                     info!(
                         "orchestrator: pending={} unrouted={} → spawn {}{} \
@@ -2298,12 +2298,9 @@ impl Daemon {
                         ("DOD", LEGACY_DOD.to_string()),
                     ]
                     .into_iter()
-                    .chain(orch_plan::workflow_pairs(cfg))
+                    .chain(orch_plan::workflow_pairs(cfg, "", &cfg.workspace))
                     .collect();
-                    let prompt = orch_plan::fill(
-                        cfg.prompt.as_deref().unwrap_or(PROMPT),
-                        &pairs,
-                    );
+                    let prompt = orch_plan::fill(cfg.prompt.as_deref().unwrap_or(PROMPT), &pairs);
                     let Some(entry) = pool_next_entry(&entries, &workers, &live_waiters, &[])
                     else {
                         break;
@@ -2617,7 +2614,7 @@ impl Daemon {
             ("WS", cfg.workspace.clone()),
         ]
         .into_iter()
-        .chain(orch_plan::workflow_pairs(cfg))
+        .chain(orch_plan::workflow_pairs(cfg, "", &cfg.workspace))
         .collect();
         let desc = orch_plan::fill(NOTES_DESC, &pairs);
         // plan_review : l'item notes est un pur travail d'implémentation —
@@ -2680,7 +2677,7 @@ impl Daemon {
                     .map(|p| format!("#{p}"))
                     .collect::<Vec<_>>()
                     .join(", "),
-                orch_plan::merge_rule_text(&cfg)
+                orch_plan::merge_rule_text(&cfg, "")
             ));
         }
         if !wip.is_empty() {
@@ -2888,13 +2885,10 @@ impl Daemon {
             }
         }
         let tpl = cfg.manager_prompt.as_deref().unwrap_or(MANAGER_PROMPT);
-        let pairs: Vec<(&str, String)> = [
-            ("REPO", repo.to_string()),
-            ("WS", cwd.clone()),
-        ]
-        .into_iter()
-        .chain(orch_plan::workflow_pairs(cfg))
-        .collect();
+        let pairs: Vec<(&str, String)> = [("REPO", repo.to_string()), ("WS", cwd.clone())]
+            .into_iter()
+            .chain(orch_plan::workflow_pairs(cfg, repo, &cwd))
+            .collect();
         let prompt = orch_plan::fill(tpl, &pairs);
         self.warn_spawn_cfg(&cfg.agent, &cfg.model, &cfg.mode).await;
         let v = self

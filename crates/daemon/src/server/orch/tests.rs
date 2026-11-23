@@ -390,7 +390,7 @@ fn worker_prompt_remplace_les_placeholders() {
         ("DOD", "RULE-DONE".to_string()),
     ]
     .into_iter()
-    .chain(orch_plan::workflow_pairs(&cfg))
+    .chain(orch_plan::workflow_pairs(&cfg, "Taskwondo", "/w"))
     .collect();
     let p = orch_plan::fill(WORKER_PROMPT, &pairs);
     assert!(p.contains("cwd /w") || p.contains("/w"));
@@ -406,6 +406,7 @@ fn worker_prompt_remplace_les_placeholders() {
         "{REVIEW_TRIGGER}",
         "{WORKTREE_DIR}",
         "{MERGE_RULE}",
+        "{RULES}",
     ] {
         assert!(!p.contains(ph), "{ph} non substitué");
     }
@@ -430,6 +431,10 @@ fn prompts_integres_sans_workflow_en_dur() {
         "Verdict:",
         "ac-<feat>",
         "worktrees/ac",
+        // #343 : le fichier de règles est rendu via {RULES} —
+        // aucun nom codé en dur dans les prompts.
+        "AGENTS.md",
+        "CLAUDE.md",
     ];
     for tpl in [
         PROMPT,
