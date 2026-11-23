@@ -94,7 +94,7 @@ jobs:
           BOUND=""
           for c in $(git rev-list --grep='^chore: bump version' HEAD); do
             v=$(git log -1 --format=%s "$c" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -1)
-            if [ -n "$v" ] && git rev-parse -q --verify "refs/tags/v$v" >/dev/null 2>&1; then
+            if [ -n "$v" ] && { git rev-parse -q --verify "refs/tags/v$v" >/dev/null 2>&1 || git log -1 --format=%s "$c" | grep -qF '(reset'; }; then
               BOUND=$c; break
             fi
           done
