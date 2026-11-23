@@ -4,15 +4,11 @@
 // volume, option « fenêtre sans focus », boutons « Tester », preset choisi.
 // Usage : node tests/sounds-smoke.mjs   (après npm run build)
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const EXE = process.env.CHROME_BIN ?? "/usr/bin/chromium";
-// Port configurable — strictPort + stdio ignorés rendent un conflit muet
-// (le test taperait alors sur le dist d'un AUTRE preview déjà lancé).
-const PORT = Number(process.env.SMOKE_PORT ?? 4199);
-const server = spawn("npx", ["vite", "preview", "--port", String(PORT), "--strictPort"], { stdio: "ignore" });
-await new Promise((r) => setTimeout(r, 1800));
+const { base } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: EXE, headless: true, args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required"] });
 const mock = readFileSync("tests/tauri-mock.js", "utf8");
 // Patch : capture des handlers d'events Tauri (__emit → status_changed
@@ -69,11 +65,11 @@ const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
 await p.evaluateOnNewDocument(mock);
 await p.evaluateOnNewDocument(patch);
-await p.goto(`http://localhost:${PORT}/#desktop`, { waitUntil: "domcontentloaded" });
+await p.goto(`${base}/#desktop`, { waitUntil: "domcontentloaded" });
 await p.waitForSelector("#btn-connect", { timeout: 15000 });
 await p.evaluate(() => document.querySelector("#btn-connect")?.click());
 await sleep(300);
-await p.type("#c-host", "me@pi5.local");
+await p.type("#c-host", "pi5.local");
 await p.evaluate(() => document.querySelector("#c-go")?.click());
 await sleep(1200);
 
@@ -93,7 +89,7 @@ const countKind = async (k) => (await played()).filter((f) => near(f, F0[k])).le
 const lsSet = (k, v) => ev(({ k, v }) => localStorage.setItem(k, v), { k, v });
 
 // ---------- A. Seed silencieux ----------
-// États initiaux du mock : s1 working, s2 idle, s3 dead, s4 compacting —
+// États initiaux du mock : s1 working, s2 idle, s3 dead, s4 waiting_input —
 // première observation = pas de son (waiting/dead déjà connus).
 ok((await played()).length === 0, "A1 seed initial silencieux");
 
@@ -108,6 +104,9 @@ ok(Math.abs((await lastVol()) - 0.6) < 0.001, "B3 volume par défaut 0.6");
 await emitState("s2", "idle"); await sleep(500);
 ok((await countKind("done")) === 1, "B4 état déjà connu → pas de rejeu");
 
+// s4 seede déjà en waiting_input : une transition réelle est requise —
+// passage par working d'abord, puis retour → question.
+await setState("s4", "working"); await emitState("s4", "working"); await sleep(400);
 await setState("s4", "waiting_input"); await emitState("s4", "waiting_input"); await sleep(500);
 ok((await countKind("question")) === 1, "B5 →waiting_input → question");
 
@@ -174,6 +173,11 @@ ok(Math.abs((await lastVol()) - 0.6) < 0.001, "H4 Tester au volume réglé (60 %
 await p.evaluate(() => document.querySelector("#s-snd")?.click()); // réactive
 await sleep(200);
 ok(await ev(() => document.querySelector("#s-snd-done")?.disabled === false), "H5 master on → toggles actifs");
+// Staging (#190) : les bascules ne sont appliquées qu'au Save — « ac-snd »
+// repasse « 1 » dans localStorage ici (les clics n'écrivent plus direct).
+await p.evaluate(() => document.querySelector("#s-save")?.click());
+await sleep(300);
+ok(await ev(() => localStorage.getItem("ac-snd") === "1"), "H6 Save → master persisté on");
 
 // ---------- I. Preset choisi honoré ----------
 // « bell » démarre sur son bourdon (ratio 0,5) : f0 = 659.26/2 ≠ classic.
@@ -187,15 +191,19 @@ await lsSet("ac-snd-preset-done", "nope");
 await setState("s1", "working"); await emitState("s1", "working"); await sleep(400);
 await setState("s1", "idle"); await emitState("s1", "idle"); await sleep(600);
 ok(near((await played()).at(-1), F0.done), "I2 preset inconnu → classic");
-// Choisir dans le select persiste la clé (câblage settings).
+// Choisir dans le select joue aussitôt (aperçu) mais ne persiste la clé
+// qu'au Save — modèle staged des réglages (#190).
 await ev(() => {
   const s = document.querySelector("#s-snd-preset-question");
   s.value = "retro"; s.dispatchEvent(new Event("change"));
 });
 await sleep(300);
-ok(await ev(() => localStorage.getItem("ac-snd-preset-question") === "retro"), "I3 select → localStorage");
+ok(await ev(() => localStorage.getItem("ac-snd-preset-question") !== "retro"), "I3 select stagé → pas encore persisté");
 ok(near((await played()).at(-1), F0.question), "I4 changement de select → écoute immédiate");
+await p.evaluate(() => document.querySelector("#s-save")?.click());
+await sleep(300);
+ok(await ev(() => localStorage.getItem("ac-snd-preset-question") === "retro"), "I5 Save → preset persisté");
 
 console.log(`\n${fails === 0 ? "SMOKE OK" : "SMOKE FAIL"} — ${fails} échec(s)`);
-await b.close(); server.kill();
+await b.close();
 process.exit(fails ? 1 : 0);

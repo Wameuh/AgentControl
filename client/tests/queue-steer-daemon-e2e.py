@@ -56,7 +56,7 @@ def handle(msg):
         params = msg.get("params", {})
         text = "".join(b.get("text", "") for b in params.get("prompt", []))
         try:
-            with open(PROMPTS, "a") as f: f.write(text[:60] + "\n")
+            with open(PROMPTS, "a") as f: f.write(text[:60] + "\\n")
         except OSError: pass
         md = mode()
         if md == "accept":
@@ -353,15 +353,33 @@ def main():
         r = c.result("queue_steer", session=sid, index=0)
         check("steer retenu côté agent → verdict optimiste",
               r["delivered"] == "steer", str(r))
-        release()                  # « first » rend la main (erreur, fin quand même)
+        set_mode("hold")
+        release()                  # « first » rend la main — succès
         time.sleep(0.5)
+        set_mode("holderr")
         release()                  # refus tardif du /compact steeré — dernier volant
+        # Refus → remise en file puis drain : /compact est re-livré à
+        # l'agent (retenu sous holderr) — la file retombe vite à vide.
         q = wait_for(lambda: c.result("queue_list", session=sid)["queue"] == [], 10)
         check("refus tardif : /compact re-livré par le drain (pas orphelin)", q,
               str(c.result("queue_list", session=sid)["queue"]))
         st = c.result("session_info", session=sid).get("meta", {}).get("state")
         check("état pas resté « compacting » fantôme", st != "compacting", st)
-        release()                  # /compact re-livré → erreur → désarm drain
+        release()                  # /compact re-livré → erreur → requeue + error_hold
+        # Échec de tour : le prompt retourne en tête de file sous retenue
+        # d'erreur (le retry rate_limit rejouerait un vrai tour) — file
+        # conservée, état error, rien n'est orphelin.
+        q = wait_for(lambda: c.result("queue_list", session=sid)
+                     ["queue"] == ["/compact"], 5)
+        check("refus drain : /compact revenu en file sous error_hold", q,
+              str(c.result("queue_list", session=sid)["queue"]))
+        st = c.result("session_info", session=sid).get("meta", {}).get("state")
+        check("refus drain : état error (retenue posée)", st == "error", st)
+        # Un envoi forcé lève la retenue ; le /compact requeué est retiré
+        # avant (le livrer ré-armerait la retenue compact).
+        c.result("queue_drop", session=sid, index=0)
+        set_mode("accept")
+        c.result("send", session=sid, text="flush2c", force=True)
         ok = wait_for(lambda: c.result("session_info", session=sid)
                       .get("meta", {}).get("state") == "idle", 10)
         check("session de retour idle après le refus tardif", ok,
@@ -375,7 +393,7 @@ def main():
         # drain au désarmement par « || » court-circuiterait l'enfilement
         # et perdrait la commande. Détection : le stub journalise chaque
         # prompt reçu — un /compact remis puis re-livré compte 2 envois.
-        set_mode("holderr")
+        set_mode("hold")
         c.result("send", session=sid, text="t2d")
         ok = wait_for(lambda: c.result("session_info", session=sid)
                       .get("meta", {}).get("state") == "working", 5)
@@ -386,21 +404,31 @@ def main():
         ok = wait_for(lambda: prompts_count("/compact") > n_cpt, 5)
         check("send+steer : /compact remis à l'agent", ok,
               f"prompts={prompts_count('/compact')} attendu>{n_cpt}")
-        release()                     # fin du tour t2d (erreur, fin quand même)
+        release()                     # fin du tour t2d — succès (mode hold)
         time.sleep(0.5)
+        set_mode("holderr")
         release()                     # refus tardif du /compact — dernier volant
         ok = wait_for(lambda: prompts_count("/compact") >= n_cpt + 2, 10)
         check("send+steer : /compact remis en file ET re-livré", ok,
               f"prompts={prompts_count('/compact')} attendu>={n_cpt + 2}")
-        release()                     # /compact re-livré → erreur → désarm drain
+        release()                     # /compact re-livré → erreur → requeue + error_hold
+        q = wait_for(lambda: c.result("queue_list", session=sid)
+                     ["queue"] == ["/compact"], 5)
+        check("send+steer : /compact revenu en file sous error_hold", q,
+              str(c.result("queue_list", session=sid)["queue"]))
+        c.result("queue_drop", session=sid, index=0)
+        set_mode("accept")
+        c.result("send", session=sid, text="flush2d", force=True)
         ok = wait_for(lambda: c.result("session_info", session=sid)
                       .get("meta", {}).get("state") == "idle", 10)
         check("session de retour idle après send+steer", ok,
               c.result("session_info", session=sid).get("meta", {}).get("state"))
+        q = c.result("queue_list", session=sid)["queue"]
+        check("file vide en fin de send+steer", q == [], str(q))
 
         # --- 3. Compact hold --------------------------------------------------
-        # La phase 2c a terminé le tour « first » et vidé la file —
-        # re-stage un tour retenu pour remettre la session busy.
+        # Les phases 2c/2d ont soldé file + retenue d'erreur (send forcé)
+        # — re-stage un tour retenu pour remettre la session busy.
         set_mode("hold")
         c.result("send", session=sid, text="t3")        # livré direct (idle) → retenu
         ok = wait_for(lambda: c.result("session_info", session=sid)

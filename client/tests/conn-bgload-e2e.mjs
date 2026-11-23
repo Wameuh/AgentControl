@@ -6,7 +6,7 @@
 // absence de toast .t-error, ligne épinglée rendue après le retour.
 // Usage : npm run build && node tests/conn-bgload-e2e.mjs
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
 
@@ -89,6 +89,7 @@ const MOCK = `(function () {
         case "call": return p.then(() => rpc(args.method, args.params ?? {}));
         case "subscribe": return p.then(() => null);
         case "saved_connections": return p.then(() => [{ kind: "local" }]);
+        case "other_instances": return p.then(() => []);
         case "ssh_hosts": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAA x");
         case "check_update": return p.then(() => { throw new Error("offline"); });
@@ -101,10 +102,7 @@ const MOCK = `(function () {
   };
 })();`;
 
-const PORT = 4231;
-const server = spawn("npx", ["vite", "preview", "--port", String(PORT), "--strictPort"], { stdio: "ignore" });
-process.on("exit", () => server.kill());
-await new Promise((r) => setTimeout(r, 1800));
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: true, args: ["--no-sandbox"] });
 const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
@@ -139,7 +137,7 @@ const waitPendingConnect = async (timeout = 6000) => {
 const segCls = () => p.evaluate(() =>
   document.querySelector(".conn-seg .conn-st")?.className ?? "none");
 
-await p.goto(`http://localhost:${PORT}/`, { waitUntil: "networkidle0" });
+await p.goto(BASE + "/", { waitUntil: "networkidle0" });
 await sleep(800);
 
 // t0 — conn auto ok, session rendue : clic → open (session_info, events,

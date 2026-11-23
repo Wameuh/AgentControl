@@ -5,7 +5,7 @@
 // restaure le brouillon.
 // Usage : npm run build && node tests/echo-e2e.mjs
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
 
@@ -73,10 +73,7 @@ const MOCK = `(function () {
   };
 })();`;
 
-const PORT = 4198;
-const server = spawn("npx", ["vite", "preview", "--port", String(PORT), "--strictPort"], { stdio: "ignore" });
-process.on("exit", () => server.kill());
-await new Promise((r) => setTimeout(r, 1800));
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: true, args: ["--no-sandbox"] });
 const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
@@ -101,7 +98,7 @@ const pushEvent = (ev) => p.evaluate((e) => {
     session: "s1", event: e } });
 }, ev);
 
-await p.goto(`http://localhost:${PORT}/`, { waitUntil: "networkidle0" });
+await p.goto(BASE + "/", { waitUntil: "networkidle0" });
 await p.waitForSelector("#btn-connect", { timeout: 15000 });
 await click("#btn-connect"); await sleep(300);
 await p.select("#c-kind", "local");

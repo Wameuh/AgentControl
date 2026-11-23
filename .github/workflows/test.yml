@@ -92,18 +92,60 @@ jobs:
       - name: Build client (vite preview des tests puppeteer)
         working-directory: client
         run: npm run build
-      # Seuls les smoke verts à l'introduction du workflow sont
-      # exécutés — exclus (échecs pré-existants à investiguer, pas des
-      # erreurs d'environnement) : conn-view-smoke (H3), grptree-smoke,
-      # multi-inst-smoke, sounds-smoke ; les *-e2e.mjs (mockés mais non
-      # audités) et les *-shots.mjs / android-audit.mjs (outils, pas des
-      # pass/fail) restent hors CI pour l'instant.
+      # Smokes puppeteer : la série complète est verte — les 4 suites
+      # précédemment exclues (conn-view H3, grptree, multi-inst, sounds)
+      # ont été réparées (#347) et tournent ici.
       - name: Smoke puppeteer (chrome headless + mock tauri)
         working-directory: client
         run: |
-          for t in tests/att-dnd-smoke.mjs tests/backlog-metrics-smoke.mjs tests/input-expand-test.mjs; do
+          for t in tests/att-dnd-smoke.mjs tests/backlog-metrics-smoke.mjs tests/input-expand-test.mjs \
+                   tests/conn-view-smoke.mjs tests/grptree-smoke.mjs tests/multi-inst-smoke.mjs tests/sounds-smoke.mjs; do
             echo "=== $t"
             node "$t"
+          done
+      # E2E puppeteer mockés : audités pour la CI — port preview
+      # éphémère (startVitePreview, bind 127.0.0.1) donc exécutables en
+      # série sans collision ; mocks alignés sur le protocole courant
+      # (other_instances, erreurs connect-failed:*, logs watchdog EN).
+      # Les *-shots.mjs / android-audit.mjs restent hors CI (outils,
+      # pas des pass/fail).
+      - name: E2E puppeteer mockés (chrome headless)
+        working-directory: client
+        run: |
+          for t in tests/alt-send-e2e.mjs tests/conn-bgload-e2e.mjs tests/conn-flap-e2e.mjs \
+                   tests/echo-e2e.mjs tests/frozen-input-e2e.mjs tests/hist-loss-e2e.mjs \
+                   tests/md-render-e2e.mjs tests/pdf-view-e2e.mjs tests/queue-steer-e2e.mjs \
+                   tests/scrollup-e2e.mjs; do
+            echo "=== $t"
+            node "$t"
+          done
+
+  # -----------------------------------------------------------------
+  # E2E démon réel (*-daemon-e2e.py) : bootent le binaire
+  # agentcontrol-daemon sur un port loopback éphémère — nécessitent
+  # cargo build --release (mis en cache entre runs). Le mock ACP
+  # optionnel n'est pas installé : first-post tombe sur son repli
+  # /bin/true prévu ; queue-steer auto-génère son stub python.
+  # -----------------------------------------------------------------
+  daemon-e2e:
+    if: github.event.pull_request.draft != true
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: daemon-e2e
+      - name: Build démon
+        run: cargo build --release -p agentcontrol-daemon
+      - name: E2E démon réel
+        run: |
+          for t in client/tests/comp-resync-daemon-e2e.py \
+                   client/tests/first-post-daemon-e2e.py \
+                   client/tests/queue-steer-daemon-e2e.py; do
+            echo "=== $t"
+            python3 "$t"
           done
 
   # -----------------------------------------------------------------

@@ -5,10 +5,10 @@
 // Usage : npm run build && node tests/pdf-view-e2e.mjs
 //   (chromium via $CHROMIUM ou chrome-headless-shell du cache puppeteer)
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const CHROMIUM = process.env.CHROMIUM ?? (() => {
   const dir = join(homedir(), ".cache/puppeteer/chrome-headless-shell");
@@ -85,6 +85,7 @@ const MOCK = `(function () {
         case "call": return p.then(() => rpc(args.method, args.params ?? args));
         case "subscribe": return p.then(() => null);
         case "saved_connections": return p.then(() => []);
+        case "other_instances": return p.then(() => []);
         case "ssh_hosts": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAA x");
         default: return p.then(() => null);
@@ -93,8 +94,7 @@ const MOCK = `(function () {
   };
 })();`;
 
-const server = spawn("npx", ["vite", "preview", "--port", "4187", "--strictPort"], { stdio: "ignore" });
-await new Promise((r) => setTimeout(r, 1800));
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: "new", args: ["--no-sandbox"] });
 const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
@@ -116,7 +116,7 @@ const status = () => p.evaluate(() => document.querySelector("#fv-status").textC
 const openFile = (frag) => p.evaluate((f) =>
   [...document.querySelectorAll(".fnode")].find((n) => n.textContent.includes(f))?.click(), frag);
 
-await p.goto("http://localhost:4187/", { waitUntil: "networkidle0" });
+await p.goto(BASE + "/", { waitUntil: "networkidle0" });
 await p.waitForSelector("#btn-connect", { timeout: 15000 });
 await click("#btn-connect"); await sleep(300);
 await p.type("#c-host", "me@pi5.local"); await click("#c-go"); await sleep(900);

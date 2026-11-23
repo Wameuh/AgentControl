@@ -135,10 +135,12 @@ def main():
             'zombie = "dead-key"\n'
             'max_parallel = "not-an-int"\n'
             '\n'
-            # Entrée sans schéma : ses params sont libres (set_params
-            # accepte toute clé) — le resync ne doit pas les purger.
+            # Entrée hors catalogue (sans schéma) : ses params sont
+            # libres (set_params accepte toute clé) — le resync ne doit
+            # pas les purger. « agentbacklog » serait catalogué
+            # (install_spec) : les clés non déclarées y sont purgées.
             '[[components]]\n'
-            'name = "agentbacklog"\n'
+            'name = "freetool"\n'
             'kind = "tool"\n'
             'command = ["agentbacklog", "--version"]\n'
             '\n'
@@ -208,8 +210,8 @@ def main():
               spec.get("autostart") is False, str(spec.get("autostart")))
 
         # --- Params libres (entrée sans schéma) préservés --------------
-        bl = c.result("component_info", name="agentbacklog")
-        check("params libres sans schéma préservés (agentbacklog)",
+        bl = c.result("component_info", name="freetool")
+        check("params libres sans schéma préservés (freetool)",
               bl.get("spec", {}).get("params", {}).get("meta") == "free-note",
               str(bl.get("spec", {}).get("params")))
 

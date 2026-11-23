@@ -130,7 +130,13 @@ export class PluginView {
     view.focus({ preventScroll: true });
     $("pv-title").textContent = name;
     const frame = $("pv-frame") as HTMLIFrameElement;
-    frame.src = `${base}/plugin/${encodeURIComponent(name)}/?token=${encodeURIComponent(tok.token)}`;
+    // location.replace plutôt que src= : la navigation du frame ne pousse
+    // pas d'entrée dans l'historique de session — sinon elle s'empile
+    // au-dessus du « plugin » de nav.push et le back système Android
+    // y atterrit en no-op avant de pouvoir fermer l'overlay.
+    frame.contentWindow?.location.replace(
+      `${base}/plugin/${encodeURIComponent(name)}/?token=${encodeURIComponent(tok.token)}`,
+    );
     // Sandbox SANS allow-same-origin : origine opaque, pas d'accès au
     // DOM/storage/token de la page parente — tout passe par le bridge.
     frame.setAttribute("sandbox", "allow-scripts");
@@ -140,15 +146,21 @@ export class PluginView {
   }
 
   close() {
+    // No-op quand la vue n'est pas ouverte : l'appel vient alors de
+    // l'exclusion mutuelle des overlays #chat (onOpening de chacun) —
+    // naviguer l'iframe vers about:blank à vide y créerait une entrée
+    // d'historique parasite avalant un back système Android.
+    if (!this.isOpen()) return;
     window.removeEventListener("message", this.onMsg);
     const frame = $("pv-frame") as HTMLIFrameElement;
     // hidden d'abord : le load de about:blank ne doit pas poster un
     // `ready` (le handler ignore les messages une fois l'overlay masqué).
     $("plugin-view").hidden = true;
-    // src="about:blank" démonte le document plugin (et son JS) — pas de
-    // iframe zombie gardant son token éphémère en mémoire.
+    // about:blank démonte le document plugin (et son JS) — pas d'iframe
+    // zombie gardant son token éphémère en mémoire. location.replace
+    // plutôt que src= : même motif, pas d'entrée d'historique en plus.
     frame.removeAttribute("src");
-    frame.src = "about:blank";
+    frame.contentWindow?.location.replace("about:blank");
     frame.style.flex = "";
     frame.style.height = "";
     ($("plugin-view") as HTMLElement).style.overflowY = "";

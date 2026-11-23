@@ -18,15 +18,11 @@
 //      l'empreinte → confirmation → retry épinglé + profil persisté.
 // Usage : node tests/conn-view-smoke.mjs   (après npm run build)
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const EXE = process.env.CHROME_BIN ?? "/usr/bin/chromium";
-const PORT = process.env.PORT ?? "4210";
-// detached:true → kill(-pid) tue tout le groupe (npx → sh → vite) : sinon le
-// preview survit orphelin après la fin du test.
-const server = spawn("npx", ["vite", "preview", "--port", PORT, "--strictPort"], { stdio: "ignore", detached: true });
-await new Promise((r) => setTimeout(r, 1800));
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: EXE, headless: true, args: ["--no-sandbox"] });
 const mock = readFileSync("tests/tauri-mock.js", "utf8");
 
@@ -78,7 +74,7 @@ const initPage = async (saved, hash = "#desktop", extra = "") => {
   await p.evaluateOnNewDocument(mock);
   await p.evaluateOnNewDocument(PATCH);
   await p.evaluateOnNewDocument(`window.__saved = ${JSON.stringify(saved)};` + extra);
-  await p.goto(`http://localhost:${PORT}/${hash}`, { waitUntil: "domcontentloaded" });
+  await p.goto(`${BASE}/${hash}`, { waitUntil: "domcontentloaded" });
   await p.waitForSelector("#btn-connect", { timeout: 15000 });
   await sleep(1200);
   return p;
