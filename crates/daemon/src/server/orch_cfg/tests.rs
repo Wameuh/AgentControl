@@ -253,6 +253,85 @@ fn patch_review_trigger_labels_overrides() {
 }
 
 #[test]
+fn patch_rules_files() {
+    let mut c = super::super::cfg::OrchCfg::default();
+    // Défaut AGENTS.md puis CLAUDE.md ; CSV (forme `comp set`),
+    // tableau JSON et chaîne JSON équivalente acceptés.
+    assert_eq!(c.rules_files, ["AGENTS.md", "CLAUDE.md"]);
+    apply_patch(
+        &mut c,
+        &patch(&[("rules_files", json!("docs/maintainer.md,AGENTS.md"))]),
+    )
+    .unwrap();
+    assert_eq!(c.rules_files, ["docs/maintainer.md", "AGENTS.md"]);
+    apply_patch(&mut c, &patch(&[("rules_files", json!(["RULES.md"]))])).unwrap();
+    assert_eq!(c.rules_files, ["RULES.md"]);
+    apply_patch(
+        &mut c,
+        &patch(&[("rules_files", json!("[\"A.md\", \"B.md\"]"))]),
+    )
+    .unwrap();
+    assert_eq!(c.rules_files, ["A.md", "B.md"]);
+    // Vide/[] → défaut (une liste vide rendrait {RULES} muet).
+    apply_patch(&mut c, &patch(&[("rules_files", json!(""))])).unwrap();
+    assert_eq!(c.rules_files, ["AGENTS.md", "CLAUDE.md"]);
+    apply_patch(&mut c, &patch(&[("rules_files", json!([]))])).unwrap();
+    assert_eq!(c.rules_files, ["AGENTS.md", "CLAUDE.md"]);
+    // Entrées invalides : absolu, `..`, vide, séparateurs/drive
+    // Windows (rejet portable — cfg.rs:rules_file_ok).
+    for bad in [
+        "/abs.md",
+        "../up.md",
+        "a/../b.md",
+        "..\\up.md",
+        "C:\\x\\r.md",
+        "\\\\srv\\r.md",
+        "C:r.md",
+    ] {
+        assert!(
+            apply_patch(&mut c, &patch(&[("rules_files", json!([bad]))])).is_err(),
+            "{bad} accepté"
+        );
+    }
+    // Override par repo dans review_overrides (chaîne CSV
+    // normalisée en array) — chemin exact puis clé au nom court.
+    apply_patch(
+        &mut c,
+        &patch(&[(
+            "review_overrides",
+            json!({"o/r": {"rules_files": "docs/maintainer.md,AGENTS.md"}}),
+        )]),
+    )
+    .unwrap();
+    assert_eq!(
+        c.rules_files_for("o/r"),
+        ["docs/maintainer.md", "AGENTS.md"]
+    );
+    // Clé au nom court : un repo complet la résout aussi.
+    apply_patch(
+        &mut c,
+        &patch(&[("review_overrides", json!({"r": {"rules_files": ["Z.md"]}}))]),
+    )
+    .unwrap();
+    assert_eq!(c.rules_files_for("o/r"), ["Z.md"]);
+    assert_eq!(c.rules_files_for("r"), ["Z.md"]);
+    // Repo sans override → liste globale ; override vide →
+    // global aussi (jamais une liste vide effective).
+    assert_eq!(c.rules_files_for("x/y"), ["AGENTS.md", "CLAUDE.md"]);
+    apply_patch(
+        &mut c,
+        &patch(&[("review_overrides", json!({"o/r": {"rules_files": []}}))]),
+    )
+    .unwrap();
+    assert_eq!(c.rules_files_for("o/r"), ["AGENTS.md", "CLAUDE.md"]);
+    assert!(apply_patch(
+        &mut c,
+        &patch(&[("review_overrides", json!({"r": {"rules_files": "/abs.md"}}))]),
+    )
+    .is_err());
+}
+
+#[test]
 fn patch_map_csv_objet_liste() {
     let mut c = super::super::cfg::OrchCfg::default();
     apply_patch(

@@ -534,8 +534,9 @@ impl ItemPhase {
 // Prompts pipeline — {ID} {ITEM} {WS} {PLANNER} {PLAN} {ROUND} {DOD}
 // plus les placeholders « workflow repo » substitués depuis la config
 // par `workflow_pairs` : {BASE} {REVIEW_TRIGGER} {WORKTREE_DIR}
-// {MERGE_RULE}. L'id de session propre se lit via $AGENTCONTROL_SESSION
-// (injecté au spawn quand a2a est actif — pas de placeholder dédié).
+// {MERGE_RULE} {RULES}. L'id de session propre se lit via
+// $AGENTCONTROL_SESSION (injecté au spawn quand a2a est actif — pas de
+// placeholder dédié).
 // ---------------------------------------------------------------------------
 
 pub(crate) const PLANNER_PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — not by a human agent or a parent session.]
@@ -549,7 +550,7 @@ You are the PLANNER of the backlog item below (session $AGENTCONTROL_SESSION, cw
 
 You are in plan mode: you implement NOTHING, you modify no repo file.
 
-1. Read {WS}/AGENTS.md (or {WS}/CLAUDE.md as a fallback): the repo's contribution rules live there and will apply to the implementation — dedicated worktree under {WORKTREE_DIR} based on {BASE}, cycle defined by those rules.
+1. Read {RULES}: the repo's contribution rules live there and will apply to the implementation — dedicated worktree under {WORKTREE_DIR} based on {BASE}, cycle defined by those rules.
 2. Explore the relevant code in {WS} and write a concrete implementation plan: files to touch, ordered steps, watch points/risks, checks to request. Write it to a file OUTSIDE the git checkout (e.g. /tmp/backlog-plan-{ID}.md).
 3. End your turn with a line exactly:
    PLAN_FILE: <absolute path of the plan file>
@@ -615,7 +616,7 @@ You are the IMPLEMENTER of the backlog item below (session $AGENTCONTROL_SESSION
 
 ## MISSION
 
-Implement the plan following the contribution workflow of {WS}/AGENTS.md (or {WS}/CLAUDE.md as a fallback) to the letter: dedicated worktree under {WORKTREE_DIR} based on {BASE} (NEVER in the main checkout {WS}) -> branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> iterations -> review settled -> PR ready -> required GREEN checks -> merge: {MERGE_RULE}. Any wait > ~1 min (verdict, checks, merge) goes through an ac-wait waiter — never a blocking --watch or a poll loop inside a tool call.
+Implement the plan following the contribution workflow of {RULES} to the letter: dedicated worktree under {WORKTREE_DIR} based on {BASE} (NEVER in the main checkout {WS}) -> branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> iterations -> review settled -> PR ready -> required GREEN checks -> merge: {MERGE_RULE}. Any wait > ~1 min (verdict, checks, merge) goes through an ac-wait waiter — never a blocking --watch or a poll loop inside a tool call.
 
 {DOD} Unrecoverable blocker: agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explain why, then stop.
 
@@ -625,7 +626,7 @@ Absolute rules: never stop/restart/touch the agentcontrol-daemon daemon; no secr
 
 const CLAIMED_WORKER_PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — not by a human agent or a parent session.]
 
-You are an autonomous worker on the repo (cwd {WS}). Read {WS}/AGENTS.md (or {WS}/CLAUDE.md as a fallback) — the repo's branch, PR, review, CI and merge rules live there and take precedence.
+You are an autonomous worker on the repo (cwd {WS}). Read {RULES} — the repo's branch, PR, review, CI and merge rules live there and take precedence.
 
 ## MISSION — a single task, already assigned (backlog item)
 {ITEM}
@@ -653,10 +654,13 @@ pub(crate) fn fill(tpl: &str, pairs: &[(&str, String)]) -> String {
 // fill, en plus des clés propres de chaque template ({ID}/{ITEM}/…) :
 // {BASE} branche d'intégration (`integration_branch`), {REVIEW_TRIGGER}
 // comment demander la review, {WORKTREE_DIR} racine des worktrees
-// dédiés (`worktree_dir`), {MERGE_RULE} règle de merge (`merge_rule`).
+// dédiés (`worktree_dir`), {MERGE_RULE} règle de merge (`merge_rule`),
+// {RULES} fichier(s) de règles du workspace (`rules_files` — le premier
+// existant cité, les suivants « as a fallback »).
 // Le détail du workflow vit dans le fichier de règles du workspace
-// (AGENTS.md/CLAUDE.md — source de vérité par repo, audit F1) : les
-// prompts intégrés ne récitent aucun workflow propre à un repo (#319).
+// (`rules_files`, AGENTS.md/CLAUDE.md par défaut — source de vérité
+// par repo, audit F1) : les prompts intégrés ne récitent aucun
+// workflow propre à un repo (#319).
 // ---------------------------------------------------------------------------
 
 /// Texte {REVIEW_TRIGGER} : le trigger commentaire configuré quand la
@@ -680,25 +684,68 @@ pub(crate) fn review_trigger_text(cfg: &cfg::OrchCfg) -> String {
 /// Texte {MERGE_RULE} : `merge_rule` configuré si posé, sinon
 /// délégation aux règles du repo — merge par l'agent seulement si
 /// elles l'y autorisent, sinon le merge reste à l'utilisateur.
-pub(crate) fn merge_rule_text(cfg: &cfg::OrchCfg) -> String {
+pub(crate) fn merge_rule_text(cfg: &cfg::OrchCfg, repo: &str) -> String {
     if cfg.merge_rule.trim().is_empty() {
-        "apply the merge rule described in the repo's rules \
-         (AGENTS.md/CLAUDE.md of the workspace — merge by the agent \
-         only if they allow it there)"
-            .into()
+        format!(
+            "apply the merge rule described in the repo's rules \
+             ({} of the workspace — merge by the agent \
+             only if they allow it there)",
+            cfg.rules_files_for(repo).join("/")
+        )
     } else {
         cfg.merge_rule.clone()
     }
 }
 
+/// Texte {RULES} : la liste `rules_files` effective du repo (override
+/// `review.<repo>` puis global) rendue dans le workspace `ws` — le
+/// premier fichier EXISTANT y devient la référence citée, les
+/// suivants restent des replis « as a fallback » ; aucun n'existe →
+/// le premier de la liste fait foi quand même (le texte reste une
+/// indication, l'agent sait retrouver ses règles).
+pub(crate) fn rules_text(cfg: &cfg::OrchCfg, repo: &str, ws: &str) -> String {
+    let files = cfg.rules_files_for(repo);
+    let base = ws.trim_end_matches('/');
+    // Garde-fou : normalize + apply_patch garantissent une liste non
+    // vide, mais un prompt ne doit jamais paniquer sur une config.
+    if files.is_empty() {
+        return format!("{base}/AGENTS.md");
+    }
+    // Le `~`/`$VAR` éventuel d'un workspace routé est expandé pour le
+    // test d'existence seul — le texte rendu garde la forme configurée
+    // (cohérente avec {WS} substitué à côté).
+    let chk = crate::server::expand_cwd(base).unwrap_or_else(|_| base.to_string());
+    let chk = std::path::Path::new(&chk);
+    let first = files
+        .iter()
+        .position(|f| chk.join(f).is_file())
+        .unwrap_or(0);
+    let mut s = format!("{base}/{}", files[first]);
+    let rest: Vec<String> = files[first + 1..]
+        .iter()
+        .map(|f| format!("{base}/{f}"))
+        .collect();
+    if !rest.is_empty() {
+        s.push_str(&format!(", or {} as a fallback", rest.join(" or ")));
+    }
+    s
+}
+
 /// Paires de placeholders communes à tous les prompts orchestrateur —
-/// à concaténer aux clés propres de chaque site de fill.
-pub(crate) fn workflow_pairs(cfg: &cfg::OrchCfg) -> [(&'static str, String); 4] {
+/// à concaténer aux clés propres de chaque site de fill. `repo` (tag
+/// backlog ou chemin forge) et `ws` (cwd de la session) servent à la
+/// résolution per-repo et au rendu de {RULES}.
+pub(crate) fn workflow_pairs(
+    cfg: &cfg::OrchCfg,
+    repo: &str,
+    ws: &str,
+) -> [(&'static str, String); 5] {
     [
         ("BASE", cfg.pr_base().to_string()),
         ("REVIEW_TRIGGER", review_trigger_text(cfg)),
         ("WORKTREE_DIR", cfg.worktree_dir.clone()),
-        ("MERGE_RULE", merge_rule_text(cfg)),
+        ("MERGE_RULE", merge_rule_text(cfg, repo)),
+        ("RULES", rules_text(cfg, repo, ws)),
     ]
 }
 
@@ -1181,7 +1228,7 @@ impl Daemon {
                 ("HISTORY", history),
             ]
             .into_iter()
-            .chain(workflow_pairs(cfg))
+            .chain(workflow_pairs(cfg, task_repo(t), &iws))
             .collect();
             let prompt = fill(REVIEWER_PROMPT, &pairs);
             match self
@@ -1318,7 +1365,7 @@ impl Daemon {
                             ("DOD", task_dod(t).replace("<ID>", &key)),
                         ]
                         .into_iter()
-                        .chain(workflow_pairs(cfg))
+                        .chain(workflow_pairs(cfg, task_repo(t), &iws))
                         .collect::<Vec<_>>(),
                     ),
                 )
@@ -1357,7 +1404,7 @@ impl Daemon {
                             ("WS", iws.clone()),
                         ]
                         .into_iter()
-                        .chain(workflow_pairs(cfg))
+                        .chain(workflow_pairs(cfg, task_repo(t), &iws))
                         .collect::<Vec<_>>(),
                     ),
                 )
@@ -1648,7 +1695,7 @@ impl Daemon {
         // Workspace routé de l'item : le planner (spawné dessus) et
         // l'implémenteur de remplacement travaillent dans le checkout
         // du repo taggé — le message d'approbation cite le bon
-        // AGENTS.md.
+        // fichier de règles.
         let iws = cfg.workspace_for(task_repo(t)).to_string();
         let planner_alive = !planner_sid.is_empty() && session_ids.contains(&planner_sid);
         // Watermark posé au claim-review du round courant : un
@@ -1695,11 +1742,11 @@ impl Daemon {
                         "Your plan for item #{id} was approved (round {}){cmt}. \
                          You are moving to implementation: follow it while \
                          applying the contribution workflow described in \
-                         {}/AGENTS.md or CLAUDE.md (dedicated worktree \
+                         {} (dedicated worktree \
                          based on {}). {} Unrecoverable \
                          blocker: --release + explanation.",
                         round.saturating_sub(1).max(0),
-                        iws,
+                        rules_text(cfg, task_repo(t), &iws),
                         cfg.pr_base(),
                         task_dod(t).replace("<ID>", &id.to_string()),
                         cmt = if comment.is_empty() {
@@ -1746,7 +1793,7 @@ impl Daemon {
                             ("DOD", task_dod(t).replace("<ID>", &key)),
                         ]
                         .into_iter()
-                        .chain(workflow_pairs(cfg))
+                        .chain(workflow_pairs(cfg, task_repo(t), &iws))
                         .collect::<Vec<_>>(),
                     );
                     if let Some(nsid) = self

@@ -166,7 +166,7 @@ const WORKER_FAILOVER_PROMPT: &str = r#"[Session created automatically by the ba
 
 You are a worker on the repo (cwd {WS}) — you replace a session destroyed because it was stuck in rate_limit on the old profile. Its context is lost; the work is recoverable via the AgentBacklog queue, the worktrees and the PR registry.
 
-Start by reading {WS}/AGENTS.md (or {WS}/CLAUDE.md as a fallback) — the repo's branch, PR, review, CI and merge rules live there and take precedence.
+Start by reading {RULES} — the repo's branch, PR, review, CI and merge rules live there and take precedence.
 
 ## ITEMS TO RESUME (wip, already assigned to you)
 {ITEMS}
@@ -372,13 +372,14 @@ impl Daemon {
             .first()
             .map(|t| cfg.workspace_for(task_repo(t)).to_string())
             .unwrap_or_else(|| cfg.workspace.clone());
+        let fo_repo = my_wip.first().map(task_repo).unwrap_or("");
         let pairs: Vec<(&str, String)> = [
             ("WS", fo_ws.clone()),
             ("ITEMS", items_txt),
             ("PRS", prs_txt),
         ]
         .into_iter()
-        .chain(orch_plan::workflow_pairs(cfg))
+        .chain(orch_plan::workflow_pairs(cfg, fo_repo, &fo_ws))
         .collect();
         let prompt = orch_plan::fill(WORKER_FAILOVER_PROMPT, &pairs);
         // plan_review : les workers implémentent → implement_mode ;
@@ -540,7 +541,7 @@ impl Daemon {
                 ("DOD", task_dod(t).replace("<ID>", &key)),
             ]
             .into_iter()
-            .chain(orch_plan::workflow_pairs(cfg))
+            .chain(orch_plan::workflow_pairs(cfg, task_repo(t), &iws))
             .collect();
             let mut prompt = orch_plan::fill(tpl, &pairs);
             // Brouillon de plan déjà déposé par l'ancienne session :
@@ -728,6 +729,8 @@ mod tests {
                 "Verdict:",
                 "ac-<feat>",
                 "worktrees/ac",
+                "AGENTS.md",
+                "CLAUDE.md",
             ] {
                 assert!(!tpl.contains(b), "« {b} » dans un prompt intégré");
             }

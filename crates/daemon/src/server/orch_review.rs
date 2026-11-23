@@ -477,7 +477,7 @@ You are the REVIEWER of PR #{PR} of repo {REPO} (session $AGENTCONTROL_SESSION).
 
 ## MISSION — STRICT READ-ONLY
 
-Review the diff `origin/{BASE}...HEAD` (git show/git diff --stat then files) BY READING the surrounding code in this worktree. Check the substance: bugs, regressions, compliance with the repo's rules ({WS}/AGENTS.md), requested tests/checks, docs consistency. DO NOT MODIFY ANY FILE, push nothing, do not comment the PR in any form, do not run any code from the PR — see FORBIDDEN.
+Review the diff `origin/{BASE}...HEAD` (git show/git diff --stat then files) BY READING the surrounding code in this worktree. Check the substance: bugs, regressions, compliance with the repo's rules ({RULES}), requested tests/checks, docs consistency. DO NOT MODIFY ANY FILE, push nothing, do not comment the PR in any form, do not run any code from the PR — see FORBIDDEN.
 
 ## FORBIDDEN — strict read-only
 
@@ -2264,7 +2264,8 @@ impl Daemon {
         // sinon global) — surcharge TOTALE du built-in `REVIEW_PROMPT`,
         // même mécanique de placeholders ({PR}…{BODY} + {TRIGGER},
         // {VERDICT_APPROVED}/{VERDICT_CHANGES} pour rester aligné sur
-        // les labels configurés et le déclencheur du repo).
+        // les labels configurés et le déclencheur du repo, {RULES}
+        // pour le fichier de règles effectif du workspace).
         let prompt = fill_pr(
             cfg.review_prompt_for(repo).unwrap_or(REVIEW_PROMPT),
             &[
@@ -2276,6 +2277,7 @@ impl Daemon {
                 ("TITLE", title.to_string()),
                 ("BODY", clip(body, 8000)),
                 ("TRIGGER", cfg.review_trigger_for(repo).to_string()),
+                ("RULES", crate::server::orch_plan::rules_text(cfg, repo, ws)),
                 (
                     "VERDICT_APPROVED",
                     cfg.verdict_label_for(cfg::ReviewVerdict::Approved, repo)

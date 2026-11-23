@@ -360,12 +360,14 @@ pub enum ReviewVerdict {
     Changes,
 }
 
-/// Sous-ensemble des paramètres review surchargeable par repo —
+/// Sous-ensemble des paramètres surchargeable par repo —
 /// `[backlog_orchestrator.review.<repo>]` (clé = chemin du repo tel
 /// qu'il apparaît dans `pr_reviews`/le registre, ex.
 /// `"owner/name"` ou projet gerrit) ou entrée du JSON
 /// `review_overrides`. Chaque champ vide/absent hérite du param
-/// global correspondant.
+/// global correspondant — `rules_files` sert aussi les prompts
+/// worker/planner (le tag backlog résout sa courte forme), pas
+/// seulement la revue PR.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ReviewOverride {
     /// `trigger_mode` local — vide = `review_trigger_mode` global.
@@ -389,6 +391,9 @@ pub struct ReviewOverride {
     /// seul, `false` le force même si le global est relâché.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_review_untrusted: Option<bool>,
+    /// `rules_files` local — vide = la liste globale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules_files: Vec<String>,
 }
 
 /// Orchestrateur backlog natif (section [backlog_orchestrator] de
@@ -439,7 +444,7 @@ pub struct OrchCfg {
     /// Racine des worktrees dédiés créés par les agents — placeholder
     /// `{WORKTREE_DIR}` des prompts orchestrateur. Convention produit
     /// « hors du checkout principal » : la convention de nommage fine
-    /// reste aux règles du repo (AGENTS.md/CLAUDE.md). Vide = défaut.
+    /// reste aux règles du repo (fichier `rules_files`). Vide = défaut.
     /// Défaut "~/worktrees".
     #[serde(default = "dwtroot")]
     pub worktree_dir: String,
@@ -450,6 +455,14 @@ pub struct OrchCfg {
     /// injecté tel quel dans les prompts.
     #[serde(default)]
     pub merge_rule: String,
+    /// Fichiers de règles du workspace rendus dans `{RULES}` — chemins
+    /// RELATIFS au cwd de session, cités dans l'ordre (le premier
+    /// existant fait référence, les suivants restent « a defaut »).
+    /// Surchargeable par repo via `review.<repo>.rules_files` ;
+    /// vide/[] = défaut `["AGENTS.md", "CLAUDE.md"]` (normalize +
+    /// apply_patch garantissent la non-vacuité).
+    #[serde(default = "drules")]
+    pub rules_files: Vec<String>,
     /// Workers `title_prefix*` simultanés max (défaut 5).
     #[serde(default = "d5")]
     pub max_workers: u32,
@@ -753,6 +766,9 @@ fn dvapproved() -> String {
 fn dvchanges() -> String {
     "Verdict: CHANGES_REQUESTED".into()
 }
+fn drules() -> Vec<String> {
+    vec!["AGENTS.md".into(), "CLAUDE.md".into()]
+}
 fn d2() -> u32 {
     2
 }
@@ -771,6 +787,7 @@ impl Default for OrchCfg {
             release_branch: drelbranch(),
             worktree_dir: dwtroot(),
             merge_rule: String::new(),
+            rules_files: drules(),
             max_workers: 5,
             max_working: 0,
             poll_secs: 60,
@@ -840,6 +857,11 @@ impl OrchCfg {
     pub fn normalize(&mut self) {
         if self.workspace.trim().is_empty() {
             self.workspace = dws();
+        }
+        // Un `rules_files = []` écrit à la main rendrait {RULES} muet
+        // — cassant → retour au défaut (même convention que workspace).
+        if self.rules_files.is_empty() {
+            self.rules_files = drules();
         }
     }
 
@@ -1110,6 +1132,19 @@ impl OrchCfg {
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&self.verdict_changes),
         }
+    }
+
+    /// Liste `rules_files` effective d'un repo (rendue dans `{RULES}`) :
+    /// l'override `review.<repo>` NON VIDE prime, la liste globale
+    /// sinon. Jamais vide (`normalize` + `apply_patch` le garantissent).
+    /// La clé d'override suit `review_ov` : chemin forge exact puis
+    /// nom court — un tag `repo_workspaces` matche donc aussi une
+    /// entrée déclarée pour son repo (`"owner/Name"` → `"Name"`).
+    pub fn rules_files_for<'a>(&'a self, repo: &str) -> &'a [String] {
+        self.review_ov(repo)
+            .map(|o| o.rules_files.as_slice())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.rules_files)
     }
 }
 

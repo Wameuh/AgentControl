@@ -46,6 +46,7 @@ const KEYS: &[&str] = &[
     "release_branch",
     "worktree_dir",
     "merge_rule",
+    "rules_files",
     "metrics",
     "max_workers",
     "max_working",
@@ -461,6 +462,16 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             None,
         ),
         ps(
+            "rules_files",
+            "Repo rules files",
+            "workspace-relative rule file(s) rendered into the \
+             {RULES} prompt placeholder — the first EXISTING file is \
+             cited, the rest listed as fallback; per-repo override \
+             via review_overrides; empty = default",
+            ParamKind::List,
+            Some("AGENTS.md,CLAUDE.md"),
+        ),
+        ps(
             "metrics",
             "Metrics (sampling)",
             "each tick appends a {ts, pending, wip, workers} sample \
@@ -627,8 +638,8 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             "custom worker prompt — empty = built-in prompt; \
              item dispatch (agentbacklog ≥ 0.7) substitutes \
              {WS} {REPO} {ID} {ITEM} {DOD} {BASE} {REVIEW_TRIGGER} \
-             {WORKTREE_DIR} {MERGE_RULE} and pre-assigns the item \
-             (no --pop)",
+             {WORKTREE_DIR} {MERGE_RULE} {RULES} and pre-assigns the \
+             item (no --pop)",
             ParamKind::String,
             None,
         ),
@@ -636,7 +647,7 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             "manager_prompt",
             "Manager prompt",
             "Manager template — placeholders {REPO} {WS} {BASE} \
-             {REVIEW_TRIGGER} {WORKTREE_DIR} {MERGE_RULE}; \
+             {REVIEW_TRIGGER} {WORKTREE_DIR} {MERGE_RULE} {RULES}; \
              empty = built-in template",
             ParamKind::String,
             None,
@@ -848,7 +859,7 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             "PR review prompt",
             "custom reviewer template — {PR} {REPO} {SHA} {BASE} {WS} \
              {TITLE} {BODY} {TRIGGER} {VERDICT_APPROVED} \
-             {VERDICT_CHANGES} placeholders; empty = built-in \
+             {VERDICT_CHANGES} {RULES} placeholders; empty = built-in \
              template",
             ParamKind::String,
             None,
@@ -875,7 +886,7 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             "Per-repo review overrides",
             "JSON object {repo_path: {trigger_mode, pr_review_trigger, \
              review_prompt, verdict_approved, verdict_changes, \
-             auto_review_untrusted}} — key \
+             auto_review_untrusted, rules_files}} — key \
              = repo path (owner/name, gerrit project; short name \
              resolves too); same as TOML \
              [backlog_orchestrator.review.<repo>]; empty = global \
@@ -967,6 +978,7 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert("release_branch".into(), cfg.release_branch.clone());
     m.insert("worktree_dir".into(), cfg.worktree_dir.clone());
     m.insert("merge_rule".into(), cfg.merge_rule.clone());
+    m.insert("rules_files".into(), cfg.rules_files.join(","));
     m.insert("metrics".into(), cfg.metrics.to_string());
     m.insert("max_workers".into(), cfg.max_workers.to_string());
     m.insert("max_working".into(), cfg.max_working.to_string());
@@ -1247,9 +1259,47 @@ fn val_label(v: &Value) -> Result<String> {
     Ok(s)
 }
 
+/// Une entrée `rules_files` : chemin RELATIF au workspace — ni vide,
+/// ni absolu, ni `..` (le rendu {RULES} la préfixe du cwd de session,
+/// le test d'existence le joint à la racine).
+fn val_rules_entry(f: &str) -> Result<()> {
+    anyhow::ensure!(
+        !f.trim().is_empty() && !f.starts_with('/') && !f.split('/').any(|c| c == ".."),
+        "rules_files entry « {f} » — expected a workspace-relative path"
+    );
+    Ok(())
+}
+
+/// Liste `rules_files` — tableau JSON `["a.md","b.md"]`, chaîne JSON
+/// équivalente ou CSV `a.md,b.md` (forme chaîne du formulaire /
+/// `acctl comp set`). Vide/[] = liste vide rendue à l'appelant
+/// (défaut ou héritage selon le site).
+fn val_rules_files(v: &Value) -> Result<Vec<String>> {
+    let raw: Vec<String> = match v {
+        Value::Array(a) => a.iter().map(val_string).collect::<Result<_>>()?,
+        Value::String(s) => {
+            let s = s.trim();
+            if s.starts_with('[') {
+                let a: Value =
+                    serde_json::from_str(s).context("rules_files: invalid JSON array")?;
+                return val_rules_files(&a);
+            }
+            s.split(',')
+                .map(|e| e.trim().to_string())
+                .filter(|e| !e.is_empty())
+                .collect()
+        }
+        _ => anyhow::bail!("expected JSON array or « file.md,… », got {v}"),
+    };
+    for f in &raw {
+        val_rules_entry(f)?;
+    }
+    Ok(raw)
+}
+
 /// Overrides review par repo — objet JSON `{repo: {trigger_mode,
 /// pr_review_trigger, review_prompt, verdict_approved,
-/// verdict_changes, auto_review_untrusted}}` (forme native
+/// verdict_changes, auto_review_untrusted, rules_files}}` (forme native
 /// `component_set_params` ou chaîne
 /// JSON via `acctl comp set`). `{}`/`[]`/vide = map vidée (params
 /// globaux seuls). Chaque champ vide/absent hérite du global ;
@@ -1259,19 +1309,30 @@ fn val_review_overrides(
     v: &Value,
 ) -> Result<std::collections::BTreeMap<String, super::cfg::ReviewOverride>> {
     use super::cfg::ReviewOverride;
-    let mut out: std::collections::BTreeMap<String, ReviewOverride> = match v {
+    let mut parsed: Value = match v {
         Value::String(s) => {
             let s = s.trim();
             if s.is_empty() || s == "{}" || s == "[]" {
                 return Ok(Default::default());
             }
-            let parsed: Value =
-                serde_json::from_str(s).context("review_overrides: invalid JSON")?;
-            serde_json::from_value(parsed).context("review_overrides: invalid shape")?
+            serde_json::from_str(s).context("review_overrides: invalid JSON")?
         }
-        other => serde_json::from_value(other.clone())
-            .context("review_overrides: expected a JSON object {repo: {…}}")?,
+        other => other.clone(),
     };
+    // `rules_files` accepte une chaîne CSV en plus du tableau —
+    // normalisée en array avant la désérialisation stricte.
+    if let Value::Object(o) = &mut parsed {
+        for ov in o.values_mut() {
+            if let Some(rf) = ov.get_mut("rules_files") {
+                if matches!(rf, Value::String(_)) {
+                    let l = val_rules_files(rf).context("review_overrides rules_files")?;
+                    *rf = json!(l);
+                }
+            }
+        }
+    }
+    let mut out: std::collections::BTreeMap<String, ReviewOverride> =
+        serde_json::from_value(parsed).context("review_overrides: invalid shape")?;
     for (repo, o) in &mut out {
         anyhow::ensure!(!repo.trim().is_empty(), "review_overrides: empty repo key");
         if !o.trigger_mode.is_empty() {
@@ -1289,10 +1350,16 @@ fn val_review_overrides(
             o.verdict_changes =
                 val_label(&json!(o.verdict_changes)).context("review_overrides verdict_changes")?;
         }
+        for f in &o.rules_files {
+            val_rules_entry(f).context("review_overrides rules_files")?;
+        }
         // `Some("")` = champ effacé → hérite du global (même sémantique
         // vide que les chaînes ; `review_prompt_for` filtre aussi à la
         // lecture pour les entrées TOML écrites à la main).
-        if o.review_prompt.as_deref().is_some_and(|s| s.trim().is_empty()) {
+        if o.review_prompt
+            .as_deref()
+            .is_some_and(|s| s.trim().is_empty())
+        {
             o.review_prompt = None;
         }
     }
@@ -1397,6 +1464,20 @@ pub(crate) fn apply_patch(
             // placeholder {MERGE_RULE} délègue au fichier de règles
             // du workspace (pas un défaut fixe).
             "merge_rule" => cfg.merge_rule = val_string(v)?,
+            // Vide/[] → défaut : une liste vide rendrait {RULES} muet
+            // (champ cassant — pas de forme « désactivée »).
+            "rules_files" => {
+                cfg.rules_files = if is_empty(v) {
+                    OrchCfg::default().rules_files
+                } else {
+                    let l = val_rules_files(v)?;
+                    if l.is_empty() {
+                        OrchCfg::default().rules_files
+                    } else {
+                        l
+                    }
+                }
+            }
             // Vide = héritage du profil `agent` (sémantique du champ,
             // pas retour à un défaut fixe).
             "worker_agent" => cfg.worker_agent = val_string(v)?,

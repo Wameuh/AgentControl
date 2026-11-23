@@ -209,8 +209,9 @@ them). A forge without `comments` cap (plain `git`) can't serve
 **HOW**: `review_prompt` fully overrides the built-in reviewer
 template (same mechanics as `prompt`/`manager_prompt` — placeholders
 `{PR}` `{REPO}` `{SHA}` `{BASE}` `{WS}` `{TITLE}` `{BODY}` plus
-`{TRIGGER}`, `{VERDICT_APPROVED}`, `{VERDICT_CHANGES}` which expand
-to the repo's configured trigger and labels); `verdict_approved` /
+`{TRIGGER}`, `{VERDICT_APPROVED}`, `{VERDICT_CHANGES}` and `{RULES}`
+which expand to the repo's configured trigger, labels and rules
+files); `verdict_approved` /
 `verdict_changes` set the posted `## <label>` titles (defaults
 `Verdict: APPROVED` / `Verdict: CHANGES_REQUESTED` — the reviewer
 renders the canonical protocol word and the daemon maps it onto the
@@ -222,8 +223,8 @@ global `agent`/`model`/thought level (`agent_or`/`model_or`/
 `[backlog_orchestrator.review.<repo>]` in config.toml (or the
 `review_overrides` JSON param) accepts `trigger_mode`,
 `pr_review_trigger`, `review_prompt`, `verdict_approved`,
-`verdict_changes`, `auto_review_untrusted` — key = repo path as it
-appears in
+`verdict_changes`, `auto_review_untrusted`, `rules_files` — key = repo
+path as it appears in
 `pr_reviews`/the registry (`owner/name`, gerrit project), a short
 name resolves too; each empty field inherits the global param —
 mixed-forge workspaces can e.g. keep `comment` on GitHub and run
