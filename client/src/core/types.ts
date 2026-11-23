@@ -35,8 +35,8 @@ export interface SessionMeta {
   advisor_models?: string[];
   config_options?: ConfigOption[];
   state: string;
-  /** Dernier échec de tour (état "error") — kind : rate_limit | model
-   *  | auth | other ; count = échecs consécutifs du même kind. */
+  /** Dernier échec de tour (état "error") — kind : rate_limit | quota
+   *  | model | auth | other ; count = échecs consécutifs du même kind. */
   last_error?: { message: string; kind: string; at: string; count: number; retry_at?: number | null };
   context_used?: number;
   context_size?: number;

@@ -29,7 +29,9 @@ interface LastError {
 /** Clé effective de l'indicateur : `error` + `kind=rate_limit` (backoff,
  *  reprise auto — pas une panne) et `asleep` (endormie, réveillable — pas
  *  morte) basculent sur la teinte `wait` ; `waiting_input` reste rouge
- *  (attente UTILISATEUR, action requise — sémantique différente). */
+ *  (attente UTILISATEUR, action requise — sémantique différente) et
+ *  `error`+`kind=quota` aussi (forfait épuisé — bloqué jusqu'à action
+ *  humaine, pas une attente qui se résout seule). */
 function dotKey(state: string, lastError?: LastError | null): string {
   if (state === "error" && lastError?.kind === "rate_limit") return "wait";
   if (state === "asleep" || state === "wait-asleep") return "wait";

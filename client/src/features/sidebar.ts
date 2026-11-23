@@ -1178,7 +1178,10 @@ export class Sidebar {
       : "";
     const dotTip =
       s.state === "error" && s.last_error
-        ? `error: ${s.last_error.kind} · ${s.last_error.message} · x${s.last_error.count} · ${s.last_error.at}`
+        ? `error: ${s.last_error.kind} · ${s.last_error.message} · x${s.last_error.count} · ${s.last_error.at}` +
+          (s.last_error.retry_at
+            ? ` · retry ${new Date(s.last_error.retry_at * 1000).toLocaleTimeString()}`
+            : "")
         : s.state === "asleep"
           ? `asleep · ${t("dot_asleep_tip")}`
           : s.state === "wait-asleep"

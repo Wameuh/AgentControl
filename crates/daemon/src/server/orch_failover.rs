@@ -3,17 +3,19 @@
 //! Changer un profil `*_agent` à chaud (`acctl comp set`, UI) ne
 //! touche que les PROCHAINS spawns : les sessions déjà en backoff
 //! `rate_limit` (`last_error.kind == "rate_limit"`, `error_hold` armé)
-//! retenteraient indéfiniment sur l'ancien provider — et le mode
-//! sériel (`rate_limited_count > 0`) gèlerait toute la pipeline.
+//! ou bloquées `quota` (forfait épuisé — même besoin de bascule)
+//! retenteraient ou patieraient indéfiniment sur l'ancien provider —
+//! et le mode sériel (`rate_limited_count > 0`) gèlerait toute la
+//! pipeline.
 //!
 //! À chaque cycle, une session du composant (`origin:
 //! component:backlog-orchestrator`) remplissant TOUS ces critères
 //! est remplacée par une session équivalente sur le profil courant
 //! de son rôle :
 //!
-//!   - `state == "error"` et `last_error.kind == "rate_limit"` — les
-//!     holds `model`/`auth`/`other` relèvent d'une intervention
-//!     manuelle, jamais d'un respawn automatique ;
+//!   - `state == "error"` et `last_error.kind` ∈ {`rate_limit`,
+//!     `quota`} — les holds `model`/`auth`/`other` relèvent d'une
+//!     intervention manuelle, jamais d'un respawn automatique ;
 //!   - `meta.agent` ≠ agent effectif du rôle (`agent_or`) — c'est le
 //!     drift post-`comp set` qui déclenche le failover. Self-healing
 //!     par construction : un restart entre le set et le tick, ou un
@@ -97,7 +99,7 @@ fn fail_role(
         || !m
             .last_error
             .as_ref()
-            .is_some_and(|e| e.kind == "rate_limit")
+            .is_some_and(|e| matches!(e.kind.as_str(), "rate_limit" | "quota"))
         || acwait_pending(&m.id)
     {
         return None;
@@ -162,9 +164,9 @@ fn fail_role(
 
 /// Prompt du worker de reprise : le contexte de l'ancienne session
 /// est perdu — items `wip` et PRs sont réinjectés explicitement.
-const WORKER_FAILOVER_PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — TAKEOVER worker after a provider profile switch (rate_limit failover), not by a human or a parent session.]
+const WORKER_FAILOVER_PROMPT: &str = r#"[Session created automatically by the backlog-orchestrator service — TAKEOVER worker after a provider profile switch (rate_limit/quota failover), not by a human or a parent session.]
 
-You are a worker on the repo (cwd {WS}) — you replace a session destroyed because it was stuck in rate_limit on the old profile. Its context is lost; the work is recoverable via the AgentBacklog queue, the worktrees and the PR registry.
+You are a worker on the repo (cwd {WS}) — you replace a session destroyed because it was stuck in rate_limit or quota-blocked on the old profile. Its context is lost; the work is recoverable via the AgentBacklog queue, the worktrees and the PR registry.
 
 Start by reading {RULES} — the repo's branch, PR, review, CI and merge rules live there and take precedence.
 
@@ -188,7 +190,7 @@ Absolute rules: never stop/restart/touch the agentcontrol-daemon daemon; no secr
 const FAILOVER_NOTE: &str = r#"
 
 ## TAKEOVER (provider failover)
-You are resuming the role of a session destroyed because it was stuck in rate_limit on the old profile — its context is lost. The item is reassigned to you: do not call --claim or --pop for it, continue the work directly."#;
+You are resuming the role of a session destroyed because it was stuck in rate_limit or quota-blocked on the old profile — its context is lost. The item is reassigned to you: do not call --claim or --pop for it, continue the work directly."#;
 
 impl Daemon {
     /// Passe failover provider — appelée en tête de `orch_cycle`
@@ -217,8 +219,15 @@ impl Daemon {
                 return;
             }
             info!(
-                "orchestrator: provider failover — {} ({}) rate_limit on « {} » → « {} »",
-                m.title, m.id, m.agent, effective
+                "orchestrator: provider failover — {} ({}) {} on « {} » → « {} »",
+                m.title,
+                m.id,
+                m.last_error
+                    .as_ref()
+                    .map(|e| e.kind.as_str())
+                    .unwrap_or("?"),
+                m.agent,
+                effective
             );
             match role {
                 FailRole::Worker => self.failover_worker(bin, cfg, ws, &m, tasks, prs, st).await,
@@ -829,6 +838,24 @@ mod tests {
             retry_at: None,
         });
         assert!(fail_role(&m, &c, &[]).is_none());
+        // Hold quota (forfait épuisé) + drift de profil → failover :
+        // le changement de `*_agent` est la sortie du blocage.
+        let mut m = meta("s-1", "Backlog-W1", "devin");
+        m.last_error = Some(LastError {
+            message: "usage limit".into(),
+            kind: "quota".into(),
+            at: String::new(),
+            count: 1,
+            retry_at: None,
+        });
+        assert_eq!(
+            fail_role(&m, &c, &[]),
+            Some((
+                FailRole::Worker,
+                vec!["cursor".to_string()],
+                "cursor".to_string()
+            ))
+        );
         // Session active (working) → pas de drift même si agent diffère.
         let mut m = meta("s-1", "Backlog-W1", "devin");
         m.state = "working".into();

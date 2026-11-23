@@ -1216,6 +1216,11 @@ fn acwait_cancel_session_in(dir: &std::path::Path, sid: &str) {
 /// dès sa levée. Pilote le « mode sériel » du cycle : nudges
 /// workers/planners suspendus, au plus une session active à la fois,
 /// reviewer prioritaire (et jamais tué — son backoff le reprend).
+/// `quota` (forfait épuisé) n'est VOLONTAIREMENT pas compté : la
+/// panne est durable, pas un throttle partagé — geler toute la
+/// pipeline n'y changerait rien, les sessions quota restent en
+/// `error` sans retry jusqu'à action humaine (ou failover sur
+/// changement de profil).
 /// Choix multi-profils : la sérialisation reste globale au composant
 /// (conservateur — un quota trouvé sur n'importe quel profil gèle tout
 /// le pipeline) plutôt que par agent, les quotas n'étant pas déclarés

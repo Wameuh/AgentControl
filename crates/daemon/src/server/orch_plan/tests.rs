@@ -244,10 +244,17 @@ fn reviewer_choice_reuse_ou_spawn() {
         ReviewerChoice::Spawn
     );
     // « error » rate_limit : backoff en cours → Wait (on attend la
-    // reprise, on ne remplace pas). Autre « error » = en panne —
+    // reprise, on ne remplace pas). « error » quota : forfait épuisé
+    // → Wait aussi (aucune reprise auto — un spawn sur le même agent
+    // bouclerait sur la même panne ; le failover au changement de
+    // profil reste la sortie). Autre « error » = en panne —
     // réveiller ne sert à rien, session neuve.
     assert_eq!(
         reviewer_choice(Some(&sid), Some("error"), Some("rate_limit"), true, true),
+        ReviewerChoice::Wait
+    );
+    assert_eq!(
+        reviewer_choice(Some(&sid), Some("error"), Some("quota"), true, true),
         ReviewerChoice::Wait
     );
     assert_eq!(
@@ -379,8 +386,8 @@ fn sweep_decisions() {
 }
 
 /// « Vivant » pour la sweep — miroir de `reviewer_choice` : dead et
-/// error hors rate_limit sont irrécupérables (balayés), le backoff
-/// rate_limit est attendu (son retry session reprend la revue).
+/// error hors rate_limit/quota sont irrécupérables (balayés), le
+/// backoff rate_limit et le quota de forfait sont attendus (Wait).
 #[test]
 fn reviewer_alive_sweep_miroir_choice() {
     // Présent et sain → vivant.
@@ -391,7 +398,7 @@ fn reviewer_alive_sweep_miroir_choice() {
     assert!(!reviewer_alive_for_sweep(false, Some("idle"), None));
     // dead → irrécupérable.
     assert!(!reviewer_alive_for_sweep(true, Some("dead"), None));
-    // error hors rate_limit (model/auth/other) → irrécupérable.
+    // error hors rate_limit/quota (model/auth/other) → irrécupérable.
     for kind in ["model", "auth", "other"] {
         assert!(!reviewer_alive_for_sweep(true, Some("error"), Some(kind)));
     }
@@ -402,6 +409,9 @@ fn reviewer_alive_sweep_miroir_choice() {
         Some("error"),
         Some("rate_limit")
     ));
+    // error + quota → forfait épuisé en attente d'action humaine,
+    // conservé aussi (Wait — le rm+respawn bouclerait sur la panne).
+    assert!(reviewer_alive_for_sweep(true, Some("error"), Some("quota")));
 }
 
 #[test]

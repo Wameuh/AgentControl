@@ -594,8 +594,11 @@ pub struct SessionMeta {
     #[serde(default)]
     pub context_size: Option<u64>,
     /// Dernier échec de tour session/prompt (état "error") — kind :
-    /// rate_limit | model | auth | other. Effacé au premier tour
-    /// réussi ou reset de cycle (spawn, /clear, set_model…).
+    /// rate_limit | quota | model | auth | other. `rate_limit` =
+    /// throttle transitoire à reprise auto ; `quota` = forfait/compte
+    /// épuisé, bloqué sans retry jusqu'à action humaine. Effacé au
+    /// premier tour réussi ou reset de cycle (spawn, /clear,
+    /// set_model…).
     #[serde(default)]
     pub last_error: Option<LastError>,
     /// Détail du waiter ac-wait — présent seulement quand `state` est
@@ -626,15 +629,17 @@ pub struct WaitInfo {
 pub struct LastError {
     /// Message d'erreur brut (tronqué à la pose).
     pub message: String,
-    /// Classification : rate_limit | model | auth | other.
+    /// Classification : rate_limit | quota | model | auth | other.
     pub kind: String,
     /// Horodatage du premier échec de la série.
     pub at: String,
     /// Échecs consécutifs du même kind.
     pub count: u32,
     /// Retry programmé pour `rate_limit` (epoch secondes UTC) — calé
-    /// sur l'échéance annoncée par le provider quand le message la
-    /// porte, sinon now + backoff. None = pas de retry automatique.
+    /// sur l'échéance de reset annoncée par le provider quand le
+    /// message la porte (fenêtre de quota quotidienne incluse),
+    /// sinon now + backoff. None = pas de retry automatique
+    /// (quota/model/auth/other).
     #[serde(default)]
     pub retry_at: Option<i64>,
 }

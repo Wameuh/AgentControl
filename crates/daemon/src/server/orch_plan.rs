@@ -346,8 +346,11 @@ fn backlog_active(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> usize {
 enum ReviewerChoice {
     Reuse(String),
     Spawn,
-    /// Reviewer mappé en backoff rate_limit : ni spawn ni réveil —
-    /// son retry session le reprendra, on attend.
+    /// Reviewer mappé en attente quota : ni spawn ni réveil —
+    /// `rate_limit` reprend tout seul à l'échéance ; `quota` (forfait
+    /// épuisé) reste bloqué jusqu'à une action humaine (changement de
+    /// plan ou de profil — le failover le couvre alors). Dans les
+    /// deux cas, spawner derrière rebrûlerait la même limite.
     Wait,
 }
 
@@ -356,7 +359,9 @@ enum ReviewerChoice {
 /// coupé : comportement éphémère, une session neuve par round).
 /// `meta_err_kind` = `last_error.kind` du reviewer mappé : `rate_limit`
 /// → Wait (quota partagé en backoff — le tuer ou spawner derrière
-/// rebrûlerait la limite à sa levée).
+/// rebrûlerait la limite à sa levée), `quota` → Wait aussi (forfait
+/// épuisé : aucune reprise automatique n'existe, un spawn sur le même
+/// agent bouclerait sur la même panne).
 fn reviewer_choice(
     mapped: Option<&String>,
     meta_state: Option<&str>,
@@ -364,13 +369,14 @@ fn reviewer_choice(
     in_session_ids: bool,
     reuse: bool,
 ) -> ReviewerChoice {
-    // rate_limit avant `reuse` : backoff partagé — un reviewer mappé en
-    // rate_limit est attendu même quand `reviewer_reuse` est coupé
-    // (un spawn de remplacement repartirait sur la même limite).
+    // Attente quota avant `reuse` : backoff/forfait partagé — un
+    // reviewer mappé en rate_limit ou quota est attendu même quand
+    // `reviewer_reuse` est coupé (un spawn de remplacement
+    // repartirait sur la même limite).
     if matches!(
         (mapped, in_session_ids, meta_state),
         (Some(_), true, Some("error"))
-    ) && meta_err_kind == Some("rate_limit")
+    ) && matches!(meta_err_kind, Some("rate_limit") | Some("quota"))
     {
         return ReviewerChoice::Wait;
     }
@@ -378,8 +384,9 @@ fn reviewer_choice(
         return ReviewerChoice::Spawn;
     }
     match (mapped, in_session_ids, meta_state) {
-        // « error » hors rate_limit = en panne (model/auth/other) —
-        // inutile de le réveiller, il ne répondra qu'au même échec.
+        // « error » hors rate_limit/quota = en panne (model/auth/
+        // other) — inutile de le réveiller, il ne répondra qu'au
+        // même échec.
         (Some(sid), true, Some(state)) if state != "dead" && state != "error" => {
             ReviewerChoice::Reuse(sid.clone())
         }
@@ -447,12 +454,15 @@ fn reviewer_sleep_ok(state: &str) -> bool {
 }
 
 /// Le reviewer mappé compte-t-il comme « vivant » pour la sweep ?
-/// `dead` et `error` hors rate_limit (model/auth — jamais de retry
-/// auto, `reviewer_choice` ne les réutilise pas non plus) sont
+/// `dead` et `error` hors rate_limit/quota (model/auth — jamais de
+/// retry auto, `reviewer_choice` ne les réutilise pas non plus) sont
 /// irrécupérables → balayés ; `error`+`rate_limit` est un backoff
-/// transitoire repris par le retry session — conservé, à l'image du
-/// `Wait` de `reviewer_choice` (le tuer puis respawner rebrûlerait la
-/// limite partagée et perdrait le contexte du reviewer persistant).
+/// transitoire repris par le retry session et `error`+`quota` un
+/// forfait épuisé en attente d'action humaine — conservés dans les
+/// deux cas, à l'image du `Wait` de `reviewer_choice` (le tuer puis
+/// respawner rebrûlerait la limite partagée et perdrait le contexte
+/// du reviewer persistant ; pour quota, le failover au changement de
+/// profil reste la sortie).
 fn reviewer_alive_for_sweep(
     in_session_ids: bool,
     state: Option<&str>,
@@ -460,7 +470,7 @@ fn reviewer_alive_for_sweep(
 ) -> bool {
     in_session_ids
         && state != Some("dead")
-        && !(state == Some("error") && err_kind != Some("rate_limit"))
+        && !(state == Some("error") && !matches!(err_kind, Some("rate_limit") | Some("quota")))
 }
 
 /// Décision de la sweep de fin de tick pour un reviewer mémorisé.
@@ -902,8 +912,9 @@ impl Daemon {
                 .map(|m| m.state.as_str());
             let busy = rstate.is_some_and(|s| matches!(s, "working" | "compacting" | "starting"));
             // « error » : rate_limit en backoff (reprise auto par le
-            // retry session — on attend, jamais de kill) ou panne
-            // model/auth — un nudge n'accélère rien dans les deux cas.
+            // retry session) ou quota de forfait (aucune reprise —
+            // action humaine) — on attend dans les deux cas, jamais
+            // de kill ni de nudge qui rebrûlerait la même limite.
             if rstate == Some("error") || busy || now - started < cfg.nudge_cooldown_secs as f64 {
                 continue;
             }
@@ -1608,12 +1619,13 @@ impl Daemon {
                 .unwrap_or(false);
             let rmeta = metas.iter().find(|m| m.id == rsid);
             let rstate = rmeta.map(|m| m.state.as_str());
-            // dead/error hors rate_limit : la session existe encore
-            // mais `reviewer_choice` ne la réutilisera jamais — la
-            // balayer comme absente (rm + purge de la map) sinon elle
-            // s'accumule ; le dispatch respawnera au besoin. Un
-            // backoff rate_limit reste « vivant » : le retry session
-            // reprendra la revue (même garde que `reviewer_choice`).
+            // dead/error hors rate_limit/quota : la session existe
+            // encore mais `reviewer_choice` ne la réutilisera jamais —
+            // la balayer comme absente (rm + purge de la map) sinon
+            // elle s'accumule ; le dispatch respawnera au besoin. Un
+            // backoff rate_limit ou un quota de forfait reste «
+            // vivant » : Wait dans les deux cas (même garde que
+            // `reviewer_choice`).
             let reviewer_alive = reviewer_alive_for_sweep(
                 session_ids.contains(&rsid),
                 rstate,
