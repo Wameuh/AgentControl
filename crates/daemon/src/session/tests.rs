@@ -513,16 +513,48 @@ async fn compact_setcfg_hot() {
 }
 
 /// Classification des échecs session/prompt — pilote le retry :
-/// auth > rate_limit > model > other.
+/// auth > quota > rate_limit > model > other.
 #[test]
 fn error_classify() {
     use prompt::classify_error;
+    // Message RÉEL Devin (modèle gratuit) : fenêtre avec reset
+    // annoncé → throttle transitoire, JAMAIS quota de forfait.
+    assert_eq!(
+        classify_error(
+            "acp session/prompt: Reached free model rate limit. Upgrade to Max for higher limits, or switch to a different model. Your limit will reset in 4 hours 20 minutes (at 18:01 UTC)."
+        ),
+        "rate_limit"
+    );
     assert_eq!(
         classify_error("Reached free model rate limit. Upgrade to a paid plan"),
         "rate_limit"
     );
     assert_eq!(classify_error("HTTP 429 too many requests"), "rate_limit");
     assert_eq!(classify_error("resource exhausted"), "rate_limit");
+    // « quota » générique sans signal de forfait → rate_limit
+    // (throttle transitoire, ex. quota par minute).
+    assert_eq!(
+        classify_error("quota exceeded for this account"),
+        "rate_limit"
+    );
+    // Forfait épuisé — messages réels Cursor : quota mensuel /
+    // crédits, pas de reset à la minute → état bloqué `quota`.
+    assert_eq!(
+        classify_error(
+            "Error: You've hit your usage limit\nYou've saved $12.30 on API model usage this month with Pro. Switch to Auto for more usage or set a Spend Limit to continue with Sonnet. Your usage limits will reset when your monthly cycle ends on 12/1/2025."
+        ),
+        "quota"
+    );
+    assert_eq!(classify_error("Upgrade your plan to continue"), "quota");
+    assert_eq!(classify_error("usage_limit_exceeded"), "quota");
+    assert_eq!(
+        classify_error("Your monthly cycle ends on 12/1/2025 — upgrade your plan"),
+        "quota"
+    );
+    // Autres formes de forfait : crédits OpenAI/Anthropic.
+    assert_eq!(classify_error("insufficient_quota"), "quota");
+    assert_eq!(classify_error("You have run out of credits"), "quota");
+    assert_eq!(classify_error("credit balance is too low"), "quota");
     assert_eq!(classify_error("Invalid params: model foo"), "model");
     assert_eq!(classify_error("model not found"), "model");
     // codex-acp : refus de modèle ChatGPT-account (backend 400).
@@ -548,7 +580,8 @@ fn error_classify() {
     );
 }
 
-/// Backoff rate_limit : 60 s puis exponentiel, plafonné à 1 h.
+/// Backoff rate_limit : 60 s puis exponentiel, plafonné à 1 h ;
+/// backoff long (8 h) pour les fenêtres de quota sans échéance.
 #[test]
 fn error_backoff() {
     assert_eq!(prompt::backoff_for(1), std::time::Duration::from_secs(60));
@@ -558,11 +591,30 @@ fn error_backoff() {
         prompt::backoff_for(30),
         std::time::Duration::from_secs(3600)
     );
+    // Fenêtre de quota : même exponentiel, plafond 8 h.
+    let cap = prompt::QUOTA_WINDOW_BACKOFF_CAP;
+    assert_eq!(
+        prompt::backoff_for_capped(1, cap),
+        std::time::Duration::from_secs(60)
+    );
+    assert_eq!(
+        prompt::backoff_for_capped(10, cap),
+        std::time::Duration::from_secs(cap)
+    );
+    // quota_window : modèles gratuits / limites à horizon long.
+    assert!(prompt::quota_window(
+        "Reached free model rate limit. Upgrade to Max"
+    ));
+    assert!(prompt::quota_window(
+        "rate limit — your limit will reset soon"
+    ));
+    assert!(!prompt::quota_window("HTTP 429 too many requests"));
+    assert!(!prompt::quota_window("resource exhausted"));
 }
 
-/// parse_reset_at : durée relative, retry-after nu, heure UTC
-/// absolue ; et les échéances absurdes rejetées (> 1 h, > 5 min
-/// dans le passé) → backoff.
+/// parse_reset_at : durée relative (composée incluse), retry-after
+/// nu, heure UTC absolue (jour J ou J+1) ; et les échéances
+/// absurdes rejetées (> 24 h, > 5 min dans le passé) → backoff.
 #[test]
 fn reset_at_parsing() {
     let now = std::time::SystemTime::now();
@@ -575,31 +627,45 @@ fn reset_at_parsing() {
     .unwrap();
     let d = prompt::unix_secs(t) - at(0);
     assert!((890..=910).contains(&d), "reset in 15min → ~900s, got {d}");
-    // « try again in 2 hours » → > 1 h → absurde → None.
-    assert!(prompt::parse_reset_at("try again in 2 hours", now).is_none());
+    // Durée COMPOSÉE réelle Devin : « 4 hours 20 minutes » = 15600 s.
+    let t = prompt::parse_reset_at(
+        "Reached free model rate limit. Your limit will reset in 4 hours 20 minutes (at 18:01 UTC).",
+        now,
+    )
+    .unwrap();
+    let d = prompt::unix_secs(t) - at(0);
+    assert!(
+        (15500..=15720).contains(&d),
+        "reset in 4h20m → ~15600s, got {d}"
+    );
+    // « try again in 2 hours » → horizon 24 h → accepté (~7200 s).
+    let t = prompt::parse_reset_at("try again in 2 hours", now).unwrap();
+    let d = prompt::unix_secs(t) - at(0);
+    assert!(
+        (7100..=7300).contains(&d),
+        "try again in 2h → ~7200s, got {d}"
+    );
     // « retry-after: 120 » → secondes nues (convention HTTP).
     let t = prompt::parse_reset_at("HTTP 429 — retry-after: 120", now).unwrap();
     assert_eq!(prompt::unix_secs(t) - at(0), 120);
     // Heure absolue UTC : « at HH:MM UTC » — calcule l'écart réel.
-    // Garde minuit : +10 min peut basculer au jour suivant, cas non
-    // géré par le parse (same-day) — on saute le test dans cette
-    // fenêtre plutôt que de flaker.
+    // Le rollover J+1 est géré : une heure déjà passée ce jour vise
+    // le lendemain (reset de quota quotidien annoncé le soir).
     let hhmm = {
         let dt = chrono::DateTime::<chrono::Utc>::from(now);
         use chrono::Timelike;
-        if dt.hour() >= 23 && dt.minute() >= 45 {
-            return;
-        }
         let target = dt + chrono::Duration::minutes(10);
         format!("{:02}:{:02}", target.hour(), target.minute())
     };
     let msg = format!("quota exceeded (at {hhmm} UTC)");
     let t = prompt::parse_reset_at(&msg, now).unwrap();
     let d = prompt::unix_secs(t) - at(0);
-    assert!((540..=600).contains(&d), "at HH:MM UTC → ~600s, got {d}");
+    // +10 min → ~600 s ; si l'heure construite appartient au jour
+    // suivant (bascule de minuit), le candidat J+1 la ramène à ~600.
+    assert!((530..=610).contains(&d), "at HH:MM UTC → ~600s, got {d}");
     // Sans fuseau → pas d'heure absolue (« meet at 5:30 » ignoré).
     assert!(prompt::parse_reset_at("meet at 5:30", now).is_none());
-    // « reset in 3 days » → > 1 h → None.
+    // « reset in 3 days » → > 24 h → None.
     assert!(prompt::parse_reset_at("reset in 3 days", now).is_none());
     // Message sans échéance → None.
     assert!(prompt::parse_reset_at("429 too many requests", now).is_none());
@@ -633,6 +699,60 @@ async fn rate_limit_announced_window() {
     // Un kind différent repart à 1.
     s.hold_error("model", "model not found");
     assert_eq!(s.meta_snapshot().last_error.unwrap().count, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Reset annoncé LOINTAIN (fenêtre de quota quotidienne, message
+/// réel Devin « 4 hours 20 minutes ») : retry_at calé sur l'heure
+/// du reset — pas de clamp à 1 h qui réessaierait avant l'échéance.
+#[tokio::test]
+async fn rate_limit_far_reset_window() {
+    let (s, dir) = tmp_session("rl-far");
+    s.hold_error(
+        "rate_limit",
+        "acp session/prompt: Reached free model rate limit. Your limit will reset in 4 hours 20 minutes (at 18:01 UTC).",
+    );
+    let le = s.meta_snapshot().last_error.unwrap();
+    let retry = le.retry_at.expect("retry_at set");
+    let now = prompt::unix_secs(std::time::SystemTime::now());
+    let d = retry - now;
+    // ~4 h 20 min + jitter 5-15 s — bien au-delà de l'ancien clamp 1 h.
+    assert!(
+        (15400..=15800).contains(&d),
+        "retry ~4h20m+jitter, got {d}s"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Forfait épuisé (kind=quota, message réel Cursor) : état error
+/// SANS timer de retry et retry_at absent — bloqué jusqu'à action
+/// humaine, jamais de boucle.
+#[tokio::test]
+async fn quota_hold_blocked() {
+    let (s, dir) = tmp_session("quota-hold");
+    s.hold_error(
+        "quota",
+        "acp session/prompt: Error: You've hit your usage limit. Your usage limits will reset when your monthly cycle ends on 12/1/2025.",
+    );
+    let m = s.meta_snapshot();
+    assert_eq!(m.state, "error");
+    let le = m.last_error.unwrap();
+    assert_eq!(le.kind, "quota");
+    assert_eq!(le.count, 1);
+    assert!(le.retry_at.is_none(), "quota: no scheduled retry");
+    assert!(s.error_held());
+    assert!(s
+        .error_hold
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .timer
+        .is_none());
+    // clear_error reste la sortie (action explicite).
+    s.clear_error();
+    assert!(!s.error_held());
+    assert!(s.meta_snapshot().last_error.is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

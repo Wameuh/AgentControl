@@ -559,10 +559,23 @@ async fn main() -> Result<()> {
                     };
                     // État affiché — « error » porte le kind en
                     // suffixe (error:rate_limit…) pour distinguer un
-                    // retry programmé d'une panne à réparer.
+                    // retry programmé d'une panne à réparer ; un
+                    // retry_at futur ajoute le compte à rebours
+                    // (+87m) — l'attente de quota est visible.
                     let state = match s["state"].as_str().unwrap_or("") {
                         "error" => match s["last_error"]["kind"].as_str() {
-                            Some(k) => format!("error:{k}"),
+                            Some(k) => {
+                                let retry = s["last_error"]["retry_at"].as_i64().unwrap_or(0);
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() as i64)
+                                    .unwrap_or(0);
+                                if retry > now {
+                                    format!("error:{k}(+{}m)", (retry - now) / 60)
+                                } else {
+                                    format!("error:{k}")
+                                }
+                            }
                             None => "error".to_string(),
                         },
                         st => st.to_string(),

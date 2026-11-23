@@ -23,12 +23,16 @@ pub(super) enum TurnOutcome {
 }
 
 /// Classification d'une erreur `session/prompt` — pilote le retry :
-/// `rate_limit` = backoff automatique borné, `model`/`auth`/`other` =
-/// jamais de retry sans action explicite (changer de modèle/réparer
-/// l'auth est une décision humaine).
-/// Ordre des tests : auth > rate_limit > model — un « 403 » est auth
-/// même avec « quota » dans le texte, un « rate limit » ne contient
-/// quasiment jamais « model ».
+/// `rate_limit` = throttle transitoire, backoff automatique borné ;
+/// `quota` = forfait/compte épuisé (quota mensuel, crédits) — état
+/// bloqué SANS retry automatique, la réparation est humaine (plan,
+/// profil agent) ; `model`/`auth`/`other` = jamais de retry sans
+/// action explicite non plus.
+/// Ordre des tests : auth > quota > rate_limit > model — un « 403 »
+/// est auth même avec « quota » dans le texte, et les marqueurs de
+/// forfait (« usage limit », « upgrade your plan », « insufficient
+/// quota »…) priment sur le « rate limit »/« quota » générique :
+/// un quota de plan ne se lève pas à la minute.
 pub(super) fn classify_error(msg: &str) -> &'static str {
     let m = msg.to_lowercase();
     // Codes HTTP en mot entier : « 429 » nu matcherait « 1704290000 »
@@ -47,6 +51,29 @@ pub(super) fn classify_error(msg: &str) -> &'static str {
         || m.contains("api key")
     {
         return "auth";
+    }
+    // Limite de FORFAIT (Cursor : « You've hit your usage limit …
+    // monthly cycle ends », « Upgrade your plan to continue » ;
+    // OpenAI : « insufficient_quota ») — distincte du throttle
+    // passager : aucun retry auto, l'utilisateur change de plan ou
+    // de profil agent. Volontairement restrictif : le « quota »
+    // générique et les fenêtres de modèle gratuit Devin (« free
+    // model rate limit … reset in … ») restent `rate_limit`.
+    if m.contains("usage limit")
+        || m.contains("usage_limit")
+        || m.contains("upgrade your plan")
+        || m.contains("monthly cycle")
+        || m.contains("billing cycle")
+        || m.contains("insufficient_quota")
+        || m.contains("insufficient quota")
+        || m.contains("out of credits")
+        || m.contains("insufficient credits")
+        || m.contains("credit balance")
+        || m.contains("credits exhausted")
+        || m.contains("spend limit")
+        || m.contains("spend_limit")
+    {
+        return "quota";
     }
     if m.contains("rate limit")
         || m.contains("ratelimit")
@@ -74,10 +101,36 @@ pub(super) fn classify_error(msg: &str) -> &'static str {
 }
 
 /// Backoff du retry `rate_limit` : 60 s au premier échec, doublé à
-/// chaque échec consécutif du même kind, plafonné à 1 h.
+/// chaque échec consécutif du même kind, plafonné à `cap` secondes.
+pub(super) fn backoff_for_capped(count: u32, cap: u64) -> std::time::Duration {
+    // Borne du shift : 60 s × 2^10 ≈ 17 h — au-delà c'est `min(cap)`
+    // qui décide, un cap supérieur serait inatteignable.
+    let secs = 60u64.saturating_mul(1u64 << count.saturating_sub(1).min(10));
+    std::time::Duration::from_secs(secs.min(cap))
+}
+
+/// Backoff standard `rate_limit` : plafond 1 h.
 pub(super) fn backoff_for(count: u32) -> std::time::Duration {
-    let secs = 60u64.saturating_mul(1u64 << count.saturating_sub(1).min(6));
-    std::time::Duration::from_secs(secs.min(3600))
+    backoff_for_capped(count, 3600)
+}
+
+/// Plafond du backoff « fenêtre de quota » (modèle gratuit / limite
+/// de plan sans échéance parsable) : 8 h — les fenêtres constatées
+/// vont de la minute à ~7 h, une boucle horaire gaspillerait des
+/// tentatives et maintiendrait le mode sériel orchestrateur en
+/// vie artificiellement.
+pub(super) const QUOTA_WINDOW_BACKOFF_CAP: u64 = 8 * 3600;
+
+/// Vrai si le message décrit une fenêtre de quota à horizon long
+/// (modèle gratuit Devin, limite de plan) plutôt qu'un throttle
+/// passager à la minute — utilisé pour allonger le backoff quand
+/// aucune échéance de reset n'a pu être parsée.
+pub(super) fn quota_window(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("free model")
+        || m.contains("model rate limit")
+        || (m.contains("rate limit")
+            && (m.contains("reset") || m.contains("upgrade") || m.contains("quota")))
 }
 
 /// Secondes epoch UTC d'un SystemTime (0 si avant l'epoch — jamais en
@@ -100,11 +153,12 @@ pub(super) fn reset_jitter(msg: &str, count: u32) -> u64 {
     5 + h % 11
 }
 
-/// `<n>[.<d>] <unité?>` en tête de `s` — retourne les secondes. Unité
-/// absente → `default_secs` (None = unité exigée). Mots reconnus :
-/// second/sec, minute/min, hour/hr, day — anglais uniquement, le
-/// provider n'annonce pas dans une autre langue.
-fn parse_duration_secs(s: &str, default_secs: Option<u64>) -> Option<u64> {
+/// `<n>[.<d>] <unité?>` en tête de `s` — retourne (secondes, reste
+/// après l'unité). Unité absente → `default_secs` (None = unité
+/// exigée). Mots reconnus : second/sec, minute/min, hour/hr, day —
+/// anglais uniquement, le provider n'annonce pas dans une autre
+/// langue.
+fn parse_duration_secs(s: &str, default_secs: Option<u64>) -> Option<(u64, &str)> {
     let s = s.trim_start_matches(|c: char| !c.is_ascii_digit());
     let int_len = s.bytes().take_while(u8::is_ascii_digit).count();
     if int_len == 0 {
@@ -119,11 +173,14 @@ fn parse_duration_secs(s: &str, default_secs: Option<u64>) -> Option<u64> {
             secs += format!("0.{}", &frac[..flen]).parse::<f64>().ok()?;
         }
     }
-    let unit = rest
-        .trim_start_matches(|c: char| !c.is_ascii_alphabetic())
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .next()
-        .unwrap_or("");
+    // Mot d'unité = premier run alphabétique après le nombre
+    // (le reste avant lui — espaces, tirets — est sauté).
+    let skip = rest
+        .find(|c: char| c.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    let word = &rest[skip..];
+    let unit_len = word.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let unit = &word[..unit_len];
     let mult = match unit {
         "" => default_secs?,
         u if u.starts_with("sec") => 1,
@@ -132,19 +189,53 @@ fn parse_duration_secs(s: &str, default_secs: Option<u64>) -> Option<u64> {
         u if u.starts_with("day") => 86400,
         _ => return None,
     };
-    Some((secs * mult as f64).round() as u64)
+    let tail = &rest[skip + unit_len..];
+    Some(((secs * mult as f64).round() as u64, tail))
+}
+
+/// Durée composée « 4 hours 20 minutes » : somme des groupes
+/// `<n> <unité>` consécutifs (séparateurs espace/virgule/"and"
+/// tolérés). Unité exigée sur chaque groupe — « retry after 120 »
+/// reste au parsing unitaire du caller. None = aucun groupe.
+fn parse_duration_chain(s: &str) -> Option<u64> {
+    let mut rest = s;
+    let mut total = 0u64;
+    let mut groups = 0u32;
+    loop {
+        // Séparateurs entre groupes : espaces, virgule, « and ».
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
+        if let Some(r) = rest.strip_prefix("and ") {
+            rest = r;
+            continue;
+        }
+        let Some((secs, tail)) = parse_duration_secs(rest, None) else {
+            break;
+        };
+        total = total.saturating_add(secs);
+        groups += 1;
+        rest = tail;
+    }
+    (groups > 0).then_some(total)
 }
 
 fn unix_to_system(unix: i64) -> std::time::SystemTime {
     std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix.max(0) as u64)
 }
 
+/// Horizon max d'une échéance de reset annoncée : 24 h — les
+/// fenêtres de quota constatées (modèles gratuits) vont de la
+/// minute à ~7 h ; au-delà on considère l'annonce inexploitable et
+/// le backoff reprend la main.
+pub(super) const RESET_MAX_AHEAD: i64 = 24 * 3600;
+
 /// Échéance de reset annoncée par le provider dans un message
-/// rate_limit : « reset in 15 minutes », « try again in 2 hours »,
+/// rate_limit : « reset in 15 minutes », « reset in 4 hours 20
+/// minutes » (durée composée), « try again in 2 hours »,
 /// « retry-after: 120 » (secondes nues, convention HTTP), ou heure
-/// absolue « at 13:56 UTC ». None = rien d'exploitable ou échéance
-/// absurde (> 1 h dans le futur, > 5 min dans le passé — le backoff
-/// classique reprend la main dans les deux cas).
+/// absolue « at 13:56 UTC » (jour J, ou J+1 si déjà passée — un reset
+/// de minuit passé le soir vise le lendemain). None = rien
+/// d'exploitable ou échéance absurde (> 24 h dans le futur, > 5 min
+/// dans le passé — le backoff classique reprend la main).
 pub(super) fn parse_reset_at(
     msg: &str,
     now: std::time::SystemTime,
@@ -153,9 +244,15 @@ pub(super) fn parse_reset_at(
     let m = msg.to_lowercase();
     let sane = |target: i64| {
         let d = target - now_unix;
-        (-300..=3600).contains(&d).then(|| unix_to_system(target))
+        (-300..=RESET_MAX_AHEAD)
+            .contains(&d)
+            .then(|| unix_to_system(target))
     };
-    // (a) durée relative : « reset in 15 minutes », « try again in 2 h »
+    // (a) durée relative : « reset in 15 minutes », « try again in
+    // 2 hours », « reset in 4 hours 20 minutes » — durée composée
+    // acceptée. Une annonce refusée par `sane` ne court-circuite PAS
+    // le scan : l'heure absolue « (at 18:01 UTC) » qui suit peut
+    // rester la bonne échéance.
     for kw in [
         "reset in ",
         "resets in ",
@@ -171,12 +268,23 @@ pub(super) fn parse_reset_at(
         // retry-after admet la forme nue « : 120 » (secondes) ; les
         // autres tournures exigent une unité explicite.
         let bare = kw.starts_with("retry");
-        if let Some(d) = parse_duration_secs(rest, bare.then_some(1)) {
-            return sane(now_unix.saturating_add(d as i64));
+        let d = parse_duration_chain(rest).or_else(|| {
+            if bare {
+                parse_duration_secs(rest, Some(1)).map(|(s, _)| s)
+            } else {
+                None
+            }
+        });
+        if let Some(d) = d {
+            if let Some(t) = sane(now_unix.saturating_add(d as i64)) {
+                return Some(t);
+            }
         }
     }
     // (b) heure absolue UTC : « (at 13:56 UTC) » — le suffixe de fuseau
-    // est exigé pour ne pas capter « meet at 5:30 ».
+    // est exigé pour ne pas capter « meet at 5:30 ». Candidate jour J
+    // puis J+1 : une annonce du soir pour « 18:01 UTC » vise le
+    // lendemain, pas une heure déjà passée.
     for (i, _) in m.match_indices("at ") {
         let rest = m[i + 3..].trim_start();
         let b = rest.as_bytes();
@@ -199,11 +307,19 @@ pub(super) fn parse_reset_at(
         }
         use chrono::Datelike;
         let dt = chrono::DateTime::<chrono::Utc>::from(now);
-        let target_unix = chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), dt.day())
-            .and_then(|d| d.and_hms_opt(hh, mm, 0))
-            .map(|n| n.and_utc().timestamp());
-        if let Some(t) = target_unix {
-            return sane(t);
+        let Some(day) = chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), dt.day()) else {
+            continue;
+        };
+        for offset in [0i64, 1] {
+            let target_unix = day
+                .checked_add_signed(chrono::Duration::days(offset))
+                .and_then(|d| d.and_hms_opt(hh, mm, 0))
+                .map(|n| n.and_utc().timestamp());
+            if let Some(t) = target_unix {
+                if let Some(t) = sane(t) {
+                    return Some(t);
+                }
+            }
         }
     }
     None

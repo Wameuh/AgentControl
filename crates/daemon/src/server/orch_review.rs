@@ -534,10 +534,11 @@ fn clip(s: &str, max: usize) -> String {
 
 impl Daemon {
     /// Failover provider (item #193) — voir server/orch_failover.rs.
-    /// Une session `PRReview-*` en backoff `rate_limit` sur un profil
-    /// `pr_reviewer_agent` remplacé → détruite ; l'entrée `pr_reviews`
-    /// correspondante repasse en `retry_wait` immédiat et la passe
-    /// retry la relance sur le profil courant (head SHA revérifié).
+    /// Une session `PRReview-*` en backoff `rate_limit` ou bloquée
+    /// `quota` sur un profil `pr_reviewer_agent` remplacé → détruite ;
+    /// l'entrée `pr_reviews` correspondante repasse en `retry_wait`
+    /// immédiat et la passe retry la relance sur le profil courant
+    /// (head SHA revérifié).
     /// Self-healing : le drift `meta.agent` ≠ `agent_or(pr_reviewer_agent)`
     /// est le déclencheur — un restart entre le `comp set` et le tick
     /// est rattrapé sans file d'événements.
@@ -551,9 +552,11 @@ impl Daemon {
         if effective.is_empty() {
             return;
         }
-        // Candidates : origin PRReview + error/rate_limit + agent ≠
-        // profil courant + pas de waiter ac-wait vivant (le ping du
-        // waiter la réveillera sur l'ancien provider — inchangée).
+        // Candidates : origin PRReview + error/rate_limit|quota +
+        // agent ≠ profil courant + pas de waiter ac-wait vivant (le
+        // ping du waiter la réveillera sur l'ancien provider —
+        // inchangée). `quota` = forfait épuisé : le changement de
+        // profil est la sortie — même traitement que rate_limit.
         let stale: Vec<String> = metas
             .iter()
             .filter(|m| {
@@ -561,7 +564,7 @@ impl Daemon {
                     && m.state == "error"
                     && m.last_error
                         .as_ref()
-                        .is_some_and(|e| e.kind == "rate_limit")
+                        .is_some_and(|e| matches!(e.kind.as_str(), "rate_limit" | "quota"))
                     && m.agent != effective
                     && !acwait_pending(&m.id)
             })
@@ -786,10 +789,10 @@ impl Daemon {
         }
 
         // Failover provider (item #193) : reviews PR dont la session
-        // `PRReview-*` est en backoff rate_limit sur un profil
-        // `pr_reviewer_agent` qui n'est plus celui configuré → session
-        // détruite, entrée repassée en retry immédiat — la passe
-        // retry ci-dessous la relance sur le nouveau profil.
+        // `PRReview-*` est en backoff rate_limit ou bloquée quota sur
+        // un profil `pr_reviewer_agent` qui n'est plus celui configuré
+        // → session détruite, entrée repassée en retry immédiat — la
+        // passe retry ci-dessous la relance sur le nouveau profil.
         self.orch_failover_pr_reviews(&metas, &mut st, &cfg).await;
 
         // Balayage des worktrees orphelins — une fois par process
@@ -895,6 +898,42 @@ impl Daemon {
                     }
                     continue;
                 }
+            }
+            // Forfait épuisé (kind=quota) : la session ne reprendra
+            // JAMAIS seule (pas de retry auto) — attendre la laisserait
+            // « running » éternelle et occuperait un slot du pool.
+            // Échec explicite avec l'erreur provider en commentaire ;
+            // un nouveau trigger relance après changement de
+            // plan/profil (le failover couvre le drift de profil).
+            if meta.state == "error"
+                && meta
+                    .last_error
+                    .as_ref()
+                    .is_some_and(|le| le.kind == "quota")
+            {
+                let detail = meta
+                    .last_error
+                    .as_ref()
+                    .map(|le| clip(&le.message, 160))
+                    .unwrap_or_default();
+                warn!("orchestrator: PR review {key} reviewer quota exhausted → failed");
+                self.pr_comment(
+                    repo,
+                    pr_n,
+                    &fail_comment(&format!("quota exhausted — {detail}"), &cfg, repo),
+                    &cfg,
+                )
+                .await;
+                self.pr_review_finish(
+                    &key,
+                    EntryState::Failed,
+                    &mut st,
+                    &wt,
+                    Path::new(ws_of(&cfg, repo)),
+                )
+                .await;
+                self.orch_save(&st);
+                continue;
             }
             // En vol : working/compacting/starting → attendre ; error
             // (rate limit, reprise automatique) et waiting_input aussi.

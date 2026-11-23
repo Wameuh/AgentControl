@@ -757,18 +757,28 @@ impl Session {
                 .map(|_| prompt::reset_jitter(msg, count) as i64)
                 .unwrap_or(0);
             let target = t + jittered;
-            // Annonce fraîche : borne [60 s, 1 h] (le parse a déjà
-            // rejeté l'absurde, le clamp couvre le reset tout juste
-            // passé). Fenêtre reprise : échéance déjà calibrée, on ne
-            // fait que ne pas la dépasser.
+            // Annonce fraîche : borne [60 s, horizon de parse] (le
+            // parse a déjà rejeté l'absurde, le clamp couvre le reset
+            // tout juste passé et une annonce à > 1 h — fenêtre de
+            // quota quotidienne : ne PAS réessayer avant le reset
+            // annoncé, même lointain). Fenêtre reprise : échéance
+            // déjà calibrée, on ne fait que ne pas la dépasser.
             let d = if fresh.is_some() {
-                (target - now_unix).clamp(60, 3600)
+                (target - now_unix).clamp(60, prompt::RESET_MAX_AHEAD + 300)
             } else {
                 (target - now_unix).max(0)
             };
             (std::time::Duration::from_secs(d as u64), Some(now_unix + d))
         } else {
-            let d = prompt::backoff_for(count);
+            // Pas d'échéance annoncée : backoff exponentiel — long
+            // (plafond 8 h) pour une fenêtre de quota à horizon
+            // long (modèle gratuit / limite de plan) sans reset
+            // lisible, standard (1 h) pour le throttle passager.
+            let d = if kind == "rate_limit" && prompt::quota_window(msg) {
+                prompt::backoff_for_capped(count, prompt::QUOTA_WINDOW_BACKOFF_CAP)
+            } else {
+                prompt::backoff_for(count)
+            };
             (d, Some(now_unix + d.as_secs() as i64))
         };
         // retry_at n'a de sens que pour rate_limit — les autres kinds
@@ -809,6 +819,10 @@ impl Session {
             text: match kind {
                 "rate_limit" => format!(
                     "session in error: rate limit — auto retry scheduled ({msg})"
+                ),
+                "quota" => format!(
+                    "session in error: quota exhausted — no auto retry \
+                     (plan/profile change or forced send to unblock) ({msg})"
                 ),
                 _ => format!(
                     "session in error: {kind} — no auto retry (forced send, set_model or resume to unblock) ({msg})"
