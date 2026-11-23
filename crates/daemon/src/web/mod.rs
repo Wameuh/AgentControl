@@ -61,7 +61,8 @@ pub enum Assets {
 /// CSP des pages HTML servies — adaptée de tauri.conf.json : 'self'
 /// remplace https://tauri.localhost / ipc://, ws:/wss: couvre la
 /// WebSocket même via un port forwardé, http(s) reste pour les images
-/// liées dans les conversations (inlineImages) et les liens distants.
+/// liées dans les conversations (chargées au clic — imgMode, N6) et
+/// les liens distants.
 const CSP: &str = "default-src 'self'; \
     connect-src 'self' ws: wss: https://api.github.com; \
     img-src 'self' data: https: http:; \

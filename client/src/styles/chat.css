@@ -306,6 +306,17 @@ img.md-img {
   display: block; max-width: 100%; max-height: 340px;
   margin: 6px 0; border-radius: 8px; border: 1px solid var(--line);
 }
+/* Placeholder d'image distante (mode « au clic », N6) — chip discrète
+   annonçant l'hôte ; le fetch ne part qu'au clic (expandImgPh). */
+.md-img-ph {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin: 4px 0 4px 6px; padding: 3px 10px; font: inherit; font-size: 12px;
+  color: var(--dim); background: rgba(var(--tint-rgb), .06);
+  border: 1px dashed var(--line); border-radius: 8px; cursor: pointer;
+}
+.md-img-ph:hover, .md-img-ph:focus-visible {
+  color: var(--ink); border-color: var(--accent); outline: none;
+}
 .th-body { margin: 6px 0; font-family: Instrument, sans-serif; }
 .sysline { color: var(--dim); font-size: 12px; padding: 1px 8px; }
 .sysline .ic { width: 11px; height: 11px; }
@@ -934,6 +945,12 @@ body:not(.android) #settings-body {
   min-width: 220px;
 }
 .s-row select:focus { border-color: var(--accent); outline: none; }
+.s-row input[type="text"] {
+  background: rgba(var(--tint-rgb), .07); border: 1px solid var(--line);
+  border-radius: 8px; color: var(--ink); padding: 6px 10px; font: inherit;
+  min-width: 220px;
+}
+.s-row input[type="text"]:focus { border-color: var(--accent); outline: none; }
 .s-row.chk { cursor: pointer; }
 .s-row.chk input { accent-color: var(--accent); width: 15px; height: 15px; flex: none; }
 #s-update-row, #s-pair-row { flex-wrap: wrap; }

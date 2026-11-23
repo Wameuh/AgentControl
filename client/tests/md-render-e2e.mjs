@@ -5,8 +5,16 @@
 //   (chromium via $CHROMIUM ou /usr/bin/chromium)
 import puppeteer from "puppeteer-core";
 import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
+
+// N6 : PNG 1×1 factice — servi en intercept pour example.com et posé
+// dans dist/ pour l'image « 'self' » (même origine que le client).
+const PNG1 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
 
 const MOCK = `(function () {
   const b64 = (s) => btoa(unescape(encodeURIComponent(s)));
@@ -37,12 +45,32 @@ const MOCK = `(function () {
       { name: "deep.md", dir: false, size: 80 },
     ] },
   };
+  // Une réponse d'agent avec images distantes (markdown, URL nue et
+  // hôte:port — ce dernier prouve la whitelist par domaine), une image
+  // « 'self' » même origine et une image MÊME HÔTE en https (origine
+  // différente → distante) — la section N6 vérifie qu'aucune requête
+  // distante ne part sans clic.
+  const EVENTS = [
+    { seq: 1, type: "agent_text",
+      text: "Image : ![x](https://example.com/a.png)\\n" +
+            "Lien nu : https://example.com/b.png\\n" +
+            "Port : ![y](https://example.com:8443/c.png)\\n" +
+            "Self : ![z](http://localhost:4185/d.png)\\n" +
+            "XScheme : ![w](https://localhost:4185/e.png)" },
+  ];
   function rpc(method, args) {
     switch (method) {
       case "list_sessions": return SESSIONS;
       case "list_agents": return [{ id: "devin", name: "Devin" }];
-      case "session_info": return { meta: SESSIONS[0], pending: [], alive: true, last_seq: 0 };
-      case "events": return { events: [], last_seq: 0 };
+      case "session_info": return { meta: SESSIONS[0], pending: [], alive: true, last_seq: EVENTS.length };
+      case "events": {
+        const evs = args.session === "s1"
+          ? EVENTS.filter((e) =>
+              (args.after_seq == null || e.seq > args.after_seq) &&
+              (args.before_seq == null || e.seq < args.before_seq))
+          : [];
+        return { events: evs, last_seq: EVENTS.length };
+      }
       case "list_dir": return DIRS[args.path] ?? { dir: "/home/agent/api/" + args.path, entries: [] };
       case "read_file": {
         if (args.path === "bad.md") throw new Error("permission denied");
@@ -87,6 +115,7 @@ const MOCK = `(function () {
         case "connect": return p.then(() => ({ version: "9.9.9", sessions: 1, servers: 1 }));
         case "call": return p.then(() => rpc(args.method, args.params ?? args));
         case "subscribe": return p.then(() => null);
+        case "other_instances": return p.then(() => []);
         case "saved_connections": return p.then(() => []);
         case "ssh_hosts": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAA x");
@@ -96,6 +125,9 @@ const MOCK = `(function () {
   };
 })();`;
 
+// Image « 'self' » : servie par vite preview sur l'origine du client —
+// doit charger dans tous les modes (jamais « distante »).
+writeFileSync("dist/d.png", PNG1);
 const server = spawn("npx", ["vite", "preview", "--port", "4185", "--strictPort"], { stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 1800));
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: "new", args: ["--no-sandbox"] });
@@ -103,6 +135,24 @@ const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
 p.on("console", (m) => { if (m.type() === "error") console.log("[page]", m.text()); });
 await p.evaluateOnNewDocument(MOCK);
+
+// N6 : les requêtes vers l'extérieur sont interceptées — chaque hit
+// example.com est enregistré puis servi en PNG 1×1 (l'<img> aboutit :
+// sans ça le listener « image cassée » la remplacerait par son alt).
+const extReqs = [];
+const extSniff = (r) => {
+  const u = r.url();
+  if (u.startsWith("https://example.com")) {
+    extReqs.push(u);
+    r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
+  } else if (u.startsWith("https://localhost:4185/")) {
+    // Même hôte, schéma différent : distante — servie comme example.com
+    // pour l'<img> (comptée séparément des hits example.com).
+    r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
+  } else r.continue().catch(() => {});
+};
+await p.setRequestInterception(true);
+p.on("request", extSniff);
 
 let pass = 0, fail = 0;
 const check = (name, ok, extra = "") => {
@@ -124,6 +174,27 @@ await click("#btn-connect"); await sleep(300);
 await p.type("#c-host", "me@pi5.local"); await click("#c-go"); await sleep(900);
 await p.evaluate(() => [...document.querySelectorAll(".sess")].find((s) => s.textContent.includes("Refactor"))?.click());
 await sleep(900);
+
+// --- N6 « au clic » (défaut) : aucune requête réseau avant le geste ---
+const phCount = () => p.evaluate(() => document.querySelectorAll("#events .md-img-ph").length);
+const imgCount = () => p.evaluate(() => document.querySelectorAll("#events img.md-img").length);
+check("N6 défaut : 4 placeholders .md-img-ph (https://même-hôte inclus)",
+  (await phCount()) === 4, `n=${await phCount()}`);
+check("N6 défaut : seule l'image « self » en <img>", (await imgCount()) === 1);
+check("N6 défaut : 0 requête example.com au rendu", extReqs.length === 0, extReqs.join(","));
+await p.evaluate(() => document.querySelectorAll("#events .md-img-ph")[0]?.click());
+await sleep(800);
+check("N6 clic → <img> insérée (self + a)", (await imgCount()) === 2, `img=${await imgCount()}`);
+check("N6 clic → requête a.png émise", extReqs.some((u) => u.includes("a.png")), extReqs.join(","));
+check("N6 : les autres placeholders restent", (await phCount()) === 3);
+await p.evaluate(() => document.querySelector("#events .md-img-ph")?.click());
+await sleep(600);
+await p.evaluate(() => document.querySelector("#events .md-img-ph")?.click());
+await sleep(800);
+check("N6 : les 3 requêtes ont suivi les clics (a/b/c)",
+  ["a.png", "b.png", "c.png"].every((f) => extReqs.some((u) => u.includes(f))),
+  extReqs.join(","));
+
 await click("#btn-files"); await sleep(800);
 
 // Ouvre README.md dans le viewer
@@ -263,6 +334,164 @@ check("erreur : file-md masqué", !(await vis("#file-md")));
 check("erreur : fv-md masqué", !(await vis("#fv-md")));
 const errTxt = await p.evaluate(() => document.querySelector("#file-view").textContent);
 check("erreur : message visible", errTxt.includes("permission denied"), errTxt.slice(0, 80));
+
+// ------------------------------------------------------------------
+// N6 — autres modes via localStorage (page dédiée ; chaque reload
+// reproduit le cycle connect → ouverture session → re-render complet).
+const p2 = await b.newPage();
+await p2.setViewport({ width: 1280, height: 860 });
+const extReqs2 = [];
+await p2.setRequestInterception(true);
+p2.on("request", (r) => {
+  const u = r.url();
+  if (u.startsWith("https://example.com")) {
+    extReqs2.push(u);
+    r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
+  } else if (u.startsWith("https://localhost:4185/")) {
+    r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
+  } else r.continue().catch(() => {});
+});
+await p2.evaluateOnNewDocument(MOCK);
+const reopen2 = async (mode, hosts) => {
+  await p2.goto("http://localhost:4185/", { waitUntil: "networkidle0" });
+  // Pref posée après le load (localStorage accessible) mais avant
+  // l'ouverture de session — imgMode() n'est lu qu'au rendu du message.
+  await p2.evaluate((m, h) => {
+    if (m == null) localStorage.removeItem("ac-inline-images");
+    else localStorage.setItem("ac-inline-images", m);
+    if (h == null) localStorage.removeItem("ac-img-hosts");
+    else localStorage.setItem("ac-img-hosts", h);
+  }, mode, hosts);
+  await p2.waitForSelector("#btn-connect", { timeout: 15000 });
+  await p2.evaluate(() => document.querySelector("#btn-connect").click());
+  await sleep(300);
+  await p2.evaluate(() => {
+    const h = document.querySelector("#c-host");
+    h.value = "me@pi5.local";
+    h.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector("#c-go").click();
+  });
+  await sleep(900);
+  await p2.evaluate(() => [...document.querySelectorAll(".sess")].find((s) => s.textContent.includes("Refactor"))?.click());
+  await sleep(900);
+};
+const ph2 = () => p2.evaluate(() => document.querySelectorAll("#events .md-img-ph").length);
+const im2 = () => p2.evaluate(() => document.querySelectorAll("#events img.md-img").length);
+
+// « always » : <img> au rendu (comportement historique conservé).
+extReqs2.length = 0;
+await reopen2("always", null);
+check("N6 always : 5 <img> au rendu, 0 placeholder",
+  (await im2()) === 5 && (await ph2()) === 0, `img=${await im2()} ph=${await ph2()}`);
+check("N6 always : requêtes émises sans clic (a/b/c)",
+  ["a.png", "b.png", "c.png"].every((f) => extReqs2.some((u) => u.includes(f))),
+  extReqs2.join(","));
+
+// « never » via la valeur legacy « 0 » : ni placeholder ni <img>
+// distante — l'image « self » (même origine) charge toujours.
+extReqs2.length = 0;
+await reopen2("0", null);
+check("N6 never(\"0\") : 0 placeholder / seule « self » en <img>",
+  (await ph2()) === 0 && (await im2()) === 1);
+check("N6 never : les liens simples restent",
+  (await p2.evaluate(() => document.querySelectorAll('#events a[href^="https://example.com"]').length)) === 3);
+check("N6 never : https://même-hôte reste un simple lien (pas « self »)",
+  (await p2.evaluate(() =>
+    document.querySelectorAll('#events a[href="https://localhost:4185/e.png"]').length)) === 1);
+await sleep(300);
+check("N6 never : aucune requête", extReqs2.length === 0, extReqs2.join(","));
+
+// « never » explicite : même rendu.
+extReqs2.length = 0;
+await reopen2("never", null);
+check("N6 never : 0 placeholder / seule « self » en <img>",
+  (await ph2()) === 0 && (await im2()) === 1);
+await sleep(300);
+check("N6 never : aucune requête", extReqs2.length === 0, extReqs2.join(","));
+
+// Whitelist : mode click + hôte de confiance → chargement direct —
+// le match est par domaine (hostname) : « example.com » couvre aussi
+// « example.com:8443 » (review : URL.host incluait le port).
+extReqs2.length = 0;
+await reopen2("click", "example.com");
+check("N6 whitelist : 4 <img> direct (trusted + self), e reste placeholder",
+  (await im2()) === 4 && (await ph2()) === 1, `img=${await im2()} ph=${await ph2()}`);
+check("N6 whitelist : requêtes sans clic (a/b/c)",
+  ["a.png", "b.png", "c.png"].every((f) => extReqs2.some((u) => u.includes(f))),
+  extReqs2.join(","));
+
+// Compat legacy « 1 » → always.
+extReqs2.length = 0;
+await reopen2("1", null);
+check("N6 legacy \"1\" → always : <img> direct", (await im2()) === 5 && (await ph2()) === 0);
+
+// Changement de mode à chaud (review P2) : « never » doit rester
+// absolu pour le contenu déjà rendu — un placeholder affiché en mode
+// click ne doit plus rien charger après la bascule, et le save du
+// réglage retire les placeholders sans re-rendre la conversation.
+extReqs2.length = 0;
+await reopen2("click", null);
+check("N6 switch : 4 placeholders en mode click", (await ph2()) === 4);
+// Bascule du pref sans passer par le panneau : le placeholder restant
+// revalide la politique au clic → lien, zéro requête.
+await p2.evaluate(() => localStorage.setItem("ac-inline-images", "never"));
+await p2.evaluate(() => document.querySelector("#events .md-img-ph")?.click());
+await sleep(400);
+check("N6 never tardif : clic placeholder → aucune requête",
+  extReqs2.length === 0, extReqs2.join(","));
+check("N6 never tardif : placeholder devenu lien",
+  (await ph2()) === 3 &&
+    (await p2.evaluate(() =>
+      document.querySelectorAll('#events a[href^="https://example.com"]').length)) === 4);
+// Repasse en click pour ouvrir le panneau, bascule « never » via le
+// vrai réglage → les placeholders restants sont retirés au save.
+await p2.evaluate(() => localStorage.setItem("ac-inline-images", "click"));
+await p2.evaluate(() => document.getElementById("tb-settings")?.click());
+await sleep(400);
+await p2.evaluate(() => {
+  const s = document.getElementById("s-images");
+  s.value = "never";
+  s.dispatchEvent(new Event("change", { bubbles: true }));
+});
+await sleep(200);
+await p2.evaluate(() => document.getElementById("s-save")?.click());
+await sleep(500);
+check("N6 save never : placeholders retirés à chaud", (await ph2()) === 0,
+  `ph=${await ph2()}`);
+check("N6 save never : les 3 liens simples + conversions restent",
+  (await p2.evaluate(() =>
+    document.querySelectorAll('#events a[href^="https://example.com"]').length)) === 6);
+check("N6 save never : « self » épargnée par le sweep", (await im2()) === 1);
+await p2.evaluate(() => document.getElementById("settings-close")?.click());
+await sleep(300);
+
+// « always » → « click » à chaud : les <img> distantes déjà rendues
+// rétrogradent en placeholders — sinon un lazy-load hors écran
+// partirait sans geste (review P2). « self » reste affichée.
+extReqs2.length = 0;
+await reopen2("always", null);
+await p2.evaluate(() => document.getElementById("tb-settings")?.click());
+await sleep(400);
+await p2.evaluate(() => {
+  const s = document.getElementById("s-images");
+  s.value = "click";
+  s.dispatchEvent(new Event("change", { bubbles: true }));
+});
+await sleep(200);
+await p2.evaluate(() => document.getElementById("s-save")?.click());
+await sleep(500);
+check("N6 save click : <img> distantes rétrogradées en placeholders",
+  (await ph2()) === 4 && (await im2()) === 1, `ph=${await ph2()} img=${await im2()}`);
+check("N6 save click : les liens example.com restent",
+  (await p2.evaluate(() =>
+    document.querySelectorAll('#events a[href^="https://example.com"]').length)) === 3);
+await p2.evaluate(() => document.getElementById("settings-close")?.click());
+await sleep(300);
+await p2.evaluate(() => document.querySelector("#events .md-img-ph")?.click());
+await sleep(500);
+check("N6 save click : placeholder rétrogradé charge au clic",
+  extReqs2.some((u) => u.includes("a.png")), extReqs2.join(","));
+await p2.close();
 
 console.log(`\n${pass} PASS, ${fail} FAIL`);
 await b.close(); server.kill();

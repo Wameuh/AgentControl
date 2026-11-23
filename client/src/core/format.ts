@@ -4,11 +4,159 @@
 // ---------------------------------------------------------------------------
 
 import { esc, q } from "./dom";
+import { t } from "../i18n";
 
-// Option « images en ligne » (Settings, défaut activé) : les URLs http(s)
-// finissant par une extension image sont rendues en <img> cliquable.
+// Option « images en ligne » (Settings) : politique de chargement des
+// images DISTANTES (http/https) dans les rendus markdown et linkify —
+// une URL d'image peut être une injection de prompt (fuite de données et
+// pistage par la requête elle-même), donc jamais de fetch sans geste :
+//  - "never"  : lien seul, aucun chargement possible ;
+//  - "click"  : défaut — placeholder cliquable « Image: host — show »,
+//               l'<img> n'est inséré qu'au clic ;
+//  - "always" : <img> dès l'affichage (comportement historique).
+// Persistance ac-inline-images — compat legacy : "0" → never,
+// "1" → always, absent → click. Les images data: et celles servies par
+// le démon ne passent pas par ce chemin (pas de match http/https).
+export type ImgMode = "never" | "click" | "always";
 export const IMG_URL_RE = /\.(?:png|jpe?g|gif|webp|avif|bmp|svg|ico)(?:[?#][^\s<]*)?$/i;
-export const inlineImages = () => localStorage.getItem("ac-inline-images") !== "0";
+export const imgMode = (): ImgMode => {
+  const v = localStorage.getItem("ac-inline-images");
+  if (v === "never" || v === "always" || v === "click") return v;
+  if (v === "0") return "never";
+  if (v === "1") return "always";
+  return "click";
+};
+
+/** Domaines de confiance (réglage CSV ac-img-hosts) : chargés sans clic
+ *  en mode « click » — match exact ou sous-domaine. */
+export const imgTrustedHosts = (): string[] =>
+  (localStorage.getItem("ac-img-hosts") ?? "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+
+/** Hôte d'une URL distante — `hostname` (sans port) : la whitelist
+ *  fait confiance à un domaine, pas à un couple hôte:port —
+ *  `example.com` couvre `example.com:8443` et ses sous-domaines. */
+const imgHost = (url: string): string => {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+};
+
+/** Décision de rendu d'une image distante : "img" = <img> direct
+ *  (always, hôte de confiance ou même origine « 'self' » — le daemon
+ *  sert le client, une image à la même adresse n'est pas distante,
+ *  comme data:), "ph" = placeholder cliquable, "none" = lien seul.
+ *  La whitelist s'applique au mode click — never reste absolu pour
+ *  les hôtes distants (aucun fetch, quel que soit l'hôte). */
+const imgRender = (url: string): "img" | "ph" | "none" => {
+  const m = imgMode();
+  if (m === "always") return "img";
+  try {
+    // Origine complète (schéma + hôte + port) : https://même-hôte sur
+    // un client http n'est PAS « 'self' » — c'est une origine différente.
+    if (new URL(url).origin === location.origin) return "img";
+  } catch {
+    /* URL illisible → politique standard. */
+  }
+  const host = imgHost(url);
+  if (m === "never" || !host) return "none";
+  return imgTrustedHosts().some((d) => host === d || host.endsWith(`.${d}`))
+    ? "img"
+    : "ph";
+};
+
+/** Placeholder « Image: host — show » inséré à la place de l'<img> en
+ *  mode click — data-src porte l'URL, le clic la remplace par l'image
+ *  (expandImgPh, listener délégué chat + viewer). */
+const imgPh = (url: string, alt: string): string =>
+  `<button type="button" class="md-img-ph" data-src="${q(url)}"` +
+  ` data-alt="${q(alt)}">${esc(t("img_ph", { host: imgHost(url) || url }))}</button>`;
+
+/** Lien simple remplaçant un placeholder ou une image retirée sous
+ *  « never » — même forme que le rendu "none" (texte = alt ou URL). */
+const imgLinkEl = (src: string, label: string): HTMLAnchorElement => {
+  const a = document.createElement("a");
+  a.href = src;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.textContent = label || src;
+  return a;
+};
+
+/** Clic délégué sur un placeholder image (#events chat, #file-md
+ *  viewer) : le bouton est remplacé par <a><img></a> — la requête
+ *  réseau ne part qu'ici, jamais au rendu. true = clic consommé.
+ *  La politique est revalidée au geste : « never » reste absolu même
+ *  si le réglage a basculé après le rendu du placeholder. */
+export function expandImgPh(target: HTMLElement): boolean {
+  const btn = target.closest<HTMLButtonElement>(".md-img-ph");
+  const src = btn?.dataset.src;
+  if (!btn || !src) return false;
+  if (imgRender(src) === "none") {
+    btn.replaceWith(imgLinkEl(src, btn.dataset.alt ?? src));
+    return true;
+  }
+  const a = document.createElement("a");
+  a.href = src;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  const img = document.createElement("img");
+  img.className = "md-img";
+  img.src = src;
+  img.alt = btn.dataset.alt ?? src;
+  img.loading = "lazy";
+  a.append(img);
+  btn.replaceWith(a);
+  return true;
+}
+
+/** Version DOM de imgPh — pour la rétrogradation <img>→placeholder
+ *  du sweep réglages (même bouton que le rendu, dataset/textContent). */
+const imgPhEl = (src: string, alt: string): HTMLButtonElement => {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "md-img-ph";
+  b.dataset.src = src;
+  b.dataset.alt = alt;
+  b.textContent = t("img_ph", { host: imgHost(src) || src });
+  return b;
+};
+
+/** Ré-applique la politique courante au contenu déjà rendu — appelé à
+ *  l'enregistrement des réglages, le chat/viewer n'étant pas re-rendus :
+ *  « never » est absolu — placeholders restants et <img> distantes
+ *  déjà insérées redeviennent de simples liens ; « click » rétrograde
+ *  les <img> distantes non fiables en placeholders (un lazy-load
+ *  différé ne doit pas partir sans geste) ; « always » ou une
+ *  whitelist élargie ouvre les placeholders restants. */
+export function refreshImgPolicy(root: ParentNode = document): void {
+  root.querySelectorAll<HTMLButtonElement>(".md-img-ph").forEach((btn) => {
+    const src = btn.dataset.src;
+    if (!src) return;
+    const r = imgRender(src);
+    if (r === "img") expandImgPh(btn);
+    else if (r === "none")
+      btn.replaceWith(imgLinkEl(src, btn.dataset.alt ?? src));
+  });
+  root.querySelectorAll<HTMLImageElement>("img.md-img").forEach((img) => {
+    const src = img.getAttribute("src") ?? "";
+    if (!/^https?:/i.test(src)) return;
+    const r = imgRender(src);
+    if (r === "img") return;
+    const nodes: Node[] =
+      r === "none"
+        ? [imgLinkEl(src, img.alt)]
+        : [imgLinkEl(src, img.alt), imgPhEl(src, img.alt)];
+    const wrap = img.parentElement;
+    if (wrap?.tagName === "A" && wrap.childNodes.length === 1)
+      wrap.replaceWith(...nodes);
+    else img.replaceWith(...nodes);
+  });
+}
 
 // Chemins de fichiers cliquables → panneau latéral (read_file côté démon)
 const FILE_RE =
@@ -20,12 +168,14 @@ export function linkify(escaped: string): string {
   const urls: string[] = [];
   let work = escaped.replace(/https?:\/\/[^\s<\x00]+/g, (m) => {
     const clean = m.replace(/(?:&(?:quot|#39|lt|gt);|[.,;:!?)\]])+$/, "");
+    const r = IMG_URL_RE.test(clean) ? imgRender(clean) : "none";
     const inner =
-      inlineImages() && IMG_URL_RE.test(clean)
+      r === "img"
         ? `<img class="md-img" src="${q(clean)}" alt="${q(clean)}" loading="lazy">`
         : clean;
     urls.push(
-      `<a class="ulink" href="${q(clean)}" target="_blank" rel="noopener noreferrer">${inner}</a>`,
+      `<a class="ulink" href="${q(clean)}" target="_blank" rel="noopener noreferrer">${inner}</a>` +
+        (r === "ph" ? imgPh(clean, clean) : ""),
     );
     return `\x00U${urls.length - 1}\x00${m.slice(clean.length)}`;
   });
@@ -109,15 +259,18 @@ export function mdRender(src: string): string {
   // 3) images ![alt](https://…) avant les liens (le ![…] matcherait […](…))
   work = work.replace(
     /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g,
-    (_m, alt: string, url: string) =>
-      inlineImages()
+    (_m, alt: string, url: string) => {
+      const r = imgRender(url);
+      return r === "img"
         ? stash(
             `<a href="${q(url)}" target="_blank" rel="noopener noreferrer">` +
               `<img class="md-img" src="${q(url)}" alt="${q(alt)}" loading="lazy"></a>`,
           )
         : stash(
-            `<a href="${q(url)}" target="_blank" rel="noopener noreferrer">${alt || url}</a>`,
-          ),
+            `<a href="${q(url)}" target="_blank" rel="noopener noreferrer">${alt || url}</a>` +
+              (r === "ph" ? imgPh(url, alt) : ""),
+          );
+    },
   );
 
   // 4) liens markdown [t](https://…) → placeholder (avant linkify)
