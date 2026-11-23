@@ -769,6 +769,13 @@ fn dvchanges() -> String {
 fn drules() -> Vec<String> {
     vec!["AGENTS.md".into(), "CLAUDE.md".into()]
 }
+/// Une entrée `rules_files` valide : chemin RELATIF au workspace —
+/// ni vide, ni absolu, ni `..` (le rendu {RULES} la préfixe du cwd
+/// de session, le test d'existence le joint à la racine). Partagée
+/// entre `normalize()` (config.toml) et la validation `apply_patch`.
+pub(crate) fn rules_file_ok(f: &str) -> bool {
+    !f.trim().is_empty() && !f.starts_with('/') && !f.split('/').any(|c| c == "..")
+}
 fn d2() -> u32 {
     2
 }
@@ -858,10 +865,37 @@ impl OrchCfg {
         if self.workspace.trim().is_empty() {
             self.workspace = dws();
         }
-        // Un `rules_files = []` écrit à la main rendrait {RULES} muet
-        // — cassant → retour au défaut (même convention que workspace).
+        // Un `rules_files` hors forme (config.toml édité à la main —
+        // `apply_patch` refuse déjà) rendrait dans le prompt un chemin
+        // que l'agent n'a pas à lire : entrées rejetées, puis retour
+        // au défaut si tout est tombé (même convention que workspace).
+        self.rules_files.retain(|f| {
+            if rules_file_ok(f) {
+                true
+            } else {
+                tracing::warn!(
+                    "backlog_orchestrator: rules_files entry « {f} » \
+                     ignored — expected a workspace-relative path"
+                );
+                false
+            }
+        });
         if self.rules_files.is_empty() {
             self.rules_files = drules();
+        }
+        for (repo, o) in &mut self.review {
+            o.rules_files.retain(|f| {
+                if rules_file_ok(f) {
+                    true
+                } else {
+                    tracing::warn!(
+                        "backlog_orchestrator: review.{repo}.rules_files \
+                         entry « {f} » ignored — workspace-relative \
+                         path expected"
+                    );
+                    false
+                }
+            });
         }
     }
 

@@ -1259,12 +1259,12 @@ fn val_label(v: &Value) -> Result<String> {
     Ok(s)
 }
 
-/// Une entrée `rules_files` : chemin RELATIF au workspace — ni vide,
-/// ni absolu, ni `..` (le rendu {RULES} la préfixe du cwd de session,
-/// le test d'existence le joint à la racine).
+/// Une entrée `rules_files` valide — prédicat partagé avec
+/// `OrchCfg::normalize` (`rules_file_ok`), rendu ici en refus
+/// explicite pour `apply_patch`.
 fn val_rules_entry(f: &str) -> Result<()> {
     anyhow::ensure!(
-        !f.trim().is_empty() && !f.starts_with('/') && !f.split('/').any(|c| c == ".."),
+        super::cfg::rules_file_ok(f),
         "rules_files entry « {f} » — expected a workspace-relative path"
     );
     Ok(())
