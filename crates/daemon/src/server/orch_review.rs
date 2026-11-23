@@ -2292,9 +2292,15 @@ impl Daemon {
         // `*_model`/`*_effort` par rôle : vide → repli global (même
         // sémantique que les autres rôles pipeline).
         let model = cfg.model_or(&cfg.pr_reviewer_model).to_string();
-        let effort = cfg.effort_or(&cfg.pr_reviewer_effort).to_string();
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
         let agent = cfg.agent_or(&cfg.pr_reviewer_agent);
+        // Le `thought_level` global est un réglage de l'agent global :
+        // le reprendre pour un autre profil fait échouer set_config_option.
+        let effort = if cfg.pr_reviewer_effort.is_empty() && agent != cfg.agent {
+            String::new()
+        } else {
+            cfg.effort_or(&cfg.pr_reviewer_effort).to_string()
+        };
         self.warn_spawn_cfg(agent, &model, &cfg.pr_reviewer_mode)
             .await;
         let v = self
