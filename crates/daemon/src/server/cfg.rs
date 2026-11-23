@@ -773,8 +773,15 @@ fn drules() -> Vec<String> {
 /// ni vide, ni absolu, ni `..` (le rendu {RULES} la préfixe du cwd
 /// de session, le test d'existence le joint à la racine). Partagée
 /// entre `normalize()` (config.toml) et la validation `apply_patch`.
+/// `\` et `:` sont refusés en plus : sur Windows `..\x`, `C:\x` ou un
+/// UNC `\\srv\x` échapperaient au workspace — le refus est portable
+/// quel que soit l'OS qui vérifie.
 pub(crate) fn rules_file_ok(f: &str) -> bool {
-    !f.trim().is_empty() && !f.starts_with('/') && !f.split('/').any(|c| c == "..")
+    !f.trim().is_empty()
+        && !f.contains(['\\', ':'])
+        && std::path::Path::new(f)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 fn d2() -> u32 {
     2
