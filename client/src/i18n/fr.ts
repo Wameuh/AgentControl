@@ -285,6 +285,7 @@ export const fr: Record<Key, string> = {
   daemon_update_available: "mise à jour du démon disponible — v{v}",
   daemon_update_now: "Mettre à jour le démon",
   update_android_reopen: "Mise à jour téléchargée — installez-la puis rouvrez l'app",
+  update_android_permission: "Android a besoin d'autoriser l'installation d'apps — activez « installer des applications inconnues » pour AgentControl dans les réglages, puis relancez la mise à jour",
   upd_android_h: "Mise à jour Android — réinstallation requise",
   upd_android_warn: "Cette version ne peut pas se mettre à jour en place (signature de debug ou clé étrangère) : Android refusera l'installation. La mise à jour impose de désinstaller l'app d'abord, ce qui efface TOUTES les données — connexions, clés, appairages. Un nouvel appairage par QR code sera nécessaire ensuite.",
   upd_android_go: "Télécharger quand même",

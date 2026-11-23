@@ -285,6 +285,7 @@ export const en = {
   daemon_update_available: "daemon update available — v{v}",
   daemon_update_now: "Update daemon",
   update_android_reopen: "Update downloaded — install it, then reopen the app",
+  update_android_permission: "Android needs permission to install apps — allow « install unknown apps » for AgentControl in Settings, then start the update again",
   upd_android_h: "Android update — reinstall required",
   upd_android_warn: "This build cannot update in place (debug signature or foreign key): Android will refuse the install. Updating means uninstalling the app first, which erases ALL data — connections, keys, pairings. You will need to re-pair via QR code afterwards.",
   upd_android_go: "Download anyway",

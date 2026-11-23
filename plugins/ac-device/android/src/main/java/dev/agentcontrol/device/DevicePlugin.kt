@@ -1,15 +1,21 @@
 package dev.agentcontrol.device
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import app.tauri.annotation.Command
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import java.io.File
 import java.security.MessageDigest
 
 // Verdict « update in-place possible ? » pour l'APK installé : Android
@@ -101,6 +107,58 @@ class DevicePlugin(private val activity: Activity): Plugin(activity) {
       invoke.resolve(ret)
     } catch (e: Exception) {
       invoke.reject("signingInfo: ${e.message}")
+    }
+  }
+
+  // Update APK : `path` = APK déjà téléchargé dans le cache de l'app
+  // et vérifié côté Rust (SHA256SUMS signé minisign + sha256, I1 —
+  // update_client). Android 8+ exige la permission « installer des
+  // applications inconnues » : absente, on ouvre les réglages de
+  // l'app et on rend "permission_required" — l'utilisateur accorde
+  // puis relance la mise à jour (l'APK est retéléchargé/vérifié,
+  // cache purgé à chaque tentative). Accordée → intent VIEW sur
+  // l'URI content:// du FileProvider (racine cache-path
+  // « agentcontrol-update/ » dans ac_device_paths.xml) ; l'installeur
+  // système prend le relais et le process peut être tué par le
+  // remplacement — d'où la résolution immédiate, sans attendre la
+  // fin de l'install.
+  @Command
+  fun installApk(invoke: Invoke) {
+    try {
+      val path = invoke.getArgs().optString("path", "")
+      val f = File(path)
+      if (path.isEmpty() || !f.isFile ||
+          !f.name.endsWith(".apk", ignoreCase = true)) {
+        invoke.reject("installApk: invalid apk path")
+        return
+      }
+      if (Build.VERSION.SDK_INT >= 26 &&
+          !activity.packageManager.canRequestPackageInstalls()) {
+        val i = Intent(
+          Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+          Uri.parse("package:${activity.packageName}"))
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        activity.startActivity(i)
+        val ret = JSObject()
+        ret.put("status", "permission_required")
+        invoke.resolve(ret)
+        return
+      }
+      val uri = FileProvider.getUriForFile(
+        activity, "${activity.packageName}.acdevice", f)
+      val i = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "application/vnd.android.package-archive")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or
+          Intent.FLAG_ACTIVITY_NEW_TASK)
+      }
+      activity.startActivity(i)
+      val ret = JSObject()
+      ret.put("status", "launched")
+      invoke.resolve(ret)
+    } catch (e: ActivityNotFoundException) {
+      invoke.reject("installApk: no package installer found — ${e.message}")
+    } catch (e: Exception) {
+      invoke.reject("installApk: ${e.message}")
     }
   }
 }

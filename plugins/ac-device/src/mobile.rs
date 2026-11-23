@@ -36,6 +36,20 @@ impl<R: Runtime> Device<R> {
             )
             .map_err(Into::into)
     }
+
+    /// Lance l'installeur système sur l'APK `path` (déjà téléchargé et
+    /// vérifié côté client — `update_client` Android) — `@Command
+    /// installApk` Kotlin : FileProvider + intent VIEW, permission
+    /// « apps inconnues » gérée par Android. Retour brut
+    /// `{"status": "launched"|"permission_required"}`.
+    pub fn install_apk(&self, path: &str) -> crate::Result<serde_json::Value> {
+        self.0
+            .run_mobile_plugin(
+                "installApk",
+                serde_json::json!({ "path": path }),
+            )
+            .map_err(Into::into)
+    }
 }
 
 /// Enregistre la classe Kotlin auprès du runtime Android.

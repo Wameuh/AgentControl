@@ -18,6 +18,10 @@ impl<R: Runtime> Device<R> {
     pub fn set_system_bars(&self, _light: bool) -> crate::Result<()> {
         Err(crate::Error::AndroidOnly)
     }
+
+    pub fn install_apk(&self, _path: &str) -> crate::Result<serde_json::Value> {
+        Err(crate::Error::AndroidOnly)
+    }
 }
 
 /// Initializes the desktop implementation of the plugin.

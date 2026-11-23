@@ -66,42 +66,6 @@ async function remoteVersion(): Promise<string> {
   return invoke<string>("check_update", { includeRc: rcChannel() });
 }
 
-/// URL de l'APK de la release `tag` (asset `.apk`), fallback = page de
-/// la release du tag — PAS /releases/latest : sur le canal rc, latest
-/// pointerait la stable et l'utilisateur installerait la mauvaise
-/// version (le APK visé doit suivre `tag` même en échec d'énumération).
-async function apkReleaseUrl(tag: string): Promise<string> {
-  try {
-    const r = await fetch(
-      `https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v${tag}`,
-      { signal: AbortSignal.timeout(FETCH_TIMEOUT) },
-    );
-    if (r.ok) {
-      const j = (await r.json()) as {
-        assets?: { name?: string; browser_download_url?: string }[];
-      };
-      const a = j.assets?.find((x) => x.name?.endsWith(".apk"));
-      if (a?.browser_download_url) return a.browser_download_url;
-    }
-  } catch {
-    /* réseau */
-  }
-  return `https://github.com/Wameuh/AgentControl/releases/tag/v${tag}`;
-}
-
-/// Flow Android vérifié (backlog #232) : `shellOpen` → opener plugin →
-/// navigateur système → GitHub sert l'asset APK (content-type
-/// octet-stream) → téléchargement → l'utilisateur ouvre le fichier
-/// depuis ses téléchargements → package installer. « Install unknown
-/// apps » est une permission de l'app SOURCE (le navigateur) : Android
-/// la demande à la première install, un refus = échec côté installeur
-/// invisible pour nous — d'où le toast « rouvrez l'app » (le process
-/// peut être tué par le remplacement, Android ne relance jamais
-/// l'app). L'APK release est signé par l'upload keystore (#200) →
-/// update in-place possible UNIQUEMENT si l'app installée porte la
-/// même signature ; un appareil sur build debug-signé (rc pré-#200 ou
-/// build --debug) ne peut pas upgrader → uninstall → perte des accès
-/// (Keystore non exportables, #160) → re-pairing QR obligatoire.
 /// `app_signing` (plugin ac-device → PackageManager) rend le verdict :
 /// "impossible" = debuggable ou signataire ≠ certificat release.
 async function androidReinstallRisk(): Promise<boolean> {
@@ -111,11 +75,21 @@ async function androidReinstallRisk(): Promise<boolean> {
 }
 
 /// Update du client vers `tag` : desktop = installeur auto
-/// (`update_client`) ; Android = APK ouvert dans le navigateur — le
-/// gestionnaire de paquets fait la maj in-place (signature identique).
-/// Jamais silencieux : étapes versées à client.log, toast info au
-/// départ puis succès / échec AVEC la raison (les erreurs backend
-/// citent le repli manuel — commande ou page releases).
+/// (`update_client`) ; Android = `update_client` aussi — le backend
+/// télécharge l'APK dans le cache de l'app, vérifie l'intégrité de la
+/// release (SHA256SUMS signé minisign + sha256, I1) puis le plugin
+/// ac-device lance l'installeur système (FileProvider + intent ; la
+/// permission « apps inconnues » peut être demandée par Android —
+/// statut `permission_required`). « Install unknown apps » devient
+/// une permission de l'APP (plus du navigateur) : Android la demande
+/// une fois, un refus = échec côté installeur invisible pour nous —
+/// d'où le toast « rouvrez l'app » (le process peut être tué par le
+/// remplacement, Android ne relance jamais l'app). L'APK release est
+/// signé par l'upload keystore (#200) → update in-place possible
+/// UNIQUEMENT si l'app installée porte la même signature ; un
+/// appareil sur build debug-signé (rc pré-#200 ou build --debug) ne
+/// peut pas upgrader → uninstall → perte des accès (Keystore non
+/// exportables, #160) → re-pairing QR obligatoire.
 export async function performClientUpdate(tag: string) {
   if (isAndroid()) {
     // Garde-fou uninstall : si l'app installée ne peut pas upgrader
@@ -131,11 +105,28 @@ export async function performClientUpdate(tag: string) {
       );
       if (!ok) return;
     }
-    shellOpen(await apkReleaseUrl(tag));
-    // L'APK s'installe dans le gestionnaire de paquets : le process meurt
-    // avec l'app et Android ne permet pas à une app remplacée de se
-    // relancer seule — on guide explicitement au lieu de laisser
-    // l'utilisateur dans le navigateur sans mode d'emploi.
+    notify("info", t("update_installing", { v: tag }));
+    let status = "";
+    try {
+      status = await invoke<string>("update_client", { tag });
+    } catch (e) {
+      const reason = codedErrorMsg(e, "update");
+      notify("error", t("update_failed_reason", { reason }));
+      // Repli « page releases » : l'APK s'y télécharge à la main —
+      // l'erreur backend cite déjà la cause exacte.
+      shellOpen(`https://github.com/Wameuh/AgentControl/releases/tag/v${tag}`);
+      return;
+    }
+    if (status === "permission_required") {
+      // Android a ouvert les réglages « sources inconnues » de l'app :
+      // l'utilisateur accorde puis relance la mise à jour (l'APK est
+      // retéléchargé et revérifié — le cache est purgé à chaque fois).
+      notify("warn", t("update_android_permission"));
+      return;
+    }
+    // L'installeur système est ouvert : le process meurt avec le
+    // remplacement de l'APK et Android ne permet pas à une app
+    // remplacée de se relancer seule — on guide explicitement.
     notify("info", t("update_android_reopen"));
     return;
   }

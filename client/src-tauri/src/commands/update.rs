@@ -1,6 +1,7 @@
 //! Auto-update : sonde de version GitHub (API REST, sans gh) et
-//! installation en un clic (.deb/pkexec, NSIS/.bat). Non supporté
-//! sur Android (APK par release).
+//! installation en un clic (.deb/pkexec, NSIS/.bat, .dmg, APK Android
+//! via l'installeur système — FileProvider + intent, permission
+//! « apps inconnues » gérée côté plugin ac-device).
 
 use anyhow::Result;
 #[cfg(not(target_os = "android"))]
@@ -8,16 +9,21 @@ use anyhow::Context;
 #[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
 
+// Chemin APK Android : fetch + vérif d'intégrité avant que
+// `update_client` (bas de fichier) ne le remette à l'installeur
+// système via le plugin ac-device. `test` : apk_asset est couvert par
+// les tests unitaires du module parent.
+#[cfg(any(target_os = "android", test))]
+mod apk;
+
 /// Journal du chemin update dans client.log — chaque étape (check →
 /// download → verify → install → relaunch) doit y laisser une trace
 /// lisible : une install qui échoue sans log est indiagnostiquable.
-#[cfg(not(target_os = "android"))]
 #[track_caller]
 fn ulog(msg: impl std::fmt::Display) {
     client_core::log(client_core::Level::Info, format!("update: {msg}"));
 }
 
-#[cfg(not(target_os = "android"))]
 fn gh_get(url: &str) -> Result<serde_json::Value, String> {
     // Timeout global (connect+read) : le front borne déjà ses fetch — un
     // réseau en blackhole ne doit pas faire attendre le popup « outdated »
@@ -33,7 +39,6 @@ fn gh_get(url: &str) -> Result<serde_json::Value, String> {
 
 /// Compare semver minimal : `x.y.z` numérique puis identifiants de
 /// pré-release (stable > pré-release ; numérique < alphanum, semver §11).
-#[cfg(not(target_os = "android"))]
 fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     fn parse(v: &str) -> (Vec<u64>, Vec<String>) {
@@ -83,7 +88,6 @@ fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// Max semver des releases récentes — la liste inclut les prereleases
 /// (canal rc opt-in), contrairement à releases/latest.
-#[cfg(not(target_os = "android"))]
 fn latest_incl_rc() -> Result<String, String> {
     let rels = gh_get(
         "https://api.github.com/repos/Wameuh/AgentControl/releases?per_page=20",
@@ -112,7 +116,6 @@ fn latest_incl_rc() -> Result<String, String> {
 /// Dernière version publiée via l'API REST GitHub (aucun outil local requis) :
 /// releases/latest, fallback = package.json sur main. `include_rc` = canal
 /// opt-in des pré-releases (tester la release candidate avant merge).
-#[cfg(not(target_os = "android"))]
 #[tauri::command]
 pub(crate) async fn check_update(include_rc: Option<bool>) -> Result<String, String> {
     let rc = include_rc.unwrap_or(false);
@@ -143,23 +146,10 @@ pub(crate) async fn check_update(include_rc: Option<bool>) -> Result<String, Str
     r
 }
 
-#[cfg(target_os = "android")]
-#[tauri::command]
-pub(crate) async fn check_update(_include_rc: Option<bool>) -> Result<String, String> {
-    Err("update-failed:unsupported:APK updates install via the GitHub release".into())
-}
-
-#[cfg(target_os = "android")]
-#[tauri::command]
-pub(crate) async fn update_client(_tag: String) -> Result<(), String> {
-    Err("update-failed:unsupported:install the new APK from the release".into())
-}
-
 /// Garde-fou post-téléchargement : fichier non vide + en-tête attendu
-/// (archive ar pour .deb, MZ pour .exe) — un transfert tronqué ou une
-/// page d'erreur HTTP sauvée comme binaire doit échouer ici avec une
-/// cause claire, pas plus tard dans pkexec/le setup.
-#[cfg(not(target_os = "android"))]
+/// (archive ar pour .deb, MZ pour .exe, PK pour .apk…) — un transfert
+/// tronqué ou une page d'erreur HTTP sauvée comme binaire doit échouer
+/// ici avec une cause claire, pas plus tard dans pkexec/le setup.
 fn verify_asset(path: &std::path::Path, name: &str) -> Result<(), String> {
     use std::io::Read;
     if std::fs::metadata(path).map_err(|e| e.to_string())?.len() == 0 {
@@ -186,6 +176,13 @@ fn verify_asset(path: &std::path::Path, name: &str) -> Result<(), String> {
     if name.ends_with(".msi") && !head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
         return Err(format!(
             "update-failed:verify:{name} invalid — not an MSI installer (corrupted download?)"
+        ));
+    }
+    // L'APK est une archive ZIP (sérialisation Android de la signature
+    // v2/v3 en bloc de fin — l'en-tête locale PK suffit au garde-fou).
+    if name.ends_with(".apk") && !head.starts_with(b"PK\x03\x04") {
+        return Err(format!(
+            "update-failed:verify:{name} invalid — not an APK package (corrupted download?)"
         ));
     }
     Ok(())
@@ -320,7 +317,6 @@ fn resolve_relaunch_path(exe_before: Option<&std::path::Path>) -> Result<PathBuf
 /// Corps texte d'un asset nommé exact de la release `rel` — `Ok(None)`
 /// si l'asset n'existe pas (release plus ancienne que la publication du
 /// manifeste signé), `Err` si le transfert échoue.
-#[cfg(not(target_os = "android"))]
 fn fetch_release_text(rel: &serde_json::Value, asset_name: &str) -> Result<Option<String>, String> {
     let url = rel["assets"].as_array().and_then(|a| {
         a.iter().find_map(|x| {
@@ -350,7 +346,6 @@ fn fetch_release_text(rel: &serde_json::Value, asset_name: &str) -> Result<Optio
 /// refusée — repli de dépannage `AGENTCONTROL_ALLOW_UNSIGNED=1`
 /// (journalisé en warn) ; signature ou empreinte invalide → refus sec,
 /// jamais couvert par le repli.
-#[cfg(not(target_os = "android"))]
 fn verify_release_integrity(
     rel: &serde_json::Value,
     path: &std::path::Path,
@@ -455,6 +450,46 @@ fn fetch_release_asset(
     })?;
     verify_release_integrity(&rel, &dest, &aname)?;
     Ok(dest)
+}
+
+/// Update en un clic (Android) : télécharge l'APK de la release dans
+/// le cache de l'app et prouve son intégrité (I1 — SHA256SUMS signé
+/// minisign + sha256, `verify_release_integrity`), puis demande au
+/// plugin ac-device de lancer l'installeur système (intent VIEW sur
+/// l'URI FileProvider du cache — la permission « installer des
+/// applications inconnues » est gérée par Android : absente, le
+/// Kotlin ouvre les réglages de l'app et rend `permission_required`).
+/// Le process meurt avec le remplacement de l'APK — pas de statut
+/// post-install, l'utilisateur est sur l'écran de l'installeur.
+/// Retour : "launched" | "permission_required".
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) async fn update_client(
+    app: tauri::AppHandle,
+    tag: String,
+) -> Result<String, String> {
+    use tauri::Manager;
+    ulog(format!("install v{tag} demandée (android)"));
+    let apk = apk::fetch_apk(&app, &tag).await?;
+    let dev = app.state::<tauri_plugin_ac_device::Device<tauri::Wry>>();
+    let path = apk.to_string_lossy().to_string();
+    let v = dev.install_apk(&path).map_err(|e| e.to_string())?;
+    match v["status"].as_str() {
+        Some("launched") => {
+            ulog(format!("install v{tag} : installeur système ouvert"));
+            Ok("launched".into())
+        }
+        Some("permission_required") => {
+            ulog(format!("install v{tag} : permission « apps inconnues » requise"));
+            Ok("permission_required".into())
+        }
+        other => {
+            let msg =
+                format!("update-failed:install:unexpected installer reply {other:?}");
+            ulog(format!("install v{tag} échouée — {msg}"));
+            Err(msg)
+        }
+    }
 }
 
 /// Update en un clic : télécharge le .deb de la release via l'API REST et
@@ -955,5 +990,63 @@ mod tests {
         );
         let listing = "/etc/agentcontrol/agentcontrol.conf\n/usr/lib/agentcontrol/x\n";
         assert_eq!(deb_binary_from_listing(listing), None);
+    }
+
+    /// Sélection de l'asset APK de la release (chemin update Android) :
+    /// aarch64 prioritaire, tout `.apk` en repli, rien sinon — un
+    /// sélecteur trop large prendrait un asset non installable.
+    #[test]
+    fn apk_asset_picks_aarch64_release() {
+        let rel = serde_json::json!({
+            "assets": [
+                {"name": "AgentControl_0.10.4-rc.1_aarch64-release.apk",
+                 "browser_download_url": "https://x/apk"},
+                {"name": "SHA256SUMS", "browser_download_url": "https://x/sums"},
+                {"name": "agentcontrol-server-x86_64-linux.tar.gz",
+                 "browser_download_url": "https://x/tgz"}
+            ]
+        });
+        assert_eq!(
+            apk::apk_asset(&rel),
+            Some((
+                "AgentControl_0.10.4-rc.1_aarch64-release.apk".to_string(),
+                "https://x/apk".to_string()
+            ))
+        );
+        // Sans aarch64 dans le nom : n'importe quel .apk passe.
+        let rel = serde_json::json!({
+            "assets": [
+                {"name": "app.apk", "browser_download_url": "https://x/a"}
+            ]
+        });
+        assert_eq!(
+            apk::apk_asset(&rel),
+            Some(("app.apk".to_string(), "https://x/a".to_string()))
+        );
+        // Aucun APK → None (l'appelant rend update-failed:download).
+        let rel = serde_json::json!({"assets": []});
+        assert_eq!(apk::apk_asset(&rel), None);
+        // Asset .apk sans URL → ignoré, pas de panique.
+        let rel = serde_json::json!({
+            "assets": [{"name": "x.apk"}]
+        });
+        assert_eq!(apk::apk_asset(&rel), None);
+    }
+
+    /// Garde-fou binaire de l'APK : en-tête ZIP (PK) exigé — une page
+    /// d'erreur HTML ou un fichier tronqué téléchargé à la place de
+    /// l'artefact doit être refusé avant l'installeur.
+    #[test]
+    fn verify_asset_checks_apk_magic() {
+        let dir = std::env::temp_dir().join(format!("ac-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("a.apk");
+        std::fs::write(&good, b"PK\x03\x04rest").unwrap();
+        assert!(verify_asset(&good, "a.apk").is_ok());
+        let bad = dir.join("b.apk");
+        std::fs::write(&bad, b"<html>404</html>").unwrap();
+        let e = verify_asset(&bad, "b.apk").unwrap_err();
+        assert!(e.contains("not an APK"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
