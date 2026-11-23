@@ -3,8 +3,10 @@ name: version
 # Bump de version au moment de la release (PR next_release -> main
 # passee non-draft) :
 #   NEXT = dernier tag v* semver + niveau
-#   niveau = mot-clef le plus fort trouve dans les sujets/bodies des
-#            commits du cycle : `(major)` > `(sync)` ; aucun -> patch.
+#   niveau = mot-clef le plus fort trouve dans les sujets des commits
+#            du cycle (et les puces `* ` des corps de squash — le
+#            texte libre d'un body ne compte pas) : `(major)` >
+#            `(sync)` ; aucun -> patch.
 #            `(minor)` est deprecie = compte pour patch (seule une casse
 #            protocole demon<->client justifie un minor → auto-update
 #            x.y ; regle dans bump_version.py --detect-level, source de
@@ -128,7 +130,7 @@ jobs:
           # pas compter). Mapping → niveau : detect_level du script
           # (source de vérité, partagée avec release_notes.py) —
           # `(minor)` déprécié y est ignoré → patch (log « note : »).
-          MSGS=$(git log --format=%B "$RANGE")
+          MSGS=$(git log --format=%x1e%B "$RANGE")
           if grep -q -- '--detect-level' client/tools/bump_version.py; then
             LEVEL=$(printf '%s' "$MSGS" \
               | python3 client/tools/bump_version.py --detect-level)

@@ -42,7 +42,7 @@ else
   ok 0 "plage borne..HEAD sans (major)"
 fi
 # niveau détecté sur la plage = patch (seuls des fix post-reset)
-LVL=$(git log --format=%B "$B..HEAD" | python3 "$TOOL" --detect-level)
+LVL=$(git log --format=%x1e%B "$B..HEAD" | python3 "$TOOL" --detect-level)
 [ "$LVL" = "patch" ]; ok $? "detect-level sur la plage = patch"
 
 # à la tête du bump non tagué (avant le revert) : bump sauté, borne =
@@ -54,6 +54,23 @@ B2=$(python3 "$TOOL" --bound "$UNTAGGED")
 RB=$(comm "chore: bump version to 0.10.4 (reset)")
 B3=$(python3 "$TOOL" --bound HEAD)
 [ "$B3" = "$RB" ]; ok $? "borne = bump (reset) non tagué"
+
+# un body citant '(major)' en texte libre ne doit PAS changer le
+# niveau (incident release #334 : le body de #441 citait '(major)
+# de #422' → re-bump 1.0.0, revert #435) — seuls le sujet et les
+# puces `* ` d'un squash comptent
+echo y >> f && git add f
+git commit -qm "docs: precision" -m "le '(major)' de #422 reste annule"
+LVL2=$(git log --format=%x1e%B "$B3..HEAD" | python3 "$TOOL" --detect-level)
+[ "$LVL2" = "patch" ]; ok $? "corps citant (major) → niveau inchangé"
+
+# ... mais une puce `* ` du body d'un squash (sujet `(#N)`) compte :
+# le mot-clé peut ne vivre que dans un sujet de commit d'origine
+echo y >> f && git add f
+git commit -qm "feat: squash title (#600)" \
+  -m "* fix: inner commit (sync)" -m "* docs: autre"
+LVL3=$(git log --format=%x1e%B "$B3..HEAD" | python3 "$TOOL" --detect-level)
+[ "$LVL3" = "minor" ]; ok $? "puce de squash (sync) → minor"
 
 # --- fixture repli : aucun candidat → dernier tag semver --------------
 git init -q "$TMP/nobump" && cd "$TMP/nobump"
@@ -86,7 +103,7 @@ if git cat-file -e "$INCIDENT^{commit}" 2>/dev/null \
   else
     ok 0 "historique réel : plage sans (major) de #422"
   fi
-  LVR=$(git log --format=%B "$BR..$INCIDENT" \
+  LVR=$(git log --format=%x1e%B "$BR..$INCIDENT" \
         | python3 "$TOOL" --detect-level)
   [ "$LVR" = "patch" ]; ok $? "historique réel : niveau = patch (pas de re-bump)"
 else

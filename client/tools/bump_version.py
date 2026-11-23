@@ -6,10 +6,11 @@ client↔démon (déclenche l'auto-update du serveur), z = correctifs.
 Le suffixe explicite -rc.n sert au build des prereleases (injection au
 build, jamais commitée).
 
-Mode --detect-level : lit les messages de commit du cycle sur stdin et
-imprime le niveau de bump — source de vérité de la règle mots-clés →
-niveau, partagée par version.yml (release-bump) et release_notes.py :
-  git log --format=%B v1.2.3..HEAD \
+Mode --detect-level : lit les messages de commit du cycle sur stdin
+(séparés par \x1e — `git log --format=%x1e%B`) et imprime le niveau
+de bump — source de vérité de la règle mots-clés → niveau, partagée
+par version.yml (release-bump) et release_notes.py :
+  git log --format=%x1e%B v1.2.3..HEAD \
     | python3 client/tools/bump_version.py --detect-level
 
 Mode --bound [rev] : imprime la borne de la plage de scan (sha de
@@ -43,20 +44,43 @@ def bump(v, level="patch"):
     return ".".join(p)
 
 
+SQUASH_SUBJ_RE = re.compile(r"\(#\d+\)\s*$")
+
+
+def _keyword_scope(msgs):
+    """Texte où les mots-clés comptent : un commit = un enregistrement
+    \x1e (format `git log --x1e... %B`). Par commit on ne retient que
+    le sujet (1re ligne) et — pour les squash GitHub, sujets terminant
+    par `(#N)` — les puces `* ...` du body qui reprennent les sujets
+    des commits d'origine. Le texte libre d'un body ne compte pas :
+    un corps citant '(major)' (ex. une note d'incident) ne doit pas
+    déclencher un bump — incident #334 re-bumpé en 1.0.0 par #441."""
+    keep = []
+    for rec in msgs.split("\x1e"):
+        lines = rec.splitlines()
+        if not lines:
+            continue
+        keep.append(lines[0])
+        if SQUASH_SUBJ_RE.search(lines[0]):
+            keep.extend(l for l in lines[1:] if l.startswith("* "))
+    return "\n".join(keep)
+
+
 def detect_level(msgs):
-    """Niveau de bump depuis les messages du cycle (sujets + bodies —
-    le squash reprend les sujets en body). Mot-clé parenthésé le plus
-    fort : (major) > (sync) ; aucun → patch.
+    """Niveau de bump depuis les messages du cycle — voir _keyword_scope
+    pour ce qui est retenu. Mot-clé parenthésé le plus fort :
+    (major) > (sync) ; aucun → patch.
     (sync) = seul déclencheur de minor : incompatibilité protocole
     démon↔client — c'est le bump x.y qui déclenche l'auto-update.
     (minor) est déprécié : ignoré, traité comme patch (une feature sans
     casse protocole reste compatible → le client patché reste pair).
     Convention : jamais un mot nu — `a major bug` ou `sync retry` en
     prose ne comptent pas."""
-    level = ("major" if re.search(r"\(major\)", msgs, re.IGNORECASE)
-             else "minor" if re.search(r"\(sync\)", msgs, re.IGNORECASE)
+    scope = _keyword_scope(msgs)
+    level = ("major" if re.search(r"\(major\)", scope, re.IGNORECASE)
+             else "minor" if re.search(r"\(sync\)", scope, re.IGNORECASE)
              else "patch")
-    if re.search(r"\(minor\)", msgs, re.IGNORECASE):
+    if re.search(r"\(minor\)", scope, re.IGNORECASE):
         print(f"note : (minor) déprécié — ignoré (niveau retenu : "
               f"{level} ; seul (sync) monte en minor)", file=sys.stderr)
     return level
