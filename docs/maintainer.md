@@ -112,39 +112,40 @@ run and cancel it (same concurrency group) → head with no CI
 ⚠️ `gh pr checks <N> --watch` exits green on skipped or
 cancelled runs → gate on the head's **check runs**, not on run
 metadata (`workflow_run.event` never reports `ready_for_review`,
-and `createdAt` is a race). Arm an **ac-wait waiter** on the
-check-runs of the head SHA (see **Waiting** — never a blocking
-`--watch` nor a sleep-loop in-turn):
+and `createdAt` is a race). Arm an **ac-wait waiter** on
+`tools/pr-ci-status <N>` — it evaluates once per poll and covers
+three failure modes a bare check-runs poll misses: the PR state
+(merged / closed / back-to-draft — CI only runs on ready PRs),
+`mergeable`/`mergeStateStatus` (a `next_release` merge can flip the
+PR to `CONFLICTING` mid-wait → `REBASE-REQUIRED`, exit 0 →
+immediate ping instead of an endless `PENDING`), and the check runs
+of the **current** head (live `headRefOid` each poll, not the SHA
+frozen at arm time — a rebase mid-wait would otherwise poll a dead
+head forever). See **Waiting** — never a blocking `--watch` nor a
+sleep-loop in-turn:
 
 ```bash
-SHA=$(gh pr view <N> --json headRefOid -q .headRefOid)
-ac-wait --name "checks PR #<N>" --interval 60 --timeout 3600 -- bash -c "
-  gh api --paginate 'repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100' --jq '
-    .check_runs[] | select(.name | test(\"^(daemon-linux|client|rust)( |-|\$)\"))
-      | select(.conclusion != \"skipped\" and .conclusion != \"cancelled\")
-      | .status + \" \" + (.conclusion // \"-\") + \" \" + .name'
-  R=\$(gh api --paginate 'repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100' --jq '
-    [.check_runs[] | select(.name | test(\"^(daemon-linux|client|rust)( |-|\$)\"))
-      | select(.conclusion != \"skipped\" and .conclusion != \"cancelled\")]
-    | if length >= 7
-      then (if all(.status == \"completed\")
-            then (if all(.conclusion == \"success\") then \"DONE\" else \"FAIL\" end)
-            else \"PENDING\" end)
-      else \"PENDING\" end')
-  echo \$R; [ \$R != PENDING ]"
+ac-wait --name "checks PR #<N>" --interval 60 --timeout 3600 \
+    -- tools/pr-ci-status <N>
 ```
 
-The ping prints each real run's `status conclusion name` plus the
-verdict word: `DONE` = all 7 green → merge; `FAIL` = a real red →
-`gh run view <id> --log-failed`. `TIMEOUT` with no `DONE`/`FAIL` —
-or a stuck `PENDING` — usually means the head got **zero real
-runs** (the late `synchronize` dispatch cancelled the ready run):
-repair with `gh pr ready --undo && sleep 30 && gh pr ready`.
-Run from the clone root (`{owner}/{repo}` = repo of the cwd);
-the name filter must track `build.yml`'s and `test.yml`'s required
-jobs (`js`/`audit` stay advisory, outside the filter). Without
-the failure branch, an all-skipped head would come out green after
-~5 min — the exact case the gate detects.
+Verdicts — exit 0 notifies with the verdict line as tail, exit 1
+keeps polling: `DONE` (PR merged, or all required checks green) →
+merge; `FAIL` (red required check → `gh run view <id>
+--log-failed`; PR closed; PR back to draft) → fix; `REBASE-REQUIRED`
+→ see **Rebase before review** below; `PENDING` keeps polling —
+`mergeStateStatus=BEHIND` alone stays `PENDING` (not blocking while
+the ruleset's strict status-check policy is off, which is this
+repo's setting). `TIMEOUT` with no verdict usually means the head
+got **zero real runs** (the late `synchronize` dispatch cancelled
+the ready run): repair with `gh pr ready --undo && sleep 30 && gh
+pr ready`. Run from the clone root (`{owner}/{repo}` = repo of the
+cwd); the name filter inside the script must track `build.yml`'s
+and `test.yml`'s required jobs (`js`/`audit` stay advisory, outside
+the filter). Without the failure branch, an all-skipped head would
+come out green after ~5 min — the exact case the gate detects.
+`bash tools/pr-ci-status-test.sh` exercises every verdict against a
+stubbed `gh`.
 
 **Rebase before review**: if `origin/next_release` moved since the
 branch — `git merge-base --is-ancestor origin/next_release HEAD` false
@@ -160,6 +161,17 @@ re-run the review. An up-to-date base also avoids having a diff
 reviewed that the merge would rewrite. If `next_release` moves between
 the APPROVED and the merge, the verdict stays valid but GitHub may
 refuse the merge on conflict → rebase + re-review.
+
+The same applies when the conflict is discovered **during the CI
+wait** — `tools/pr-ci-status` exits `REBASE-REQUIRED` instead of
+polling a head that must change. Procedure: `gh pr ready --undo`
+(any change on a non-draft PR goes back to draft first) → `git
+fetch origin && git rebase origin/next_release` (resolve the
+conflicts) → push (`--force-with-lease`) → re-run `/mr review` on the
+draft — the verdict is anchored to the head SHA, the rebase
+invalidated it, and any standing findings are handled in the same
+push → review settled → `gh pr ready` (≥30 s after the last push) →
+re-arm the `pr-ci-status` waiter.
 
 The `/mr review` trigger can be served by the native orchestrator
 itself (`pr_review=true` in `backlog_orchestrator` params —

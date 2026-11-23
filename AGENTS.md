@@ -42,6 +42,11 @@
 - CI builds all artifacts on PRs; the required checks are the
   `daemon-linux` ×2, `client` ×2, `client-android`, `client-macos`
   build jobs plus `rust` (test.yml) — `js`/`audit` stay advisory.
+- If `next_release` moves and the PR turns `CONFLICTING` while you
+  wait on CI, the wait ends with an explicit rebase-required verdict
+  (`tools/pr-ci-status`) — don't keep waiting: rebase onto
+  `origin/next_release`, push, re-run the review, then re-arm the CI
+  wait (procedure: docs/maintainer.md § Rebase before review).
 
 ## Automatic versioning
 

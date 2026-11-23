@@ -72,6 +72,28 @@ ac-wait --log w-1730000000-12345      # tail of the log (polls, notif)
 
 `--session SID` targets another session (default `$AGENTCONTROL_SESSION`).
 
+## Waiting on a PR's CI — watch mergeability too
+
+A merge into the base branch can flip the PR to `CONFLICTING` while
+CI runs: the in-flight checks are on a head that must change, so a
+condition that only polls checks can hang until `--timeout`. Include
+the mergeable state and exit 0 with a clear "rebase required" message
+— the ping then carries the reason instead of a bare timeout:
+
+```bash
+ac-wait --name "checks PR #123" --interval 60 -- bash -c '
+  m=$(gh pr view 123 --json mergeable -q .mergeable)
+  if [ "$m" = CONFLICTING ]; then
+    echo "REBASE-REQUIRED PR #123 — rebase puis relancer la review"
+    exit 0
+  fi
+  gh pr checks 123 --required'
+```
+
+In the AgentControl repo, `tools/pr-ci-status <N>` already implements
+this (PR state + `mergeable`/`mergeStateStatus` + check runs in one
+verdict — see docs/maintainer.md § Drafts).
+
 ## Pitfalls
 
 - **Orchestrator nudge inhibited**: while a waiter lives, the orchestrator

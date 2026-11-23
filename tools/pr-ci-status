@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# pr-ci-status — évalue UNE fois l'état CI + mergeable d'une PR GitHub
+# et imprime un verdict. Conçu comme condition d'un waiter ac-wait :
+#
+#   ac-wait --name "checks PR #<N>" --interval 60 --timeout 3600 \
+#       -- tools/pr-ci-status <N>
+#
+# Sortie 0 = état terminal → le waiter notifie avec la sortie en queue :
+#   DONE                     PR mergée, ou tous les checks requis verts
+#   FAIL …                   check requis rouge, PR fermée, ou repassée
+#                            en draft (le CI ne tourne que sur les PR
+#                            prêtes — attendre serait un attente morte)
+#   REBASE-REQUIRED …        mergeable=CONFLICTING ou
+#                            mergeStateStatus=DIRTY : la base a bougé
+#                            avec conflit, le head va changer (rebase)
+#                            et le CI en cours ne compte plus —
+#                            rebase + review, puis re-armer l'attente.
+# Sortie 1 = PENDING → le waiter continue de poller (checks en cours,
+# mergeable UNKNOWN, gh en échec transitoire, mergeStateStatus=BEHIND
+# seul — non bloquant tant que strict_required_status_checks_policy
+# est off, ce qui est le cas de ce repo).
+#
+# « Checks requis » = check runs non skipped/cancelled nommés
+# daemon-linux|client|rust (≥7 attendus — js/audit restent advisory).
+# À lancer depuis la racine d'un clone/worktree du repo : gh déduit
+# owner/repo du cwd (`gh api … {owner}/{repo}` idem). Dépendances :
+# bash + gh.
+
+set -u
+
+N="${1:-}"
+[ -n "$N" ] || { echo "usage: pr-ci-status <PR#>" >&2; exit 2; }
+
+# state, isDraft, mergeable, mergeStateStatus, headRefOid — une seule
+# interrogation par poll (les deux champs mergeable sont calculés de
+# façon asynchrone par GitHub : UNKNOWN = à retenter, pas « ok »).
+info=$(gh pr view "$N" \
+  --json state,isDraft,mergeable,mergeStateStatus,headRefOid \
+  --jq '[.state, (.isDraft | tostring), .mergeable, .mergeStateStatus, .headRefOid] | @tsv' \
+  2>/dev/null) || { echo "PENDING gh pr view a échoué"; exit 1; }
+
+IFS=$'\t' read -r state draft mergeable mstate sha <<<"$info"
+
+case "$state" in
+  MERGED) echo "DONE PR #$N mergée"; exit 0 ;;
+  CLOSED) echo "FAIL PR #$N fermée sans merge"; exit 0 ;;
+esac
+
+if [ "$draft" = "true" ]; then
+  echo "FAIL PR #$N repassée en draft — gh pr ready avant d'attendre le CI"
+  exit 0
+fi
+
+# Conflit réel = merge impossible sans rebase → le CI en cours ne
+# finira jamais utilement. BEHIND seul n'est PAS terminal : le merge
+# reste possible (politique stricte off) et le verdict de review reste
+# ancré au head — inutile de rebase pour rien.
+if [ "$mergeable" = "CONFLICTING" ] || [ "$mstate" = "DIRTY" ]; then
+  echo "REBASE-REQUIRED PR #$N mergeable=$mergeable mergeState=$mstate — rebase sur origin/<base>, push, relancer le review, puis re-armer cette attente"
+  exit 0
+fi
+
+[ -n "$sha" ] || { echo "PENDING headRefOid inconnu"; exit 1; }
+
+res=$(gh api --paginate \
+  "repos/{owner}/{repo}/commits/$sha/check-runs?per_page=100" \
+  --jq '
+    [.check_runs[]
+      | select(.name | test("^(daemon-linux|client|rust)( |-|$)"))
+      | select(.conclusion != "skipped" and .conclusion != "cancelled")]
+    | (map(.status + " " + (.conclusion // "-") + " " + .name) | .[]),
+      (if length >= 7
+         then (if all(.status == "completed")
+               then (if all(.conclusion == "success") then "VERDICT DONE" else "VERDICT FAIL" end)
+               else "VERDICT PENDING" end)
+         else "VERDICT PENDING" end)' \
+  2>/dev/null) || { echo "PENDING gh api check-runs a échoué"; exit 1; }
+
+# Détail par run pour la queue du ping ; le verdict pilote la sortie.
+printf '%s\n' "$res" | grep -v '^VERDICT ' || true
+v=$(printf '%s\n' "$res" | awk '/^VERDICT /{print $2}' | tail -1)
+
+case "$v" in
+  DONE) echo "DONE PR #$N — checks requis verts"; exit 0 ;;
+  FAIL) echo "FAIL PR #$N — au moins un check requis en échec"; exit 0 ;;
+esac
+
+extra=""
+[ "$mstate" = "BEHIND" ] && extra=" (base a avancé : mergeable=$mergeable/$mstate — non bloquant)"
+echo "PENDING PR #$N checks en cours$extra"
+exit 1

@@ -85,6 +85,7 @@ jobs:
           sh tests/pair-sh-test.sh
           python3 tests/ensure-daemon-e2e.py
           sh tests/bump-bound-test.sh
+          bash ../tools/pr-ci-status-test.sh
       - name: Build client (vite preview des tests puppeteer)
         working-directory: client
         run: npm run build
