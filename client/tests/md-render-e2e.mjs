@@ -46,15 +46,17 @@ const MOCK = `(function () {
     ] },
   };
   // Une réponse d'agent avec images distantes (markdown, URL nue et
-  // hôte:port — ce dernier prouve la whitelist par domaine) plus une
-  // image « 'self' » même origine — la section N6 vérifie qu'aucune
-  // requête distante ne part sans clic.
+  // hôte:port — ce dernier prouve la whitelist par domaine), une image
+  // « 'self' » même origine et une image MÊME HÔTE en https (origine
+  // différente → distante) — la section N6 vérifie qu'aucune requête
+  // distante ne part sans clic.
   const EVENTS = [
     { seq: 1, type: "agent_text",
       text: "Image : ![x](https://example.com/a.png)\\n" +
             "Lien nu : https://example.com/b.png\\n" +
             "Port : ![y](https://example.com:8443/c.png)\\n" +
-            "Self : ![z](http://localhost:4185/d.png)" },
+            "Self : ![z](http://localhost:4185/d.png)\\n" +
+            "XScheme : ![w](https://localhost:4185/e.png)" },
   ];
   function rpc(method, args) {
     switch (method) {
@@ -143,6 +145,10 @@ const extSniff = (r) => {
   if (u.startsWith("https://example.com")) {
     extReqs.push(u);
     r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
+  } else if (u.startsWith("https://localhost:4185/")) {
+    // Même hôte, schéma différent : distante — servie comme example.com
+    // pour l'<img> (comptée séparément des hits example.com).
+    r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
   } else r.continue().catch(() => {});
 };
 await p.setRequestInterception(true);
@@ -172,14 +178,15 @@ await sleep(900);
 // --- N6 « au clic » (défaut) : aucune requête réseau avant le geste ---
 const phCount = () => p.evaluate(() => document.querySelectorAll("#events .md-img-ph").length);
 const imgCount = () => p.evaluate(() => document.querySelectorAll("#events img.md-img").length);
-check("N6 défaut : 3 placeholders .md-img-ph", (await phCount()) === 3, `n=${await phCount()}`);
+check("N6 défaut : 4 placeholders .md-img-ph (https://même-hôte inclus)",
+  (await phCount()) === 4, `n=${await phCount()}`);
 check("N6 défaut : seule l'image « self » en <img>", (await imgCount()) === 1);
 check("N6 défaut : 0 requête example.com au rendu", extReqs.length === 0, extReqs.join(","));
 await p.evaluate(() => document.querySelectorAll("#events .md-img-ph")[0]?.click());
 await sleep(800);
 check("N6 clic → <img> insérée (self + a)", (await imgCount()) === 2, `img=${await imgCount()}`);
 check("N6 clic → requête a.png émise", extReqs.some((u) => u.includes("a.png")), extReqs.join(","));
-check("N6 : les autres placeholders restent", (await phCount()) === 2);
+check("N6 : les autres placeholders restent", (await phCount()) === 3);
 await p.evaluate(() => document.querySelector("#events .md-img-ph")?.click());
 await sleep(600);
 await p.evaluate(() => document.querySelector("#events .md-img-ph")?.click());
@@ -340,6 +347,8 @@ p2.on("request", (r) => {
   if (u.startsWith("https://example.com")) {
     extReqs2.push(u);
     r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
+  } else if (u.startsWith("https://localhost:4185/")) {
+    r.respond({ status: 200, contentType: "image/png", body: PNG1 }).catch(() => {});
   } else r.continue().catch(() => {});
 });
 await p2.evaluateOnNewDocument(MOCK);
@@ -372,8 +381,8 @@ const im2 = () => p2.evaluate(() => document.querySelectorAll("#events img.md-im
 // « always » : <img> au rendu (comportement historique conservé).
 extReqs2.length = 0;
 await reopen2("always", null);
-check("N6 always : 4 <img> au rendu, 0 placeholder",
-  (await im2()) === 4 && (await ph2()) === 0, `img=${await im2()} ph=${await ph2()}`);
+check("N6 always : 5 <img> au rendu, 0 placeholder",
+  (await im2()) === 5 && (await ph2()) === 0, `img=${await im2()} ph=${await ph2()}`);
 check("N6 always : requêtes émises sans clic (a/b/c)",
   ["a.png", "b.png", "c.png"].every((f) => extReqs2.some((u) => u.includes(f))),
   extReqs2.join(","));
@@ -386,6 +395,9 @@ check("N6 never(\"0\") : 0 placeholder / seule « self » en <img>",
   (await ph2()) === 0 && (await im2()) === 1);
 check("N6 never : les liens simples restent",
   (await p2.evaluate(() => document.querySelectorAll('#events a[href^="https://example.com"]').length)) === 3);
+check("N6 never : https://même-hôte reste un simple lien (pas « self »)",
+  (await p2.evaluate(() =>
+    document.querySelectorAll('#events a[href="https://localhost:4185/e.png"]').length)) === 1);
 await sleep(300);
 check("N6 never : aucune requête", extReqs2.length === 0, extReqs2.join(","));
 
@@ -402,8 +414,8 @@ check("N6 never : aucune requête", extReqs2.length === 0, extReqs2.join(","));
 // « example.com:8443 » (review : URL.host incluait le port).
 extReqs2.length = 0;
 await reopen2("click", "example.com");
-check("N6 whitelist : 4 <img> direct dont hôte:port (confiance par domaine)",
-  (await im2()) === 4 && (await ph2()) === 0);
+check("N6 whitelist : 4 <img> direct (trusted + self), e reste placeholder",
+  (await im2()) === 4 && (await ph2()) === 1, `img=${await im2()} ph=${await ph2()}`);
 check("N6 whitelist : requêtes sans clic (a/b/c)",
   ["a.png", "b.png", "c.png"].every((f) => extReqs2.some((u) => u.includes(f))),
   extReqs2.join(","));
@@ -411,7 +423,7 @@ check("N6 whitelist : requêtes sans clic (a/b/c)",
 // Compat legacy « 1 » → always.
 extReqs2.length = 0;
 await reopen2("1", null);
-check("N6 legacy \"1\" → always : <img> direct", (await im2()) === 4 && (await ph2()) === 0);
+check("N6 legacy \"1\" → always : <img> direct", (await im2()) === 5 && (await ph2()) === 0);
 
 // Changement de mode à chaud (review P2) : « never » doit rester
 // absolu pour le contenu déjà rendu — un placeholder affiché en mode
@@ -419,7 +431,7 @@ check("N6 legacy \"1\" → always : <img> direct", (await im2()) === 4 && (await
 // réglage retire les placeholders sans re-rendre la conversation.
 extReqs2.length = 0;
 await reopen2("click", null);
-check("N6 switch : 3 placeholders en mode click", (await ph2()) === 3);
+check("N6 switch : 4 placeholders en mode click", (await ph2()) === 4);
 // Bascule du pref sans passer par le panneau : le placeholder restant
 // revalide la politique au clic → lien, zéro requête.
 await p2.evaluate(() => localStorage.setItem("ac-inline-images", "never"));
@@ -428,7 +440,7 @@ await sleep(400);
 check("N6 never tardif : clic placeholder → aucune requête",
   extReqs2.length === 0, extReqs2.join(","));
 check("N6 never tardif : placeholder devenu lien",
-  (await ph2()) === 2 &&
+  (await ph2()) === 3 &&
     (await p2.evaluate(() =>
       document.querySelectorAll('#events a[href^="https://example.com"]').length)) === 4);
 // Repasse en click pour ouvrir le panneau, bascule « never » via le

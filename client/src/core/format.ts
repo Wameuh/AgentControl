@@ -56,8 +56,9 @@ const imgRender = (url: string): "img" | "ph" | "none" => {
   const m = imgMode();
   if (m === "always") return "img";
   try {
-    if (new URL(url).host.toLowerCase() === location.host.toLowerCase())
-      return "img";
+    // Origine complète (schéma + hôte + port) : https://même-hôte sur
+    // un client http n'est PAS « 'self' » — c'est une origine différente.
+    if (new URL(url).origin === location.origin) return "img";
   } catch {
     /* URL illisible → politique standard. */
   }
