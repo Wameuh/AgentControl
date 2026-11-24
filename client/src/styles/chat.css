@@ -365,6 +365,21 @@ img.md-img {
 .btn-reject { border-color: var(--err); color: var(--err); }
 .perm.done { opacity: .5; pointer-events: none; }
 .q-input { flex: 1; min-width: 160px; background: rgba(var(--tint-rgb), .05); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font: inherit; }
+/* Formulaire de question (elicitation — AskUserQuestion…) : chaque
+   propriété du schéma est un champ ; oneOf → radios, array+anyOf →
+   cases, scalaire → saisie libre. */
+.q-form { flex-basis: 100%; display: flex; flex-direction: column; gap: 10px; }
+.q-field { display: flex; flex-direction: column; gap: 4px; }
+.q-label { font-weight: 500; }
+.q-desc { font-size: 12px; color: var(--muted); }
+.q-opts { display: flex; flex-direction: column; gap: 4px; }
+.q-opt { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+.q-opt input { margin-top: 3px; flex: none; }
+.q-opt-t { display: flex; flex-direction: column; }
+.q-opt-d { font-size: 12px; color: var(--muted); }
+.q-free { flex: none; width: 100%; box-sizing: border-box; }
+.q-actions { flex-basis: auto; }
+.perm-plan { max-height: 320px; font-size: 13px; }
 
 /* Composer */
 #composer {

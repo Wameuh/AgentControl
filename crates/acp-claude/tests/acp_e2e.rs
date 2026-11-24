@@ -341,6 +341,80 @@ async fn permission_roundtrip() {
 }
 
 #[tokio::test]
+async fn ask_user_question_elicitation_roundtrip() {
+    // AskUserQuestion → elicitation/create (form) ; la réponse accept
+    // est repliée en updatedInput.answers pour le control_response.
+    let input = json!({"questions": [
+        {"header":"Projet","question":"Type ?","multiSelect":false,
+         "options":[{"label":"Mobile","description":"app"},{"label":"API"}]},
+        {"header":"Fonctions","question":"Lesquelles ?","multiSelect":true,
+         "options":[{"label":"Auth"},{"label":"Dashboard"}]}
+    ]});
+    let turn = json!([
+        {"type":"assistant","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"toolu_q","name":"AskUserQuestion","input":input}
+        ]}},
+        {"type":"control_request","request_id":"req_q","request":{
+            "subtype":"can_use_tool","tool_name":"AskUserQuestion",
+            "input":input,"tool_use_id":"toolu_q"}},
+        {"_perm_wait":"req_q"},
+        {"type":"user","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"toolu_q","is_error":false,"content":[{"type":"text","text":"ok"}]}
+        ]}},
+        {"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn",
+         "usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":0.0}
+    ]);
+    let mut scen = init_scenario(json!([turn]));
+    scen["default_turn"] = json!([]);
+    let (mut c, _d) = start(scen).await;
+    let r = handshake(&mut c).await;
+    let sid = r["sessionId"].as_str().unwrap().to_string();
+
+    let id = c.next_id;
+    c.next_id += 1;
+    c.send(
+        json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{
+        "sessionId":sid,"prompt":[{"type":"text","text":"plan"}]}}),
+    )
+    .await;
+    // L'elicitation arrive comme requête agent→client.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut elicit_id = None;
+    while elicit_id.is_none() {
+        let v = c.recv(deadline).await;
+        if v.get("method") == Some(&json!("elicitation/create")) {
+            elicit_id = v.get("id").cloned();
+            let p = &v["params"];
+            assert_eq!(p["mode"], "form");
+            assert_eq!(p["sessionId"], sid);
+            let props = &p["requestedSchema"]["properties"];
+            assert!(props["question_0"]["oneOf"].is_array());
+            assert!(props["question_1"]["items"]["anyOf"].is_array());
+            assert!(props["question_0_custom"].is_object());
+        }
+    }
+    // Réponse formulaire : choix unique + multi + texte libre.
+    c.respond_to(
+        &elicit_id.unwrap(),
+        json!({"action":"accept","content":{
+            "question_0":"API",
+            "question_1":["Auth","Dashboard"],
+            "question_1_custom":"Redis, not Memcached"
+        }}),
+    )
+    .await;
+    // Le prompt se résout ; le control_response allow a porté les answers.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let v = c.recv(deadline).await;
+        if v.get("id") == Some(&json!(id)) {
+            assert_eq!(v["result"]["stopReason"], "end_turn");
+            break;
+        }
+    }
+}
+
+#[tokio::test]
 async fn cancel_mid_turn() {
     let turn = json!([
         {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}},

@@ -568,11 +568,23 @@ pub fn parse_permission(params: &Value) -> PermissionReq {
         .map(String::from);
     // Le "pourquoi" : rawInput (commande, paths, args) + locations + contenu.
     let mut parts: Vec<String> = Vec::new();
-    if let Some(d) = tc
+    let raw_input = tc
         .and_then(|t| t.get("rawInput"))
-        .or_else(|| params.get("rawInput"))
-        .and_then(fmt_detail)
-    {
+        .or_else(|| params.get("rawInput"));
+    // rawInput.plan (ExitPlanMode…) : le plan EST la demande — le
+    // publier en entier (borné) plutôt que dans le dump JSON tronqué,
+    // et le retirer du rawInput générique pour ne pas le dupliquer.
+    let mut detail_input = raw_input.cloned();
+    if let Some(m) = detail_input.as_mut().and_then(Value::as_object_mut) {
+        if let Some(plan) = m
+            .remove("plan")
+            .and_then(|p| p.as_str().map(str::to_string))
+            .filter(|s| !s.trim().is_empty())
+        {
+            parts.push(clip(&plan, 12_000));
+        }
+    }
+    if let Some(d) = detail_input.as_ref().and_then(fmt_detail) {
         parts.push(d);
     }
     if let Some(locs) = tc
@@ -691,6 +703,28 @@ mod tests {
             "data": "backend said no"
         });
         assert_eq!(acp_error_string(&e3), "Internal error: backend said no");
+    }
+
+    #[test]
+    fn permission_rawinput_plan_devient_le_detail() {
+        // ExitPlanMode : rawInput = {plan: "<markdown>"} — le détail de
+        // la permission doit porter le plan (borné), pas le dump JSON.
+        let plan = "# Plan\n\n1. étape un\n2. étape deux";
+        let params = json!({
+            "toolCall": {
+                "toolCallId": "toolu_1",
+                "title": "Exit Plan Mode",
+                "kind": "switch_mode",
+                "rawInput": {"plan": plan, "planFilePath": "/tmp/p.md"}
+            },
+            "options": []
+        });
+        let req = parse_permission(&params);
+        let d = req.detail.unwrap();
+        assert!(d.contains(plan), "detail: {d}");
+        assert!(!d.contains("\\\"plan\\\""), "plan dupliqué en JSON: {d}");
+        // Les autres champs du rawInput restent visibles.
+        assert!(d.contains("planFilePath"));
     }
 
     #[test]

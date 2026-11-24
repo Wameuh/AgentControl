@@ -185,9 +185,21 @@ function renderQuestion(card: HTMLElement, count: number): HTMLElement {
   const w = document.createElement("div");
   w.className = "pd-card pd-question";
   w.appendChild(head(card, count, "question"));
+  const origInput = card.querySelector<HTMLInputElement>(".q-input");
+  if (!origInput) {
+    // Formulaire structuré (.q-form — AskUserQuestion…) : pas de
+    // réponse rapide au pouce — amener à la carte dans le fil.
+    const show = document.createElement("button");
+    show.type = "button";
+    show.className = "btn-allow pd-primary pd-showq";
+    show.textContent = t("perm_dock_show");
+    show.onclick = () =>
+      card.scrollIntoView({ block: "center", behavior: "smooth" });
+    w.appendChild(show);
+    return w;
+  }
   const row = document.createElement("div");
   row.className = "pd-qrow";
-  const origInput = card.querySelector<HTMLInputElement>(".q-input")!;
   const inp = document.createElement("input");
   inp.placeholder = origInput.placeholder;
   const ans = document.createElement("button");

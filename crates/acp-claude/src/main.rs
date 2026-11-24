@@ -10,6 +10,7 @@
 
 mod claude;
 mod permission;
+mod questions;
 mod replay;
 mod tools;
 

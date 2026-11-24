@@ -23,6 +23,29 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: Value, req
         .to_string();
     let suggestions = req.get("permission_suggestions").cloned();
 
+    // AskUserQuestion : des questions à choix, pas une permission —
+    // présentées en elicitation/create (form) avec les réponses
+    // repliées dans updatedInput.answers. Prioritaire sur les
+    // raccourcis de mode : même en bypassPermissions la question
+    // attend une réponse de l'utilisateur. Si le client ne sert pas
+    // l'elicitation, repli sur la permission générique.
+    if tool_name == "AskUserQuestion" {
+        if let Some(questions) = crate::questions::extract(&input) {
+            match crate::questions::ask(
+                shared,
+                &ctrl_rid,
+                &input,
+                &questions,
+                &tool_use_id,
+            )
+            .await
+            {
+                crate::questions::AskResult::Done => return,
+                crate::questions::AskResult::Fallback => {}
+            }
+        }
+    }
+
     // Raccourcis modes : bypassPermissions → allow ; acceptEdits →
     // allow pour les outils d'édition (claude les auto-accepte déjà,
     // ce garde-fou couvre les cas limites).
@@ -68,6 +91,7 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: Value, req
             json!({"optionId": "acceptEdits", "name": "Yes, and auto-accept edits (option+tab)", "kind": "allow_always"}),
             json!({"optionId": "default", "name": "Yes", "kind": "allow_once"}),
             json!({"optionId": "plan", "name": "No, keep planning", "kind": "reject_once"}),
+            json!({"optionId": "request_changes", "name": "Request changes", "kind": "reject_once"}),
         ]
     } else {
         vec![
@@ -181,6 +205,18 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: Value, req
             // ExitPlanMode → « keep planning » : deny + interrupt.
             send_deny(shared, &ctrl_rid, "user chose to keep planning");
         }
+        (Some("selected"), "request_changes") => {
+            // ExitPlanMode → « modifications » : deny SANS interrupt —
+            // claude poursuit son tour de planification avec le motif
+            // du refus au lieu de stopper (contrairement à « keep
+            // planning » qui interrompt le tour).
+            send_deny_opts(
+                shared,
+                &ctrl_rid,
+                "user requested changes to the plan",
+                false,
+            );
+        }
         _ => {
             // reject / cancelled / erreur client → deny interrupt.
             send_deny(shared, &ctrl_rid, "user refused permission");
@@ -192,7 +228,18 @@ fn remove_perm_cancel(shared: &Shared, id: &str) {
     shared.perm_cancel.lock().unwrap().retain(|(k, _)| k != id);
 }
 
-fn send_deny(shared: &Shared, ctrl_rid: &Value, message: &str) {
+pub(crate) fn send_deny(shared: &Shared, ctrl_rid: &Value, message: &str) {
+    send_deny_opts(shared, ctrl_rid, message, true);
+}
+
+/// deny interrupt=true (défaut) stoppe le tour ; interrupt=false rend
+/// le refus au modèle qui continue (ExitPlanMode « request changes »).
+pub(crate) fn send_deny_opts(
+    shared: &Shared,
+    ctrl_rid: &Value,
+    message: &str,
+    interrupt: bool,
+) {
     shared.send_line(json!({
         "type": "control_response",
         "response": {
@@ -201,7 +248,7 @@ fn send_deny(shared: &Shared, ctrl_rid: &Value, message: &str) {
             "response": {
                 "behavior": "deny",
                 "message": message,
-                "interrupt": true,
+                "interrupt": interrupt,
             },
         }
     }));

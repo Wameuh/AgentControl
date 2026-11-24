@@ -585,12 +585,23 @@ export class EventRenderer {
     const opts = (ev.options as { option_id: string; name: string; kind: string }[]) ?? [];
     const kind = ev.kind as string | undefined;
     const detail = ev.detail as string | undefined;
+    // ExitPlanMode : le détail EST le plan proposé (markdown) — le
+    // rendre en markdown plutôt qu'en <pre> brute. Même heuristique
+    // que le détecteur exit-plan de l'orchestrateur (titre/kind).
+    const planMode = isExitPlanReq(ev.title as string, kind);
     d.innerHTML =
       `<div class="perm-title">${icon("lock")} ${esc(ev.title as string)}` +
       (kind ? ` <span class="perm-kind">${esc(kind)}</span>` : "") +
       `</div>` +
-      (detail ? `<pre class="perm-detail">${esc(detail)}</pre>` : "") +
+      (detail
+        ? planMode
+          ? `<div class="perm-detail md perm-plan"></div>`
+          : `<pre class="perm-detail">${esc(detail)}</pre>`
+        : "") +
       `<div class="perm-opts"></div>`;
+    if (planMode && detail) {
+      d.querySelector<HTMLElement>(".perm-plan")!.innerHTML = mdRender(detail);
+    }
     const box = d.querySelector<HTMLElement>(".perm-opts")!;
     for (const o of opts) {
       const b = document.createElement("button");
@@ -619,6 +630,14 @@ export class EventRenderer {
   private renderQuestion(ev: AcEvent): HTMLElement {
     const d = mkEv("perm question", ev.seq);
     d.dataset.req = ev.request_id as string;
+    // Schéma de formulaire (elicitation ACP — AskUserQuestion de claude,
+    // ask_user_question des autres agents) : champs structurés plutôt
+    // que la saisie JSON libre.
+    const schema = ev.schema as { properties?: Record<string, unknown> } | undefined;
+    const props = schema?.properties;
+    if (props && typeof props === "object" && Object.keys(props).length > 0) {
+      return this.renderQuestionForm(d, ev, props as Record<string, Record<string, unknown>>);
+    }
     d.innerHTML = `
       <div class="perm-title">${icon("question")} ${esc(ev.message as string)}</div>
       <div class="q-row">
@@ -644,4 +663,132 @@ export class EventRenderer {
     if (this.answered.has(ev.request_id as string)) d.classList.add("done");
     return d;
   }
+
+  /// Question avec schéma de formulaire : chaque propriété devient un
+  /// champ — `oneOf` → radios, `array`+`items.anyOf` → cases à cocher,
+  /// scalaire → saisie libre (string/number/boolean). La réponse est
+  /// l'objet `{clé: valeur}` transmis tel quel à l'agent via
+  /// `respond --answer` (l'adaptateur le replie dans l'outil).
+  private renderQuestionForm(
+    d: HTMLElement,
+    ev: AcEvent,
+    props: Record<string, Record<string, unknown>>,
+  ): HTMLElement {
+    const msg = (ev.message as string) || t("perm_title");
+    d.innerHTML =
+      `<div class="perm-title">${icon("question")} ${esc(msg)}</div>` +
+      `<div class="q-form"></div>` +
+      `<div class="q-row q-actions">` +
+      `<button class="btn-allow">${t("answer_btn")}</button>` +
+      `<button class="btn-reject">${t("ignore_btn")}</button>` +
+      `</div>`;
+    const form = d.querySelector<HTMLElement>(".q-form")!;
+    // key → {kind, options: consts bruts} pour reconstruire les valeurs
+    // JSON exactes (un `const` peut être nombre/booléen, pas seulement
+    // une chaîne).
+    const metas = new Map<string, { multi: boolean; consts: unknown[] }>();
+
+    for (const [key, p] of Object.entries(props)) {
+      const ptype = p?.type as string | undefined;
+      const options = Array.isArray(p?.oneOf)
+        ? (p.oneOf as Record<string, unknown>[])
+        : ptype === "array" && Array.isArray((p.items as Record<string, unknown> | undefined)?.anyOf)
+          ? ((p.items as Record<string, unknown>).anyOf as Record<string, unknown>[])
+          : null;
+      const field = document.createElement("div");
+      field.className = "q-field";
+      field.dataset.key = key;
+      const title = typeof p?.title === "string" && p.title ? p.title : null;
+      const desc = typeof p?.description === "string" && p.description ? p.description : null;
+      if (title) field.innerHTML += `<div class="q-label">${esc(title)}</div>`;
+      if (desc) field.innerHTML += `<div class="q-desc">${esc(desc)}</div>`;
+
+      if (options?.length) {
+        const multi = ptype === "array";
+        metas.set(key, { multi, consts: options.map((o) => o.const) });
+        const box = document.createElement("div");
+        box.className = "q-opts";
+        options.forEach((o, i) => {
+          const val = o.const;
+          const label = (o.title as string) ?? String(val ?? "");
+          const od = typeof o.description === "string" && o.description ? o.description : null;
+          const lab = document.createElement("label");
+          lab.className = "q-opt";
+          lab.innerHTML =
+            `<input type="${multi ? "checkbox" : "radio"}" name="${esc(key)}" data-oi="${i}" />` +
+            `<span class="q-opt-t">${esc(label)}` +
+            (od ? `<span class="q-opt-d">${esc(od)}</span>` : "") +
+            `</span>`;
+          box.appendChild(lab);
+        });
+        field.appendChild(box);
+      } else {
+        const inp = document.createElement("input");
+        inp.className = "q-input q-free";
+        if (ptype === "number" || ptype === "integer") inp.type = "number";
+        else if (ptype === "boolean") inp.type = "checkbox";
+        else inp.type = "text";
+        if (typeof p?.placeholder === "string") inp.placeholder = p.placeholder;
+        field.appendChild(inp);
+        metas.set(key, { multi: false, consts: [] });
+      }
+      form.appendChild(field);
+    }
+
+    const collect = (): Record<string, unknown> => {
+      const out: Record<string, unknown> = {};
+      for (const [key, meta] of metas) {
+        const field = form.querySelector<HTMLElement>(`[data-key="${CSS.escape(key)}"]`);
+        if (!field) continue;
+        if (meta.consts.length) {
+          const checked = [...field.querySelectorAll<HTMLInputElement>("input:checked")];
+          if (meta.multi) {
+            const vals = checked.map((c) => meta.consts[Number(c.dataset.oi)]);
+            if (vals.length) out[key] = vals;
+          } else if (checked.length) {
+            out[key] = meta.consts[Number(checked[0].dataset.oi)];
+          }
+          continue;
+        }
+        const inp = field.querySelector<HTMLInputElement>("input")!;
+        if (inp.type === "checkbox") {
+          out[key] = inp.checked;
+        } else {
+          const v = inp.value.trim();
+          if (v === "") continue;
+          const ptype = (props[key] as Record<string, unknown>)?.type;
+          out[key] = ptype === "number" || ptype === "integer" ? Number(v) : v;
+        }
+      }
+      return out;
+    };
+
+    const answer = async (val: unknown) => {
+      if (this.answered.has(ev.request_id as string)) return;
+      await call("respond", {
+        session: app.current!.id,
+        request_id: ev.request_id,
+        answer: val,
+      })
+        .then(() => tick("resolve"))
+        .catch((e) => showErr(String(e)));
+      d.classList.add("done");
+    };
+    d.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = () => answer(collect());
+    d.querySelector<HTMLButtonElement>(".btn-reject")!.onclick = () => answer(null);
+    if (this.answered.has(ev.request_id as string)) d.classList.add("done");
+    return d;
+  }
+}
+
+/** Permission « sortie de plan » (ExitPlanMode / exit_plan_mode) :
+ *  titre ou kind le signalent — le détail porte le plan lui-même. */
+function isExitPlanReq(title: string, kind: string | undefined): boolean {
+  const s = `${title} ${kind ?? ""}`.toLowerCase();
+  return (
+    s.includes("exit_plan") ||
+    s.includes("exit-plan") ||
+    s.includes("exit plan") ||
+    kind === "switch_mode"
+  );
 }
