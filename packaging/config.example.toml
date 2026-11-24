@@ -14,6 +14,11 @@ bind_tcp = "127.0.0.1:7331"
 # Explicit escape hatch for the loopback guard (isolated private network,
 # container): the bind is accepted off-loopback, a warn is logged at every
 # start, and daemon.token auth still applies to every TCP connection.
+# Note: inside a container (/.dockerenv, /run/.containerenv or a
+# docker/containerd cgroup) a non-loopback bind_tcp is already accepted
+# with a warn — 0.0.0.0 is the only reachable bind there and exposure
+# stays bounded by the runtime's port publishing. AGENTCONTROL_CONTAINER=1|0
+# forces the verdict (tests, marker-less runtimes).
 # allow_non_loopback_tcp = false
 
 # Web interface: the daemon serves the same SPA as the Tauri client —

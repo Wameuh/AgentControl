@@ -27,25 +27,41 @@ struct TestDaemon {
 
 impl TestDaemon {
     async fn spawn(tag: &str) -> Self {
-        let home = std::env::temp_dir().join(format!("ac-tcpauth-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
         // Port libre : bind :0, lecture, drop — le démon re-bind aussitôt
         // (race acceptable en test ; un échec serait vu à l'étape poll).
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = free.local_addr().unwrap().to_string();
         drop(free);
-        std::fs::write(home.join("config.toml"), format!("bind_tcp = \"{addr}\"\n")).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_agentcontrol-daemon"))
-            .env("AGENTCONTROL_HOME", &home)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn daemon");
-        let d = Self { home, addr, child };
+        let config = format!("bind_tcp = \"{addr}\"\n");
+        let d = Self::launch(tag, &config, &addr, &[]);
         d.wait_ready().await;
         d
+    }
+
+    /// Spawn sans attente de readiness : config.toml arbitraire,
+    /// `addr` = adresse testée par wait_ready/tcp (peut différer du
+    /// bind, ex. bind 0.0.0.0 joint via 127.0.0.1), env vars en plus.
+    /// Pour les cas où le démon doit REFUSER de démarrer (garde
+    /// loopback) — l'appelant attend la sortie du process.
+    fn launch(tag: &str, config: &str, addr: &str, envs: &[(&str, &str)]) -> Self {
+        let home = std::env::temp_dir().join(format!("ac-tcpauth-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("config.toml"), config).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_agentcontrol-daemon"));
+        cmd.env("AGENTCONTROL_HOME", &home)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let child = cmd.spawn().expect("spawn daemon");
+        Self {
+            home,
+            addr: addr.to_string(),
+            child,
+        }
     }
 
     /// Le listener TCP monte avant la fin de l'init (chargement des
@@ -260,4 +276,56 @@ async fn tcp_auth_gate() {
         elapsed >= Duration::from_secs(9) && elapsed <= Duration::from_secs(15),
         "auth timeout ≈10 s, got {elapsed:?}"
     );
+}
+
+/// Garde loopback vs conteneur (incident v0.11.0-rc.2 : le devcontainer
+/// crash-loopait sur bind_tcp 0.0.0.0) — bind_tcp hors loopback :
+/// fatal hors conteneur, warn + bind accepté en conteneur
+/// (`AGENTCONTROL_CONTAINER` force le verdict : les tests peuvent
+/// eux-mêmes tourner dans un conteneur).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_guard_container() {
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = free.local_addr().unwrap().port();
+    drop(free);
+    let config = format!("bind_tcp = \"0.0.0.0:{port}\"\n");
+    let connect = format!("127.0.0.1:{port}");
+
+    // ── Hors conteneur (verdict forcé même si le test tourne dans un
+    // conteneur) : check_loopback fatal → le process sort sans binder.
+    let mut d = TestDaemon::launch(
+        "noloop",
+        &config,
+        &connect,
+        &[("AGENTCONTROL_CONTAINER", "0")],
+    );
+    let status = tokio::time::timeout(Duration::from_secs(20), d.child.wait())
+        .await
+        .expect("daemon should exit on non-loopback bind outside a container")
+        .unwrap();
+    assert!(!status.success(), "expected fatal exit, got {status}");
+    // La cause est bien le garde loopback, pas une autre erreur de boot.
+    let logs = std::fs::read_dir(d.home.join("logs")).unwrap();
+    let found = logs
+        .filter_map(|e| e.ok())
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .any(|c| c.contains("is not loopback"));
+    assert!(found, "daemon.log should mention the loopback guard");
+
+    // ── En conteneur : le même bind est accepté (warn), le port
+    // répond et l'auth TCP reste exigée.
+    let d = TestDaemon::launch(
+        "cloop",
+        &config,
+        &connect,
+        &[("AGENTCONTROL_CONTAINER", "1")],
+    );
+    d.wait_ready().await;
+    let token = d.token();
+    let (mut r, mut w) = d.tcp().await;
+    let auth = json!({"id": 1, "req": "auth", "token": token.as_str()}).to_string();
+    let v = TestDaemon::tcp_roundtrip(&mut r, &mut w, &auth)
+        .await
+        .unwrap();
+    assert_eq!(v["ok"], true, "auth over container-accepted bind: {v}");
 }
