@@ -68,7 +68,10 @@ fn run(aumid: &str) -> Result<(), String> {
     .arg(&ps1);
     // App GUI : sans CREATE_NO_WINDOW une console cmd clignote à chaque
     // démarrage (-WindowStyle Hidden n'agit qu'après sa création).
-    client_core::hide_console(&mut cmd);
+    // client_core::hide_console n'accepte que tokio::process::Command —
+    // d'où creation_flags direct ici.
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let out = cmd.output();
     let _ = std::fs::remove_file(&ps1);
     let out = out.map_err(|e| format!("spawn powershell: {e}"))?;
