@@ -154,6 +154,10 @@ function head(card: HTMLElement, count: number, icn: "lock" | "question") {
 function renderPerm(card: HTMLElement, count: number): HTMLElement {
   const w = document.createElement("div");
   w.className = "pd-card";
+  // Envoi du respond en vol côté carte : le dock suit — boutons
+  // désactivés, pas de second clic (le RPC reste sur la carte).
+  const pending = card.classList.contains("pending");
+  if (pending) w.classList.add("pending");
   w.appendChild(head(card, count, "lock"));
   const detail = card.querySelector(".perm-detail")?.textContent;
   if (detail) {
@@ -180,6 +184,7 @@ function renderPerm(card: HTMLElement, count: number): HTMLElement {
     b.textContent = o.textContent;
     b.className = o.classList.contains("btn-reject") ? "btn-reject" : "btn-allow";
     if (kind === "allow_once") b.classList.add("pd-primary");
+    b.disabled = pending;
     b.onclick = () => o.click(); // le RPC respond reste côté carte
     opts.appendChild(b);
   }
@@ -190,6 +195,8 @@ function renderPerm(card: HTMLElement, count: number): HTMLElement {
 function renderQuestion(card: HTMLElement, count: number): HTMLElement {
   const w = document.createElement("div");
   w.className = "pd-card pd-question";
+  const pending = card.classList.contains("pending");
+  if (pending) w.classList.add("pending");
   w.appendChild(head(card, count, "question"));
   // Formulaire structuré (.q-form — AskUserQuestion…) : ses champs
   // libres portent aussi .q-input (.q-free), donc on détecte le
@@ -210,10 +217,12 @@ function renderQuestion(card: HTMLElement, count: number): HTMLElement {
   row.className = "pd-qrow";
   const inp = document.createElement("input");
   inp.placeholder = origInput.placeholder;
+  inp.disabled = pending;
   const ans = document.createElement("button");
   ans.type = "button";
   ans.className = "btn-allow pd-primary";
   ans.textContent = card.querySelector(".btn-allow")?.textContent ?? "";
+  ans.disabled = pending;
   ans.onclick = () => {
     origInput.value = inp.value;
     card.querySelector<HTMLButtonElement>(".btn-allow")?.click();
@@ -225,6 +234,7 @@ function renderQuestion(card: HTMLElement, count: number): HTMLElement {
   ign.type = "button";
   ign.className = "btn-reject";
   ign.textContent = card.querySelector(".btn-reject")?.textContent ?? "";
+  ign.disabled = pending;
   ign.onclick = () => card.querySelector<HTMLButtonElement>(".btn-reject")?.click();
   row.append(inp, ign, ans);
   w.appendChild(row);

@@ -226,10 +226,15 @@ async function fillPending(body: HTMLElement, s: SessionMeta, row: HTMLElement) 
         : o.kind === "allow_once" ? "btn-allow" : "");
       b.textContent = o.name;
       b.onclick = () => {
-        b.disabled = true;
+        // Verrou visuel en vol : tous les boutons de la carte se
+        // désactivent (respondPending déduplique aussi le RPC).
+        for (const x of acts.querySelectorAll("button")) x.disabled = true;
         void respondPending(s, req.request_id, { option_id: o.option_id })
           .then(() => sb.refresh())
-          .catch((e) => showErr(String(e)));
+          .catch((e) => {
+            showErr(String(e));
+            for (const x of acts.querySelectorAll("button")) x.disabled = false;
+          });
       };
       acts.appendChild(b);
     }
@@ -255,9 +260,16 @@ async function fillPending(body: HTMLElement, s: SessionMeta, row: HTMLElement) 
     `<input class="q-input mh-q" />` +
     `<button class="btn btn-allow">${esc(t("home_reply"))}</button></div>`;
   const inp = body.querySelector<HTMLInputElement>(".mh-q")!;
-  body.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = () => {
+  const replyBtn = body.querySelector<HTMLButtonElement>(".btn-allow")!;
+  replyBtn.onclick = () => {
+    inp.disabled = true;
+    replyBtn.disabled = true;
     void respondPending(s, req.request_id, { answer: parseAnswer(inp.value || null) })
       .then(() => sb.refresh())
-      .catch((e) => showErr(String(e)));
+      .catch((e) => {
+        showErr(String(e));
+        inp.disabled = false;
+        replyBtn.disabled = false;
+      });
   };
 }

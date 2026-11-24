@@ -44,6 +44,11 @@ export class EventRenderer {
   // que ChatView puisse les stash/restaurer.
   toolBlocks = new Map<string, HTMLElement>();
   answered = new Set<string>();
+  /** Réponses dont le RPC `respond` est en vol — verrou anti double-envoi
+   *  distinct d'`answered` (rempli par les events *_resolved) : sans lui,
+   *  un second clic avant la résolution renverrait un doublon. Vidé en
+   *  finally à chaque respond ; swapé avec le reste de l'état de rendu. */
+  pending = new Set<string>();
   // Updates reçues avant leur bloc tool_call (bloc dans une page
   // d'historique pas encore chargée) — flushées quand le bloc est rendu.
   pendingToolUpdates = new Map<string, AcEvent[]>();
@@ -581,6 +586,57 @@ export class EventRenderer {
   // Permissions & questions
   // -------------------------------------------------------------------------
 
+  /// Envoie la réponse à une permission/question : état « envoi » posé
+  /// AVANT le await (carte .pending, boutons désactivés, spinner sur le
+  /// bouton cliqué) pour que l'app ne paraisse pas figée pendant le
+  /// roundtrip — sur connexion lente il peut prendre des secondes.
+  /// `.done` reste réservé à la résolution confirmée ; en cas d'erreur
+  /// RPC on retire .pending et on réactive les contrôles (la demande est
+  /// peut-être encore vivante côté agent — jamais de .done).
+  private respondCard(
+    rid: string,
+    card: HTMLElement,
+    btn: HTMLElement,
+    reply: Record<string, unknown>,
+  ) {
+    if (this.answered.has(rid) || this.pending.has(rid)) return;
+    this.pending.add(rid);
+    card.classList.add("pending");
+    btn.classList.add("spin");
+    const controls = card.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input");
+    for (const c of controls) c.disabled = true;
+    void call("respond", {
+      session: app.current!.id,
+      request_id: rid,
+      ...reply,
+    })
+      .then(() => {
+        tick("resolve");
+        btn.classList.remove("spin");
+        card.classList.remove("pending");
+        card.classList.add("done");
+      })
+      .catch((e) => {
+        showErr(String(e));
+        btn.classList.remove("spin");
+        card.classList.remove("pending");
+        for (const c of controls) c.disabled = false;
+      })
+      .finally(() => this.pending.delete(rid));
+  }
+
+  /// État de la carte à la pose : résolue (event reçu avant le rendu)
+  /// ou envoi déjà en vol (réponse partie d'une autre surface).
+  private applyReqState(d: HTMLElement, rid: string) {
+    if (this.answered.has(rid)) {
+      d.classList.add("done");
+    } else if (this.pending.has(rid)) {
+      d.classList.add("pending");
+      for (const c of d.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input"))
+        c.disabled = true;
+    }
+  }
+
   private renderPermission(ev: AcEvent): HTMLElement {
     const d = mkEv("perm", ev.seq);
     d.dataset.req = ev.request_id as string;
@@ -612,20 +668,13 @@ export class EventRenderer {
       // Lu par le dock mobile (perm-dock.ts) pour mettre allow_once en
       // avant quel que soit l'ordre des options annoncé par l'agent.
       b.dataset.kind = o.kind;
-      b.onclick = async () => {
-        if (this.answered.has(ev.request_id as string)) return;
-        await call("respond", {
-          session: app.current!.id,
-          request_id: ev.request_id,
+      b.onclick = () =>
+        this.respondCard(ev.request_id as string, d, b, {
           option_id: o.option_id,
-        })
-          .then(() => tick("resolve"))
-          .catch((e) => showErr(String(e)));
-        d.classList.add("done");
-      };
+        });
       box.appendChild(b);
     }
-    if (this.answered.has(ev.request_id as string)) d.classList.add("done");
+    this.applyReqState(d, ev.request_id as string);
     return d;
   }
 
@@ -648,21 +697,15 @@ export class EventRenderer {
         <button class="btn-reject">${t("ignore_btn")}</button>
       </div>`;
     const input = d.querySelector<HTMLInputElement>(".q-input")!;
-    const answer = async (val: string | null) => {
-      if (this.answered.has(ev.request_id as string)) return;
-      const parsed = parseAnswer(val);
-      await call("respond", {
-        session: app.current!.id,
-        request_id: ev.request_id,
-        answer: parsed,
-      })
-        .then(() => tick("resolve"))
-        .catch((e) => showErr(String(e)));
-      d.classList.add("done");
-    };
-    d.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = () => answer(input.value || "{}");
-    d.querySelector<HTMLButtonElement>(".btn-reject")!.onclick = () => answer(null);
-    if (this.answered.has(ev.request_id as string)) d.classList.add("done");
+    const answer = (val: string | null, btn: HTMLElement) =>
+      this.respondCard(ev.request_id as string, d, btn, {
+        answer: parseAnswer(val),
+      });
+    d.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = (e) =>
+      answer(input.value || "{}", e.currentTarget as HTMLElement);
+    d.querySelector<HTMLButtonElement>(".btn-reject")!.onclick = (e) =>
+      answer(null, e.currentTarget as HTMLElement);
+    this.applyReqState(d, ev.request_id as string);
     return d;
   }
 
@@ -804,23 +847,16 @@ export class EventRenderer {
       return out;
     };
 
-    const answer = async (val: unknown) => {
-      if (this.answered.has(ev.request_id as string)) return;
-      await call("respond", {
-        session: app.current!.id,
-        request_id: ev.request_id,
-        answer: val,
-      })
-        .then(() => tick("resolve"))
-        .catch((e) => showErr(String(e)));
-      d.classList.add("done");
-    };
-    d.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = () => answer(collect());
+    const answer = (val: unknown, btn: HTMLElement) =>
+      this.respondCard(ev.request_id as string, d, btn, { answer: val });
+    d.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = (e) =>
+      answer(collect(), e.currentTarget as HTMLElement);
     // « Ignorer » = sauter les questions : accept avec un contenu vide
     // (l'agent voit des réponses vides et poursuit) — pas un cancel,
     // qui interromprait le tour.
-    d.querySelector<HTMLButtonElement>(".btn-reject")!.onclick = () => answer({});
-    if (this.answered.has(ev.request_id as string)) d.classList.add("done");
+    d.querySelector<HTMLButtonElement>(".btn-reject")!.onclick = (e) =>
+      answer({}, e.currentTarget as HTMLElement);
+    this.applyReqState(d, ev.request_id as string);
     return d;
   }
 }

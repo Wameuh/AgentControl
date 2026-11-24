@@ -364,6 +364,10 @@ img.md-img {
 .btn-allow { border-color: var(--ok); color: var(--ok); }
 .btn-reject { border-color: var(--err); color: var(--err); }
 .perm.done { opacity: .5; pointer-events: none; }
+/* Envoi du respond en vol : posé AVANT le roundtrip RPC — filet accent,
+   boutons désactivés, spinner (.spin) sur le bouton cliqué. Distinct de
+   .done, qui marque la résolution confirmée. */
+.perm.pending { border-left-color: var(--accent); }
 .q-input { flex: 1; min-width: 160px; background: rgba(var(--tint-rgb), .05); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font: inherit; }
 /* Formulaire de question (elicitation — AskUserQuestion…) : chaque
    propriété du schéma est un champ ; oneOf → radios, array+anyOf →
