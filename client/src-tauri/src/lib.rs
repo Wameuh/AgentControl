@@ -7,6 +7,8 @@ mod commands;
 mod instance;
 mod state;
 mod stream;
+#[cfg(target_os = "windows")]
+mod windows_pin;
 
 use state::AppState;
 use tauri::Manager;
@@ -103,6 +105,11 @@ pub fn run() {
     // les raccourcis des installateurs.
     #[cfg(target_os = "windows")]
     set_app_user_model_id(context.config().identifier.as_str());
+    // Pins taskbar créés avant l'AUMID explicite : .lnk sans
+    // System.AppUserModel.ID → icône « sautée » à chaque update.
+    // Réparation one-shot en arrière-plan (PowerShell + IPropertyStore).
+    #[cfg(target_os = "windows")]
+    windows_pin::spawn_fix(context.config().identifier.as_str());
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
