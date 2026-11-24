@@ -736,7 +736,7 @@ export class Sidebar {
     if (sig === this.listSig) return; // DOM déjà à jour — rien à refaire
     this.listSig = sig;
     // Index de pliage ciblé (#369) : reconstruit avec le DOM — les
-    // handlers de toggle et renderSig() siguiente lisent cet état.
+    // handlers de toggle et renderSig() suivante lisent cet état.
     this.foldKeys = new Set();
     this.foldSubs = new Map();
     const el = $("session-list");
@@ -937,6 +937,10 @@ export class Sidebar {
     this.onListRendered?.(
       app.lastSessions.filter((s) => !this.pendingDel.has(s.id)),
     );
+    // listSig a été calculé avec les foldKeys du rendu PRÉCÉDENT :
+    // le recalculer maintenant que l'index reflète ce DOM, sinon le
+    // 1er toggle après un rendu pourrait croire la liste périmée.
+    this.listSig = this.renderSig();
   }
 
   /** Payload du drag en cours — renseigné au dragstart (ligne session ou
