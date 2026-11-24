@@ -8,13 +8,19 @@
 //! .lnk déjà épinglé — on le fait ici, une fois par démarrage, en posant
 //! la propriété sur les .lnk qui ciblent notre exe : pins taskbar +
 //! raccourcis bureau/menu Démarrer hérités d'installateurs anciens (un pin
-//! créé depuis eux resterait cassé sinon).
+//! créé depuis eux resterait cassé sinon ; le match par nom de binaire
+//! peut aussi toucher un raccourci vers une autre installation du même
+//! exe — idempotent, sans conséquence).
 //!
 //! `WScript.Shell` ne sait pas écrire cette propriété (property store du
 //! fichier, pas un champ IShellLink) — il faut `IPropertyStore` en COM,
 //! sans equivalent typé dans windows-sys. On délègue donc à un script
 //! PowerShell + `Add-Type` C# lancé en thread détaché : invisible pour
-//! l'utilisateur, idempotent, journalisé dans client.log.
+//! l'utilisateur, idempotent, journalisé dans client.log. Le C# suit la
+//! même voie que le macro NSIS `SetLnkAppUserModelId` de tauri-bundler :
+//! `CoCreateInstance(CLSID_ShellLink)` → `IPersistFile::Load` →
+//! `QueryInterface(IPropertyStore)` → `SetValue`/`Commit` →
+//! `IPersistFile::Save`.
 
 #![cfg(target_os = "windows")]
 
@@ -80,16 +86,51 @@ fn run(aumid: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Script PowerShell : énumère les .lnk des dossiers à risque, ne touche
-/// que ceux qui ciblent notre exe (chemin exact ou même nom de binaire —
-/// un exe déplacé reste couvert), et pose `System.AppUserModel.ID` via
-/// `IPropertyStore` quand il manque ou diffère. `__EXE_PATH__` /
-/// `__AUMID__` sont remplacés côté Rust avant écriture du .ps1.
+/// Script PowerShell en deux passes : la 1re collecte les .lnk qui
+/// ciblent notre exe (chemin exact ou même nom de binaire — un exe
+/// déplacé reste couvert) ; `Add-Type` (compilation csc, ~1-2 s) n'est
+/// payé que s'il y a au moins un candidat. La 2e pose
+/// `System.AppUserModel.ID` via `IPropertyStore` quand il manque ou
+/// diffère. `__EXE_PATH__` / `__AUMID__` sont remplacés côté Rust avant
+/// écriture du .ps1.
 const SCRIPT: &str = r##"
 $ErrorActionPreference = 'SilentlyContinue'
 $ExePath = __EXE_PATH__
 $Aumid   = __AUMID__
 $ExeName = [IO.Path]::GetFileName($ExePath)
+
+$dirs = @(
+    (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'),
+    ([Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop)),
+    (Join-Path $env:PUBLIC 'Desktop'),
+    (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::StartMenu)) 'Programs')
+)
+
+$ws = New-Object -ComObject WScript.Shell
+$scanned = 0
+$candidates = New-Object System.Collections.Generic.List[string]
+
+foreach ($d in $dirs) {
+    Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -File -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $name = $_.FullName
+            try {
+                $scanned++
+                $lnk = $ws.CreateShortcut($name)
+                $target = $lnk.TargetPath
+                if ($target -and
+                    (($target -ieq $ExePath) -or
+                     ([IO.Path]::GetFileName($target) -ieq $ExeName))) {
+                    $candidates.Add($name)
+                }
+            } catch { Write-Output ("pinfix-err scan " + $name + " -> " + $_.Exception.Message) }
+        }
+}
+
+if ($candidates.Count -eq 0) {
+    Write-Output ("pinfix: scanned=" + $scanned + " ours=0 — rien à réparer")
+    exit 0
+}
 
 Add-Type -TypeDefinition @'
 using System;
@@ -106,11 +147,11 @@ public static class LnkAumid
 
     // PROPVARIANT : vt(2) + reserved(6) + union. L'union fait 8 octets
     // sur x86 et 16 sur x64/arm64 (membres BLOB = cbSize + pointeur,
-    // NULLABLE, etc.) — d'où le second IntPtr de padding : le struct
-    // fait 16 octets sur x86 et 24 sur x64, comme le vrai type. Sans
-    // lui, GetValue écrirait ~8 octets au-delà du buffer marshalé.
-    // On n'utilise que VT_LPWSTR (31) : pwszVal est le premier membre
-    // de l'union, à l'offset 8 — stable sur toutes les cibles.
+    // CA*, etc.) — d'où le second IntPtr de padding : le struct fait
+    // 16 octets sur x86 et 24 sur x64, comme le vrai type. Sans lui,
+    // GetValue écrirait au-delà du buffer marshalé. On n'utilise que
+    // VT_LPWSTR (31) : pwszVal est le premier membre de l'union, à
+    // l'offset 8 — stable sur toutes les cibles.
     [StructLayout(LayoutKind.Sequential)]
     public struct PROPVARIANT
     {
@@ -120,6 +161,26 @@ public static class LnkAumid
         public ushort wReserved3;
         public IntPtr pwszVal;
         public IntPtr pad;
+    }
+
+    // IPersistFile complet (IUnknown + IPersist::GetClassID + les 5
+    // méthodes) — l'ordre de la vtable doit être exact pour Load/Save.
+    [ComImport, Guid("0000010B-0000-0000-C000-000000000046"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPersistFile
+    {
+        [PreserveSig] int GetClassID(out Guid pClassID);
+        [PreserveSig] int IsDirty();
+        [PreserveSig] int Load(
+            [MarshalAs(UnmanagedType.LPWStr)] string pszFileName,
+            uint dwMode);
+        [PreserveSig] int Save(
+            [MarshalAs(UnmanagedType.LPWStr)] string pszFileName,
+            [MarshalAs(UnmanagedType.Bool)] bool fRemember);
+        [PreserveSig] int SaveCompleted(
+            [MarshalAs(UnmanagedType.LPWStr)] string pszFileName);
+        [PreserveSig] int GetCurFile(
+            [MarshalAs(UnmanagedType.LPWStr)] out string ppszFileName);
     }
 
     [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"),
@@ -133,23 +194,10 @@ public static class LnkAumid
         [PreserveSig] int Commit();
     }
 
-    [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"),
-     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    interface IShellItem
-    {
-        [PreserveSig] int BindToHandler(IntPtr pbc,
-            [MarshalAs(UnmanagedType.LPStruct)] Guid bhid,
-            ref Guid riid, out IntPtr ppv);
-        [PreserveSig] int GetParent(out IShellItem ppsi);
-        [PreserveSig] int GetDisplayName(uint sigdn,
-            [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
-        [PreserveSig] int GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
-        [PreserveSig] int Compare(IShellItem psi, uint hint, out int piOrder);
-    }
-
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-    static extern int SHCreateItemFromParsingName(string pszPath, IntPtr pbc,
-        ref Guid riid, out IShellItem ppv);
+    [DllImport("ole32.dll")]
+    static extern int CoCreateInstance(
+        ref Guid rclsid, IntPtr pUnkOuter, uint dwClsContext,
+        ref Guid riid, out IntPtr ppv);
 
     [DllImport("ole32.dll")]
     static extern void PropVariantClear(ref PROPVARIANT pvar);
@@ -157,12 +205,6 @@ public static class LnkAumid
     [DllImport("ole32.dll")]
     static extern int CoInitializeEx(IntPtr pvReserved, uint dwCoInit);
 
-    static readonly Guid IID_IShellItem =
-        new Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE");
-    static readonly Guid IID_IPropertyStore =
-        new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
-    static readonly Guid BHID_PropertyStore =
-        new Guid("28636AA6-953D-11D2-B5D6-0020AF19FE5D");
     // PKEY_AppUserModel_ID = {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}, pid 5
     // (System.AppUserModel.ID — la propriété écrite par ShortcutProperty
     // des .wxs et SetLnkAppUserModelId du template NSIS).
@@ -172,32 +214,36 @@ public static class LnkAumid
         pid = 5
     };
 
-    // "ok" (déjà bon), "fixed" (propriété posée), ou "err:<raison>".
+    // Même voie que le macro NSIS SetLnkAppUserModelId de tauri-bundler :
+    // CoCreateInstance(CLSID_ShellLink) → IPersistFile::Load en
+    // STGM_READWRITE → QueryInterface(IPropertyStore) → SetValue +
+    // Commit → IPersistFile::Save. Le store vit sur l'objet lien et ne
+    // persiste dans le .lnk qu'au Save.
+    // Retour : "ok" (déjà bon), "fixed" (propriété posée), "err:<raison>".
     public static string Ensure(string lnkPath, string aumid)
     {
         try
         {
             CoInitializeEx(IntPtr.Zero, 0x2); // COINIT_APARTMENTTHREADED
 
-            IShellItem item;
-            Guid iidItem = IID_IShellItem;
-            int hr = SHCreateItemFromParsingName(
-                lnkPath, IntPtr.Zero, ref iidItem, out item);
-            if (hr != 0 || item == null)
-                return "err:SHCreateItem 0x" + hr.ToString("x8");
+            Guid clsid = new Guid("00021401-0000-0000-C000-000000000046"); // CLSID_ShellLink
+            Guid iidUnk = new Guid("00000000-0000-0000-C000-000000000046"); // IID_IUnknown
+            IntPtr pUnk;
+            int hr = CoCreateInstance(
+                ref clsid, IntPtr.Zero, 0x17 /* CLSCTX_ALL */,
+                ref iidUnk, out pUnk);
+            if (hr != 0 || pUnk == IntPtr.Zero)
+                return "err:CoCreate 0x" + hr.ToString("x8");
+            // Le RCW prend possession de la référence rendue par
+            // CoCreateInstance — ne pas Release pUnk.
+            object link = Marshal.GetObjectForIUnknown(pUnk);
 
-            // IShellItem::BindToHandler(BHID_PropertyStore) — la voie
-            // documentée pour obtenir l'IPropertyStore d'un fichier.
-            IntPtr pps;
-            Guid bhid = BHID_PropertyStore;
-            Guid iidPs = IID_IPropertyStore;
-            hr = item.BindToHandler(IntPtr.Zero, bhid, ref iidPs, out pps);
-            if (hr != 0 || pps == IntPtr.Zero)
-                return "err:BindToHandler 0x" + hr.ToString("x8");
-            object unk = Marshal.GetObjectForIUnknown(pps);
-            Marshal.Release(pps);
-            IPropertyStore store = (IPropertyStore)unk;
+            IPersistFile pf = (IPersistFile)link; // QueryInterface
+            hr = pf.Load(lnkPath, 0x2); // STGM_READWRITE
+            if (hr != 0)
+                return "err:Load 0x" + hr.ToString("x8");
 
+            IPropertyStore store = (IPropertyStore)link; // QueryInterface
             PROPERTYKEY key = PKEY_AppUserModel_ID;
 
             // Lecture : la propriété est absente (TYPE_E_ELEMENTNOTFOUND
@@ -228,7 +274,12 @@ public static class LnkAumid
             if (hr == 0)
                 hr = store.Commit();
             Marshal.FreeCoTaskMem(pstr);
-            return hr == 0 ? "fixed" : "err:SetValue 0x" + hr.ToString("x8");
+            if (hr != 0)
+                return "err:SetValue 0x" + hr.ToString("x8");
+
+            // Sans Save, Commit n'a modifié que l'objet lien en mémoire.
+            hr = pf.Save(lnkPath, true); // fRemember
+            return hr == 0 ? "fixed" : "err:Save 0x" + hr.ToString("x8");
         }
         catch (Exception e)
         {
@@ -238,39 +289,21 @@ public static class LnkAumid
 }
 '@
 
-$dirs = @(
-    (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'),
-    ([Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop)),
-    (Join-Path $env:PUBLIC 'Desktop'),
-    (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::StartMenu)) 'Programs')
-)
-
-$ws = New-Object -ComObject WScript.Shell
-$scanned = 0; $ours = 0; $fixed = 0; $ok = 0; $err = 0
-
-foreach ($d in $dirs) {
-    Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -File -ErrorAction SilentlyContinue |
-        ForEach-Object {
-            try {
-                $scanned++
-                $lnk = $ws.CreateShortcut($_.FullName)
-                $target = $lnk.TargetPath
-                $isOurs = $target -and
-                          (($target -ieq $ExePath) -or
-                           ([IO.Path]::GetFileName($target) -ieq $ExeName))
-                if ($isOurs) {
-                    $ours++
-                    $r = [LnkAumid]::Ensure($_.FullName, $Aumid)
-                    switch -Wildcard ($r) {
-                        'ok'    { $ok++ }
-                        'fixed' { $fixed++ }
-                        default { $err++; Write-Output ("pinfix-err " + $_.FullName + " -> " + $r) }
-                    }
-                }
-            } catch { }
-        }
+if (-not ('LnkAumid' -as [type])) {
+    Write-Output 'pinfix-err Add-Type a échoué à compiler le helper COM'
+    exit 1
 }
-Write-Output ("pinfix: scanned=" + $scanned + " ours=" + $ours +
+
+$ok = 0; $fixed = 0; $err = 0
+foreach ($p in $candidates) {
+    $r = [LnkAumid]::Ensure($p, $Aumid)
+    switch -Wildcard ($r) {
+        'ok'    { $ok++ }
+        'fixed' { $fixed++ }
+        default { $err++; Write-Output ("pinfix-err " + $p + " -> " + $r) }
+    }
+}
+Write-Output ("pinfix: scanned=" + $scanned + " ours=" + $candidates.Count +
               " ok=" + $ok + " fixed=" + $fixed + " err=" + $err)
 "##;
 
