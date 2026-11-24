@@ -30,8 +30,11 @@ const RELEASES: &str = "https://github.com/Wameuh/AgentControl/releases";
 
 /// Sonde distante : arch + version du démon présent + listener sur le
 /// port — zéro mutation, zéro download. Dernière ligne stdout :
-/// `ok:<ver>` | `newer:<ver>` | `busy:<addr>` | `install:<arch>`.
-/// `{t}`/`{p}` = tag cible / port démon, substitués côté Rust.
+/// `ok:<ver>` | `newer:<ver>` | `busy:<addr>` | `managed:<detail>` |
+/// `install:<arch>`. `{t}`/`{p}` = tag cible / port démon, `{f}` =
+/// « forçage » (1 = l'utilisateur a confirmé « installer quand même »
+/// après un `managed:` — les gardes managé sont alors sautées),
+/// substitués côté Rust.
 ///
 /// `ver` non vide = le démon répond — à jour quel que soit le
 /// superviseur (systemd, supervisord, lancé à la main). Gardes avant
@@ -58,6 +61,18 @@ const RELEASES: &str = "https://github.com/Wameuh/AgentControl/releases";
 /// commande — `rc=$?` seul ne s'exécuterait jamais.
 /// `echo step:<id> >&2` : marqueurs streamés → events `daemon-step`
 /// (stdout garde le résultat métier en dernière ligne).
+///
+/// Garde « managé ailleurs » (incident v0.11.0-rc.2 BUG C) : port
+/// libre + aucun démon joignable ne suffit PAS à conclure `install:` —
+/// un démon peut être géré par un conteneur/superviseur momentanément
+/// down, et l'install dépose une unit systemd sur l'hôte de prod.
+/// Avant `install:` la sonde cherche les TRACES d'une telle gestion
+/// (~/.agentcontrol, clé `agentcontrol*`/`permitopen` dans
+/// authorized_keys, conteneur/projet docker, compose publiant le port)
+/// → `managed:<detail>` : le client affiche l'avertissement et
+/// n'installe qu'après confirmation explicite (`{f}`=1). Toutes les
+/// détections docker/compose sont optionnelles (`command -v`,
+/// `2>/dev/null`) — une machine sans docker dégrade proprement.
 const PROBE_SCRIPT: &str = "set -e; echo step:check >&2; arch=$(uname -m); \
     case $arch in x86_64|aarch64) ;; *) echo \"unsupported arch: $arch\" >&2; exit 1;; esac; \
     bin=$HOME/.local/bin/agentcontrol-daemon; \
@@ -81,6 +96,23 @@ const PROBE_SCRIPT: &str = "set -e; echo step:check >&2; arch=$(uname -m); \
     own=$({ AGENTCONTROL_TCP=127.0.0.1:{p} AGENTCONTROL_TOKEN=$(cat \"${AGENTCONTROL_HOME:-$HOME/.agentcontrol}/daemon.token\" 2>/dev/null || true) $to \"$ac\" status 2>/dev/null || true; } | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
     fi; \
     if [ -z \"$own\" ] || [ \"$own\" != \"$ver\" ]; then echo busy:127.0.0.1:{p}; exit 0; fi; \
+    fi; \
+    if [ \"{f}\" != \"1\" ]; then \
+    mg=\"\"; \
+    ah=\"${AGENTCONTROL_HOME:-$HOME/.agentcontrol}\"; \
+    [ -d \"$ah\" ] && mg=\"agentcontrol-home\"; \
+    if [ -z \"$mg\" ] && [ -f \"$HOME/.ssh/authorized_keys\" ] && \
+       grep -Eq 'permitopen=[^ ]*127\\.0\\.0\\.1:{p}| agentcontrol' \"$HOME/.ssh/authorized_keys\" 2>/dev/null; then mg=\"authorized-keys\"; fi; \
+    if [ -z \"$mg\" ] && command -v docker >/dev/null 2>&1; then \
+    docker ps -a --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -qiE 'agentcontrol|devcontainer' && mg=\"docker\"; \
+    if [ -z \"$mg\" ]; then docker compose ls 2>/dev/null | grep -qi agentcontrol && mg=\"docker-compose\"; fi; \
+    fi; \
+    if [ -z \"$mg\" ]; then \
+    for cf in \"$HOME\"/dev/*/.devcontainer/compose.yml \"$HOME\"/dev/*/compose.yml; do \
+    [ -f \"$cf\" ] && grep -qw '{p}' \"$cf\" 2>/dev/null && { mg=\"compose-file\"; break; }; \
+    done; \
+    fi; \
+    if [ -n \"$mg\" ]; then echo \"managed:$mg\"; exit 0; fi; \
     fi; \
     echo install:$arch";
 
@@ -463,7 +495,13 @@ async fn fetch_verified_daemon(
 /// minisign, I1) → poussé dans le stdin du script d'install — le
 /// serveur n'a plus besoin d'accéder à GitHub ni de curl. Tag exact
 /// demandé, fallback "latest". Idempotent.
+/// Retourne la réponse : `ok:*`/`newer:*`/`busy:*`/`managed:*` sont
+/// rendus tels quels (aucune mutation) ; `install:*` déclenche le
+/// déploiement.
 /// `native` (auto sur Android) : exec via russh au lieu du binaire ssh.
+/// `allow_managed` : l'utilisateur a confirmé « installer quand même »
+/// après un `managed:*` — la sonde saute alors les gardes « managé
+/// ailleurs » et peut conclure `install:*`.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn ensure_daemon(
@@ -478,6 +516,7 @@ pub(crate) async fn ensure_daemon(
     key: Option<String>,
     native: Option<bool>,
     host_keys: Option<Vec<String>>,
+    allow_managed: Option<bool>,
 ) -> Result<String, String> {
     let t0 = std::time::Instant::now();
     client_core::log(Level::Info, format!("ensure_daemon {host} tag={tag}"));
@@ -518,7 +557,8 @@ pub(crate) async fn ensure_daemon(
     // stdout tranche — réponse directe ou feu vert pour la suite.
     let probe = PROBE_SCRIPT
         .replace("{t}", &tag)
-        .replace("{p}", &remote_port.unwrap_or(7331).to_string());
+        .replace("{p}", &remote_port.unwrap_or(7331).to_string())
+        .replace("{f}", if allow_managed.unwrap_or(false) { "1" } else { "0" });
     let (code, out, err) = run_script(&app, &host, &run, &probe, None, 120).await?;
     let last = last_line(&out);
     log_result(&host, code, &last, &err, &t0);
@@ -526,7 +566,7 @@ pub(crate) async fn ensure_daemon(
         return Err(if err.is_empty() { last } else { err });
     }
     let Some(arch) = last.strip_prefix("install:").map(str::to_string) else {
-        return Ok(last); // ok:* / newer:* / busy:*
+        return Ok(last); // ok:* / newer:* / busy:* / managed:*
     };
     // Phase 2 — artefact téléchargé + vérifié côté app (I1) : tout ce
     // qui partira vers le serveur a déjà passé la signature.

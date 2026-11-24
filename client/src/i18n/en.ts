@@ -338,6 +338,10 @@ export const en = {
   dinstall_msg:
     "No daemon answers on {host}. Installing copies binaries and enables a systemd user unit on that host — if the daemon is managed another way there (container, supervisor), cancel and fix that instead.",
   install_now: "Install",
+  dmanaged_h: "Daemon managed elsewhere?",
+  dmanaged_msg:
+    "The daemon on {host} seems managed elsewhere or down — traces found: {detail}. Restart it (docker container / systemd) instead of installing a second copy on the host.",
+  install_anyway: "Install anyway",
   connfail_auth: "SSH authentication refused — check the key or password.",
   connfail_daemon_auth: "Daemon authentication refused — check the connection token.",
   connfail_dns: "Host not found — check the name or address (DNS).",

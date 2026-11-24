@@ -244,6 +244,10 @@ async function daemonViaScript(
       notify("warn", t("dupdate_stale", { host, want: o.target, got: res.slice(6) }));
     } else if (res.startsWith("busy:")) {
       notify("warn", t("dupdate_busy", { host, addr: res.slice(5) }));
+    } else if (res.startsWith("managed:")) {
+      // Traces d'une gestion ailleurs — jamais d'install forcée ici :
+      // le flux de connexion proposera « installer quand même ».
+      notify("warn", t("dmanaged_msg", { host, detail: res.slice(8) }));
     } else if (res.startsWith("installed:")) {
       const got = res.slice(10);
       if (got === o.target) {
