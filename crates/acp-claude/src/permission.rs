@@ -31,15 +31,7 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: Value, req
     // l'elicitation, repli sur la permission générique.
     if tool_name == "AskUserQuestion" {
         if let Some(questions) = crate::questions::extract(&input) {
-            match crate::questions::ask(
-                shared,
-                &ctrl_rid,
-                &input,
-                &questions,
-                &tool_use_id,
-            )
-            .await
-            {
+            match crate::questions::ask(shared, &ctrl_rid, &input, &questions, &tool_use_id).await {
                 crate::questions::AskResult::Done => return,
                 crate::questions::AskResult::Fallback => {}
             }
@@ -234,12 +226,7 @@ pub(crate) fn send_deny(shared: &Shared, ctrl_rid: &Value, message: &str) {
 
 /// deny interrupt=true (défaut) stoppe le tour ; interrupt=false rend
 /// le refus au modèle qui continue (ExitPlanMode « request changes »).
-pub(crate) fn send_deny_opts(
-    shared: &Shared,
-    ctrl_rid: &Value,
-    message: &str,
-    interrupt: bool,
-) {
+pub(crate) fn send_deny_opts(shared: &Shared, ctrl_rid: &Value, message: &str, interrupt: bool) {
     shared.send_line(json!({
         "type": "control_response",
         "response": {

@@ -60,10 +60,7 @@ pub fn extract(input: &Value) -> Option<Vec<Question>> {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string(),
-                    preview: o
-                        .get("preview")
-                        .and_then(Value::as_str)
-                        .map(String::from),
+                    preview: o.get("preview").and_then(Value::as_str).map(String::from),
                 })
             })
             .collect();
@@ -109,8 +106,7 @@ pub fn create_request(questions: &[Question], session_id: &str, tool_call_id: &s
                     e["description"] = json!(o.description);
                 }
                 if let Some(p) = &o.preview {
-                    e["_meta"] =
-                        json!({"_claude/askUserQuestionOption": {"preview": p}});
+                    e["_meta"] = json!({"_claude/askUserQuestionOption": {"preview": p}});
                 }
                 e
             })
@@ -225,11 +221,7 @@ pub async fn ask(
 /// allow, ou `None` pour cancel/abort. `decline` = l'utilisateur a fermé
 /// le formulaire : l'outil continue avec des réponses vides (le modèle
 /// voit que la question a été passée, pas un crash du tour).
-fn apply_response(
-    response: &Value,
-    input: &Value,
-    questions: &[Question],
-) -> Option<Value> {
+fn apply_response(response: &Value, input: &Value, questions: &[Question]) -> Option<Value> {
     match response.get("action").and_then(Value::as_str) {
         Some("accept") => {}
         Some("decline") => {
@@ -266,9 +258,7 @@ fn apply_response(
         };
         let picks: Vec<String> = items
             .into_iter()
-            .filter(|v| {
-                v.is_string() || v.is_number() || v.is_boolean()
-            })
+            .filter(|v| v.is_string() || v.is_number() || v.is_boolean())
             .map(|v| match v {
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
