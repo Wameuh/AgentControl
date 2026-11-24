@@ -341,6 +341,10 @@ export const de: Record<Key, string> = {
   dinstall_msg:
     "Auf {host} antwortet kein Daemon. Die Installation kopiert Binärdateien und aktiviert eine systemd-Benutzereinheit auf diesem Host — wird der Daemon dort anders verwaltet (Container, Supervisor), abbrechen und stattdessen korrigieren.",
   install_now: "Installieren",
+  dmanaged_h: "Anderswo verwaltet?",
+  dmanaged_msg:
+    "Der Daemon auf {host} scheint anderswo verwaltet zu werden oder ist gestoppt — gefundene Spuren: {detail}. Starten Sie ihn neu (Docker-Container / systemd), statt eine zweite Kopie auf dem Host zu installieren.",
+  install_anyway: "Trotzdem installieren",
   connfail_auth: "SSH-Authentifizierung abgelehnt — Schlüssel oder Passwort prüfen.",
   connfail_daemon_auth: "Daemon-Authentifizierung abgelehnt — Verbindungs-Token prüfen.",
   connfail_dns: "Host nicht gefunden — Name oder Adresse prüfen (DNS).",

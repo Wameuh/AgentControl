@@ -341,6 +341,10 @@ export const es: Record<Key, string> = {
   dinstall_msg:
     "Ningún daemon responde en {host}. Instalar copia binarios y activa una unidad systemd de usuario en ese host — si el daemon se gestiona de otra forma allí (contenedor, supervisor), cancele y corríjalo en su lugar.",
   install_now: "Instalar",
+  dmanaged_h: "¿Ya gestionado en otro lugar?",
+  dmanaged_msg:
+    "El daemon en {host} parece gestionado en otro lugar o detenido — rastros encontrados: {detail}. Reinícielo (contenedor docker / systemd) en lugar de instalar una segunda copia en el host.",
+  install_anyway: "Instalar de todos modos",
   connfail_auth: "Autenticación SSH rechazada — comprueba la clave o la contraseña.",
   connfail_daemon_auth: "Autenticación del daemon rechazada — comprueba el token de conexión.",
   connfail_dns: "Host no encontrado — comprueba el nombre o la dirección (DNS).",

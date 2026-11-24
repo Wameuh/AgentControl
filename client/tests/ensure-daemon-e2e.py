@@ -13,7 +13,9 @@ Doublons factices sur PATH : acctl (versions pilotées par fichiers d'état,
 branche AGENTCONTROL_TCP simulant le listener du port), curl (probe du
 port uniquement — plus aucun download distant), install (n'écrit que
 sous $HOME), supervisorctl/systemctl/pkill/pgrep/nohup (journalisés,
-jamais exécutés).
+jamais exécutés), docker (sortie pilotée par state/dockermode —
+"hit" simule un conteneur/projet agentcontrol, sinon échec = hôte sans
+docker joignable).
 
 Matrice :
   ok / newer          → rien n'est installé (sortie anticipée)
@@ -24,6 +26,9 @@ Matrice :
   ver<tag, port occupé par un service étranger / un AUTRE démon
     (version ≠) / un listener qui ne répond pas → busy, rien d'installé
   démon injoignable + port occupé → busy ; + port libre → install
+  traces « managé ailleurs » (BUG C) → managed:<detail>, rien d'installé :
+    ~/.agentcontrol présent, authorized_keys avec permitopen/agentcontrol,
+    conteneur/projet docker, compose publiant le port
 
 Usage : python3 client/tests/ensure-daemon-e2e.py
 """
@@ -104,6 +109,19 @@ case "$(basename "$0")" in
 esac
 """
 
+# docker factice : sans state/dockermode=hit, toute commande échoue
+# (daemon absent / pas de conteneur) — la sonde doit dégrader proprement.
+# "hit" simule `docker ps -a` ou `docker compose ls` listant un projet
+# agentcontrol/devcontainer.
+FAKE_DOCKER = """#!/bin/sh
+[ "$(cat "$AC_STATE/dockermode" 2>/dev/null)" = hit ] || exit 1
+case "$*" in
+  "ps -a --format {{.Names}} {{.Image}}") echo "devcontainer-dev-1 agentcontrol-daemon" ;;
+  "compose ls") echo "agentcontrol  running  2" ;;
+esac
+exit 0
+"""
+
 # acctl livré dans le tarball factice = le « nouveau » démon installé.
 NEW_ACCTL = '#!/bin/sh\necho "{\\"version\\":\\"%s\\"}"\n' % TAG
 
@@ -130,7 +148,8 @@ def write(path, body, mode=0o644):
 
 
 def run_scenario(probe, install, *, ver=None, port="free", tcpmode=None,
-                 tcpver=None, shell="sh"):
+                 tcpver=None, shell="sh", ak=None, agenthome=False,
+                 bin_exists=False, dockermode=None, compose=False):
     tmp = tempfile.mkdtemp(prefix="ac-ensure-")
     home, fakes, state = (os.path.join(tmp, d) for d in ("home", "fakes", "state"))
     for d in (home, fakes, state):
@@ -149,6 +168,20 @@ def run_scenario(probe, install, *, ver=None, port="free", tcpmode=None,
           FAKE_INSTALL.replace("@REAL_INSTALL@", shutil.which("install")), 0o755)
     for b in ("supervisorctl", "systemctl", "pkill", "pgrep", "nohup"):
         write(os.path.join(fakes, b), FAKE_SVC, 0o755)
+    write(os.path.join(fakes, "docker"), FAKE_DOCKER, 0o755)
+    # Traces « managé ailleurs » (BUG C) — chacune isolée par scénario.
+    if ak is not None:
+        write(os.path.join(home, ".ssh/authorized_keys"), ak)
+    if agenthome:
+        write(os.path.join(home, ".agentcontrol/config.toml"), "[x]\n")
+    if bin_exists:
+        # Binaire natif déjà posé (démon installé puis arrêté) —
+        # ~/.agentcontrol seul n'est alors plus une trace « managé ».
+        write(os.path.join(home, ".local/bin/agentcontrol-daemon"),
+              "#!/bin/sh\nexit 0\n", 0o755)
+    if compose:
+        write(os.path.join(home, "dev/AgentControl/.devcontainer/compose.yml"),
+              "services:\n  dev:\n    ports:\n      - \"127.0.0.1:%s:%s\"\n" % (PORT, PORT))
     if ver is not None:
         write(os.path.join(state, "ver"), ver)
     write(os.path.join(state, "portstate"), port)
@@ -156,6 +189,8 @@ def run_scenario(probe, install, *, ver=None, port="free", tcpmode=None,
         write(os.path.join(state, "tcpmode"), tcpmode)
     if tcpver:
         write(os.path.join(state, "tcpver"), tcpver)
+    if dockermode:
+        write(os.path.join(state, "dockermode"), dockermode)
     # Artefact « téléchargé + vérifié » par l'app (phases download/
     # integrity vivent côté client en Rust) — le script d'install ne
     # fait que `cat > acd.tgz` : stdin = le tarball.
@@ -192,12 +227,19 @@ def run_scenario(probe, install, *, ver=None, port="free", tcpmode=None,
     return out, err, calls, installed
 
 
+AK_PERMITOPEN = ('restrict,permitopen="127.0.0.1:%s" ssh-ed25519 AAAA'
+                 ' agentcontrol-pair host 1700000000\n' % PORT)
+AK_PLAIN = 'ssh-ed25519 AAAA utilisateur@laptop\n'
+
+
 def main():
     probe, install = extract_scripts()
     assert "AGENTCONTROL_TCP" in probe, "sonde d'identité absente du script"
     assert "cat > acd.tgz" in install, "l'install doit recevoir l'artefact par stdin (I1)"
     assert "github.com" not in install and "curl" not in install, \
         "l'install ne doit plus télécharger (download+vérif côté app)"
+    # {f} = flag « install anyway » confirmé par l'utilisateur.
+    probe0, probe1 = probe.replace("{f}", "0"), probe.replace("{f}", "1")
     cases = [
         # (nom, kwargs, stdout attendu (dernière ligne), install attendu)
         ("à jour",               dict(ver=TAG), f"ok:{TAG}", False),
@@ -218,12 +260,43 @@ def main():
         ("démon down, port occupé", dict(port="up"),
                                  f"busy:127.0.0.1:{PORT}", False),
         ("démon down, port libre", dict(), f"installed:{TAG}", True),
+        # BUG C — traces « managé ailleurs » : managed:<detail>, rien
+        # d'installé tant que l'utilisateur n'a pas confirmé. La garde
+        # ne s'applique que si AUCUN démon ne répond (ver vide).
+        ("~/.agentcontrol sans binaire", dict(agenthome=True),
+                                 "managed:agentcontrol-home", False),
+        ("démon natif arrêté (home+bin)", dict(agenthome=True, bin_exists=True),
+                                 f"installed:{TAG}", True),
+        ("démon natif répond + home", dict(ver="1.0.0", agenthome=True),
+                                 f"installed:{TAG}", True),
+        ("démon natif répond + authorized_keys",
+                                 dict(ver="1.0.0", ak=AK_PERMITOPEN),
+                                 f"installed:{TAG}", True),
+        ("authorized_keys permitopen", dict(ak=AK_PERMITOPEN),
+                                 "managed:authorized-keys", False),
+        ("authorized_keys marqueur", dict(ak=AK_PERMITOPEN.replace(
+            'permitopen="127.0.0.1:%s" ' % PORT, "")),
+                                 "managed:authorized-keys", False),
+        ("authorized_keys clé neutre", dict(ak=AK_PLAIN),
+                                 f"installed:{TAG}", True),
+        ("conteneur docker",      dict(dockermode="hit"),
+                                 "managed:docker", False),
+        ("compose file port",     dict(compose=True),
+                                 "managed:compose-file", False),
+        # « Install anyway » ({f}=1) : les gardes managé sont sautées.
+        ("managed + install anyway", dict(agenthome=True, force=True),
+                                 f"installed:{TAG}", True),
+        ("docker absent/ko",      dict(dockermode=None),
+                                 f"installed:{TAG}", True),
     ]
     shells = [s for s in ("sh", "bash") if shutil.which(s)]
     fails = 0
     for name, kw, want, installs in cases:
+        kw = dict(kw)
+        script = probe1 if kw.pop("force", False) else probe0
         for sh in shells:
-            out, err, calls, installed = run_scenario(probe, install, shell=sh, **kw)
+            out, err, calls, installed = run_scenario(
+                script, install, shell=sh, **kw)
             last = out[-1] if out else "(aucune sortie)"
             ok = last == want and installed == installs
             fails += not ok

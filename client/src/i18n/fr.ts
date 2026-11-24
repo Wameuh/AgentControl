@@ -338,6 +338,10 @@ export const fr: Record<Key, string> = {
   dinstall_msg:
     "Aucun démon ne répond sur {host}. L'installation copie des binaires et active une unit systemd sur cet hôte — si le démon y est géré autrement (conteneur, superviseur), annuler et corriger ça à la place.",
   install_now: "Installer",
+  dmanaged_h: "Déjà managé ailleurs ?",
+  dmanaged_msg:
+    "Le démon sur {host} semble managé ailleurs ou arrêté — traces détectées : {detail}. Redémarrez-le (conteneur docker / systemd) plutôt que d'installer une seconde copie sur l'hôte.",
+  install_anyway: "Installer quand même",
   connfail_auth: "Authentification SSH refusée — vérifiez la clé ou le mot de passe.",
   connfail_daemon_auth: "Authentification du démon refusée — vérifiez le jeton de connexion.",
   connfail_dns: "Hôte introuvable — vérifiez le nom ou l'adresse (DNS).",

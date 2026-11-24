@@ -272,13 +272,17 @@ export class ConnView {
   }
 
   /** `ensure_daemon` via le script distant, derrière la progression inline.
-   *  Retourne la réponse ("ok:*"|"newer:*"|"busy:*"|"installed:*"). */
+   *  Retourne la réponse ("ok:*"|"newer:*"|"busy:*"|"managed:*"|"installed:*").
+   *  `allowManaged` ne se passe qu'après confirmation explicite de
+   *  l'utilisateur — la sonde saute alors sa garde « managé ailleurs ». */
   private async runDaemonScript(
     cfg: Record<string, unknown>, tag: string, msg: string,
+    allowManaged = false,
   ): Promise<string> {
     this.daemonShow(msg, SCRIPT_STEPS);
     try {
-      const res = await invoke<string>("ensure_daemon", daemonParams(cfg, tag));
+      const res = await invoke<string>(
+        "ensure_daemon", daemonParams(cfg, tag, allowManaged));
       this.daemonFinish();
       // Laisser voir l'état « toutes étapes ✓ » un instant avant de cacher.
       await new Promise((r) => setTimeout(r, 450));
@@ -295,6 +299,15 @@ export class ConnView {
    *  erreur. */
   private async confirmDaemonInstall(host: string): Promise<boolean> {
     return this.daemonAction(t("dinstall_h"), t("dinstall_msg", { host }), t("install_now"));
+  }
+
+  /** Sonde `managed:*` : des traces d'une gestion ailleurs (clé
+   *  appairée, ~/.agentcontrol, conteneur/compose docker) ou un démon
+   *  down indiquent que l'install locale serait une erreur — proposer
+   *  « installer quand même » comme choix explicite, jamais par défaut. */
+  private confirmDaemonManaged(host: string, detail: string): Promise<boolean> {
+    return this.daemonAction(
+      t("dmanaged_h"), t("dmanaged_msg", { host, detail }), t("install_anyway"));
   }
 
   /** Dialogue de confirmation générique pour une action mutante sur le
@@ -385,9 +398,20 @@ export class ConnView {
       // l'hôte — confirmation explicite avant toute mutation.
       if (!(await this.confirmDaemonInstall(String(cfg.host))))
         throw this.connectErrorMsg(e, cfg);
-      const res = await this.runDaemonScript(
+      let res = await this.runDaemonScript(
         cfg, ver, t("installing_daemon") + " — " + host,
       );
+      // `managed:*` : la sonde a trouvé des traces d'une install
+      // managée (incident v0.11.0-rc.2 BUG C) — pas d'install
+      // silencieuse : l'utilisateur choisit explicitement, ou on
+      // abandonne la connexion.
+      if (res.startsWith("managed:")) {
+        if (!(await this.confirmDaemonManaged(String(cfg.host), res.slice(8))))
+          throw this.connectErrorMsg(e, cfg);
+        res = await this.runDaemonScript(
+          cfg, ver, t("installing_daemon") + " — " + host, true,
+        );
+      }
       // Démon plus récent : le script distant refuse le downgrade.
       if (res.startsWith("newer:")) newerDaemon = res.slice(6);
       else if (res.startsWith("busy:")) {
@@ -453,6 +477,9 @@ export class ConnView {
             if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
             else if (res.startsWith("busy:")) {
               this.report(t("dupdate_busy", { host, addr: res.slice(5) }), "warn");
+            } else if (res.startsWith("managed:")) {
+              this.report(
+                t("dmanaged_msg", { host, detail: res.slice(8) }), "warn");
             } else if (res) {
               if (res.startsWith("installed:")) {
                 const got = res.slice(10);
