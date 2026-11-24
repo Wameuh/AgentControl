@@ -89,8 +89,14 @@ function sync() {
   // re-rendus déclenchés par des mutations sans rapport du fil.
   const curQ = d.querySelector<HTMLInputElement>(".pd-qrow input");
   if (curQ && lastRid) savedQ.set(lastRid, curQ.value);
-  const prevQ = savedQ.get(card.dataset.req ?? "") ?? "";
-  lastRid = card.dataset.req ?? null;
+  // Sans request_id les cartes sont anonymes : une clé vide ferait
+  // réinjecter la saisie d'une carte remplacée dans une autre.
+  const rid = card.dataset.req ?? "";
+  const prevQ = rid ? (savedQ.get(rid) ?? "") : "";
+  lastRid = rid || null;
+  // Ne garder que les saisies des rids encore affichées (file bornée).
+  const liveRids = new Set(cards.map((c) => c.dataset.req ?? ""));
+  for (const k of savedQ.keys()) if (!liveRids.has(k)) savedQ.delete(k);
   d.innerHTML = "";
   const node = card.classList.contains("question")
     ? renderQuestion(card, cards.length)
