@@ -50,17 +50,20 @@ fn run(aumid: &str) -> Result<(), String> {
     let mut bytes = b"\xEF\xBB\xBF".to_vec();
     bytes.extend_from_slice(script.as_bytes());
     std::fs::write(&ps1, &bytes).map_err(|e| format!("write {ps1:?}: {e}"))?;
-    let out = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-File",
-        ])
-        .arg(&ps1)
-        .output();
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-File",
+    ])
+    .arg(&ps1);
+    // App GUI : sans CREATE_NO_WINDOW une console cmd clignote à chaque
+    // démarrage (-WindowStyle Hidden n'agit qu'après sa création).
+    client_core::hide_console(&mut cmd);
+    let out = cmd.output();
     let _ = std::fs::remove_file(&ps1);
     let out = out.map_err(|e| format!("spawn powershell: {e}"))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -101,10 +104,13 @@ public static class LnkAumid
         public uint pid;
     }
 
-    // PROPVARIANT : vt(2) + reserved(6) + union(8). On n'utilise que
-    // VT_LPWSTR (31) : pwszVal est le premier membre de l'union, à
-    // l'offset 8 — la disposition séquentielle ci-dessous le respecte
-    // sur x86 comme x64/arm64.
+    // PROPVARIANT : vt(2) + reserved(6) + union. L'union fait 8 octets
+    // sur x86 et 16 sur x64/arm64 (membres BLOB = cbSize + pointeur,
+    // NULLABLE, etc.) — d'où le second IntPtr de padding : le struct
+    // fait 16 octets sur x86 et 24 sur x64, comme le vrai type. Sans
+    // lui, GetValue écrirait ~8 octets au-delà du buffer marshalé.
+    // On n'utilise que VT_LPWSTR (31) : pwszVal est le premier membre
+    // de l'union, à l'offset 8 — stable sur toutes les cibles.
     [StructLayout(LayoutKind.Sequential)]
     public struct PROPVARIANT
     {
@@ -113,6 +119,7 @@ public static class LnkAumid
         public ushort wReserved2;
         public ushort wReserved3;
         public IntPtr pwszVal;
+        public IntPtr pad;
     }
 
     [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"),
