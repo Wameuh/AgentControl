@@ -185,10 +185,12 @@ function renderQuestion(card: HTMLElement, count: number): HTMLElement {
   const w = document.createElement("div");
   w.className = "pd-card pd-question";
   w.appendChild(head(card, count, "question"));
-  const origInput = card.querySelector<HTMLInputElement>(".q-input");
-  if (!origInput) {
-    // Formulaire structuré (.q-form — AskUserQuestion…) : pas de
-    // réponse rapide au pouce — amener à la carte dans le fil.
+  // Formulaire structuré (.q-form — AskUserQuestion…) : ses champs
+  // libres portent aussi .q-input (.q-free), donc on détecte le
+  // formulaire par .q-form — pas de réponse rapide au pouce, on amène
+  // à la carte dans le fil.
+  const origInput = card.querySelector<HTMLInputElement>(".q-input:not(.q-free)");
+  if (card.querySelector(".q-form") || !origInput) {
     const show = document.createElement("button");
     show.type = "button";
     show.className = "btn-allow pd-primary pd-showq";

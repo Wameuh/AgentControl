@@ -775,7 +775,10 @@ export class EventRenderer {
       d.classList.add("done");
     };
     d.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = () => answer(collect());
-    d.querySelector<HTMLButtonElement>(".btn-reject")!.onclick = () => answer(null);
+    // « Ignorer » = sauter les questions : accept avec un contenu vide
+    // (l'agent voit des réponses vides et poursuit) — pas un cancel,
+    // qui interromprait le tour.
+    d.querySelector<HTMLButtonElement>(".btn-reject")!.onclick = () => answer({});
     if (this.answered.has(ev.request_id as string)) d.classList.add("done");
     return d;
   }
