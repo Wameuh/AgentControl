@@ -374,6 +374,8 @@ export const es: Record<Key, string> = {
   first_truncated: "El primer post fue descartado por la compactación del journal.",
   first_unsupported: "Daemon demasiado antiguo para esta función — actualícelo primero.",
   copied: "Copiado",
+  link_open_failed: "No se pudo abrir el enlace — se copió al portapapeles",
+  link_not_external: "Este enlace no se puede abrir — se copió al portapapeles",
   term_title: "Terminal", term_new: "Nuevo shell",
   term_drag: "Arrastrar para redimensionar",
   term_connecting: "conectando…", term_exited: "[shell terminado — código {code}]",

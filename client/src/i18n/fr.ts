@@ -371,6 +371,8 @@ export const fr: Record<Key, string> = {
   first_truncated: "Le premier post a été perdu à la compaction du journal.",
   first_unsupported: "Démon trop ancien pour cette fonctionnalité — mettez-le à jour.",
   copied: "Copié",
+  link_open_failed: "Impossible d'ouvrir le lien — il a été copié dans le presse-papiers",
+  link_not_external: "Ce lien ne peut pas être ouvert — il a été copié dans le presse-papiers",
   term_title: "Terminal", term_new: "Nouveau shell",
   term_drag: "Glisser pour redimensionner",
   term_connecting: "connexion…", term_exited: "[shell terminé — code {code}]",

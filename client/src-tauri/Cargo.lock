@@ -52,6 +52,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "client-core",
+ "open",
  "proto",
  "serde",
  "serde_json",

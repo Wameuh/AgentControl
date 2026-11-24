@@ -176,6 +176,7 @@ pub fn run() {
             commands::pair::pair_devices,
             commands::pair::pair_revoke,
             commands::pair::pair_attempt,
+            commands::open_url::open_url_ext,
             commands::system::app_version,
             commands::system::platform,
             commands::system::cli_conn,
