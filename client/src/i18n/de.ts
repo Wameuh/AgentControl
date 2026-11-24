@@ -374,6 +374,8 @@ export const de: Record<Key, string> = {
   first_truncated: "Der erste Beitrag wurde durch die Journal-Kompaktierung verworfen.",
   first_unsupported: "Daemon zu alt für diese Funktion — bitte zuerst aktualisieren.",
   copied: "Kopiert",
+  link_open_failed: "Link konnte nicht geöffnet werden — er wurde in die Zwischenablage kopiert",
+  link_not_external: "Dieser Link kann nicht geöffnet werden — er wurde in die Zwischenablage kopiert",
   term_title: "Terminal", term_new: "Neue Shell",
   term_drag: "Zum Ändern der Größe ziehen",
   term_connecting: "verbinde…", term_exited: "[Shell beendet — Code {code}]",

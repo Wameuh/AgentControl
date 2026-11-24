@@ -144,6 +144,7 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
     case "set_app_icon":
       return undefined as T;
     case "plugin:opener|open_url":
+    case "open_url_ext":
       window.open(String(a.url), "_blank", "noopener");
       return undefined as T;
     case "plugin:ac-stt|stt_ping":

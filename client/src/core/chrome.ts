@@ -10,6 +10,7 @@ import { t } from "../i18n";
 import { icon } from "../ui/icons";
 import { $ } from "./dom";
 import { connLabel } from "./conn";
+import { copyText, logUi, notify } from "./dom";
 
 const mesh = (window as {
   MeshBackground?: {
@@ -323,9 +324,20 @@ export function initPlatform() {
   if (android) applyAndroidChrome();
 }
 
-/// Ouvre une URL externe (plugin opener — navigateur système sur Android).
-export function shellOpen(url: string) {
-  invoke("plugin:opener|open_url", { url }).catch(() => {});
+/// Ouvre une URL externe (commande `open_url_ext` — plugin opener sous
+/// le capot hors Linux ; le repli Linux vérifie les launchers et
+/// propage l'échec). Avant : invoke muet `.catch(() => {})` — un
+/// xdg-open absent ou sans handler par défaut laissait le clic mort
+/// sans trace (#372). Désormais l'erreur va dans client.log et le lien
+/// est copié avec un toast d'avertissement.
+export async function shellOpen(url: string) {
+  try {
+    await invoke("open_url_ext", { url });
+  } catch (e) {
+    logUi("error", `open_url ${url} : ${e}`);
+    await copyText(url).catch(() => {});
+    notify("warn", t("link_open_failed"));
+  }
 }
 
 /// Délégation globale des liens externes : les <a href> produits par le
@@ -333,18 +345,26 @@ export function shellOpen(url: string) {
 /// target="_blank" — dans la webview wry sans newWindow handler, le clic
 /// est mort (voire navigue la webview et perd l'app). Un listener document
 /// en bubbling : les handlers d'élément tournent avant (flink, about-gh,
-/// pin-tag…) et marquent e.defaultPrevented → skip ; sinon allowlist
-/// http(s) stricte sur l'attribut brut — jamais file:, javascript:,
-/// agentcontrol:, mailto: ni les relatifs — puis opener. En mode web le
-/// même invoke aboutit à window.open (bridge) : un seul chemin.
+/// pin-tag…) et marquent e.defaultPrevented → skip ; sinon http(s) et
+/// mailto passent par l'opener, les ancres #… gardent la navigation
+/// par défaut et tout autre schéma (file:, agentcontrol:, javascript:,
+/// relatif) est bloqué AVEC retour explicite — plus de webview
+/// naviguée ni de clic muet. En mode web le même invoke aboutit à
+/// window.open (bridge) : un seul chemin.
 export function initExternalLinks() {
   document.addEventListener("click", (e) => {
     if (e.defaultPrevented) return;
     const a = (e.target as HTMLElement).closest?.("a[href]");
     const href = a?.getAttribute("href")?.trim() ?? "";
-    if (!/^https?:\/\//i.test(href)) return;
+    if (!a || !href || href.startsWith("#")) return;
     e.preventDefault();
-    shellOpen(href);
+    if (/^(?:https?|mailto):/i.test(href)) {
+      void shellOpen(href);
+    } else {
+      logUi("warn", `lien non externe bloqué : ${href}`);
+      void copyText(href).catch(() => {});
+      notify("warn", t("link_not_external"));
+    }
   });
 }
 

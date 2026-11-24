@@ -371,6 +371,8 @@ export const en = {
   first_truncated: "The first post was dropped by journal compaction.",
   first_unsupported: "Daemon too old for this feature — update it first.",
   copied: "Copied",
+  link_open_failed: "Couldn't open the link — it was copied to the clipboard",
+  link_not_external: "This link can't be opened — it was copied to the clipboard",
   term_title: "Terminal", term_new: "New shell",
   term_drag: "Drag to resize",
   term_connecting: "connecting…", term_exited: "[shell exited — code {code}]",
