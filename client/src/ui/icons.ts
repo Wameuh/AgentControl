@@ -148,6 +148,29 @@ const SHAPES: Record<string, string> = {
     '<rect x="4" y="14" width="6" height="6" rx="1"/>' +
     '<path d="M14 14h2.5v2.5H14z"/><path d="M20 14v1.5"/>' +
     '<path d="M14 20h1.5"/><path d="M18.5 18.5H20V20h-1.5z"/>',
+  // Catégories des préférences (rail) + menu Options
+  palette:
+    '<path d="M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.3A4.7 4.7 0 0 0 21 9.7C21 6 17 3 12 3Z"/>' +
+    '<circle cx="7.5" cy="10.5" r="1" fill="currentColor" stroke="none"/>' +
+    '<circle cx="12" cy="7.5" r="1" fill="currentColor" stroke="none"/>' +
+    '<circle cx="16.5" cy="10.5" r="1" fill="currentColor" stroke="none"/>',
+  bell:
+    '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>' +
+    '<path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  msg: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>',
+  activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  key:
+    '<circle cx="7.5" cy="15.5" r="4.5"/>' +
+    '<path d="m10.7 12.3 8.8-8.8"/><path d="m17 6 3 3"/><path d="m14.5 8.5 2 2"/>',
+  users:
+    '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>' +
+    '<path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  monitor:
+    '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
+  server:
+    '<rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/>' +
+    '<path d="M6 7h.01"/><path d="M6 17h.01"/>',
+  undo: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
   // Retour à la ligne (bloc de code mobile)
   wrap:
     '<path d="M3.5 6h17"/><path d="M3.5 12h14a3 3 0 0 1 0 6H13"/>' +

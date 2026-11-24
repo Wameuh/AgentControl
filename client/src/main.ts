@@ -13,7 +13,7 @@ import { $, logUi, notify } from "./core/dom";
 import { app } from "./core/state";
 import { initRpc } from "./core/rpc";
 import { initModalGuard } from "./core/modal";
-import { connKeyOf } from "./core/conn";
+import { connKeyOf, connLabel } from "./core/conn";
 import {
   applyTheme,
   applyAccent,
@@ -35,6 +35,10 @@ import { hydrateIcons } from "./ui/icons";
 import { initStatus, type HostStats } from "./features/status";
 import { initMemDialog } from "./features/meminfo";
 import { checkBootUpdate, openAbout } from "./features/update";
+import { UpdatesPanel } from "./features/updates-panel";
+import { OptionsMenu } from "./features/options-menu";
+import { initUnsavedDialog } from "./core/unsaved";
+import { fitViewTabs, initViewTabsFit } from "./ui/fit-tabs";
 import { initModelBar } from "./features/modelbar";
 import { initModelCosts } from "./features/modelcosts";
 import { initModelCatalog } from "./features/modelcatalog";
@@ -55,7 +59,7 @@ import { MapView } from "./features/map-view";
 import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
 import { Tts } from "./features/tts";
-import { ComponentsPanel } from "./features/components";
+import { ComponentsPanel, ORCH_COMPONENT } from "./features/components";
 import { LogsPanel } from "./features/logs";
 import { PluginView } from "./features/plugin-view";
 import { stateDiff } from "./features/state-diff";
@@ -331,6 +335,33 @@ connView.onOpening = () => { settings.close(); map.close(); comps.close(); logsP
 settings.onOpening = () => { connView.close(); map.close(); comps.close(); logsPanel.close(); pluginViews.close(); };
 // Select « Appairer » des settings : pré-sélection sur la conn liée.
 settings.activeConnKey = () => conns.knownConns()[0] ?? null;
+// Fenêtre Mises à jour (app + démon lié) — pastille, menu Options,
+// Paramètres → Général et À propos y mènent.
+const updates = new UpdatesPanel(() => conns.knownConns()[0] ?? null);
+settings.openUpdates = (anchor) => updates.open(anchor);
+// Rail des Paramètres : groupe « Serveur » = conn liée + ses vues.
+settings.server = () => {
+  const ck = conns.knownConns()[0];
+  if (!ck) return null;
+  const st = conns.isGone(ck) ? "down" : conns.state(ck);
+  return { label: ck === "web" ? location.host : connLabel(ck), up: st === "ok" };
+};
+settings.serverLinks = () =>
+  comps.capable()
+    ? [
+        { id: "s-lnk-comp", label: t("comp_h"), icon: "tool", fn: () => comps.open() },
+        { id: "s-lnk-orch", label: t("orch_h"), icon: "users", fn: () => comps.openParamsOf(ORCH_COMPONENT) },
+      ]
+    : [];
+const optionsMenu = new OptionsMenu({
+  compsCapable: () => comps.capable(),
+  connKey: () => conns.knownConns()[0] ?? null,
+  openSettings: () => settings.open(),
+  openComponents: () => comps.open(),
+  openOrchestrator: () => comps.openParamsOf(ORCH_COMPONENT),
+  openUpdates: (anchor) => updates.open(anchor),
+  leaveSettings: () => settings.requestClose(),
+});
 comps.bind(conns);
 comps.onOpening = () => { settings.close(); connView.close(); map.close(); logsPanel.close(); pluginViews.close(); };
 logsPanel.bind(conns);
@@ -378,6 +409,7 @@ settings.langChanged = () => {
   // applyStatic a réécrit le placeholder avec input_ph — hints à jour.
   composer.refreshHints();
   void sidebar.refresh();
+  fitViewTabs();
   chat.updateHeader();
 };
 settings.sendModeChanged = () => composer.refreshHints();
@@ -488,9 +520,15 @@ $("tb-about").onclick = () => {
   $("about-engine").textContent = engineReport();
   openAbout(() => conns.knownConns()[0] ?? null);
 };
+// À propos n'installe plus rien : « Mises à jour… » ouvre la fenêtre dédiée.
+$("about-updates").onclick = () => {
+  ($("dlg-about") as HTMLDialogElement).close();
+  updates.open(document.querySelector<HTMLElement>(".tb-update") ?? $("tb-options"));
+};
 // Menus ⋮ (Android) : l'app-level ouvre Settings/About ; en session le
 // ⋮ du header ouvre la feuille Session (S2 — réglages + actions).
-$("tb-more").onclick = () => nav.sheet(appMenuItems(() => comps.capable()));
+$("tb-more").onclick = () =>
+  nav.sheet(appMenuItems(() => comps.capable(), () => updates.open()));
 $("chat-more").onclick = () => openSessionSheet();
 $("about-gh").addEventListener("click", (e) => {
   e.preventDefault();
@@ -516,6 +554,10 @@ quick.init();
 term.init();
 map.init();
 settings.init();
+initUnsavedDialog();
+initViewTabsFit();
+updates.init();
+optionsMenu.init();
 tts.init();
 comps.init();
 logsPanel.init();
@@ -543,12 +585,7 @@ initSessionBar(openSessionSheet);
 // titre de vue, loupe → filtre, re-rendu de la barre session à chaque
 // bascule de pile. No-ops hors Android.
 initConnSheet({
-  openPairSettings: () => {
-    settings.open();
-    const sec = $("s-sec-conn") as HTMLDetailsElement;
-    sec.open = true;
-    sec.scrollIntoView({ block: "start" });
-  },
+  openPairSettings: () => settings.openSection("s-sec-conn"),
 });
 initHomeShell(conns);
 // Accueil « par état » + glisser des lignes (N3/N4) — no-ops hors Android.
@@ -585,5 +622,5 @@ initMemDialog();
 // dans client.log toutes les 5 min + window.__telemetry() pour le debug.
 // Démarré tôt pour couvrir tout le boot ; la préférence OFF le désarme.
 initTelemetry();
-checkBootUpdate();
+checkBootUpdate((chip) => updates.open(chip));
 connView.autoConnect(savedConns, cliConn ?? undefined, autoSuppressed);

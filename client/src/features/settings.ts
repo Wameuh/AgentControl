@@ -1,22 +1,24 @@
 // ---------------------------------------------------------------------------
 // Panneau des paramètres : rendu dans la zone de discussion (overlay plein
-// #chat, pas un dialogue modal) — préférences persistées en localStorage et
-// vérification manuelle des mises à jour.
+// #chat, pas un dialogue modal) — préférences persistées en localStorage.
+// Navigation (rail, recherche, contrôles visuels) : ./settings-nav.ts ;
+// mises à jour : fenêtre dédiée (./updates-panel.ts), ouverte d'ici.
 // ---------------------------------------------------------------------------
 
 import { invoke, getVersion, isWeb } from "../core/bridge";
-import { $, notify } from "../core/dom";
+import { $, esc, notify } from "../core/dom";
 import { bindLogView } from "../core/logview";
 import { applyTheme, themePref, applyAccent, stageAccent, accentPref, applyAccentStrong, accentStrongPref, applyBgAnim, bgAnimPrefOn, isAndroid, type Accent } from "../core/chrome";
 import { defaultEncoding } from "../core/encoding";
 import { imgMode, imgTrustedHosts, refreshImgPolicy } from "../core/format";
-import { cmpVer, connKeyOf, connLabel } from "../core/conn";
-import { call } from "../core/rpc";
+import { connKeyOf, connLabel } from "../core/conn";
+import { askUnsaved } from "../core/unsaved";
 import { setLang, getLang, t, LANGS, type Lang } from "../i18n";
 import { nav } from "../ui/nav";
 import type { SavedConn } from "../core/types";
 import { renderAccesses, shareQr } from "./pairing";
-import { checkUpdate, daemonCfgFor, performClientUpdate, performDaemonUpdate, rcChannel } from "./update";
+import { rcChannel } from "./update";
+import { SettingsNav, settingName, type ServerLink } from "./settings-nav";
 import {
   sounds,
   sndEnabled,
@@ -74,6 +76,19 @@ export class SettingsPanel {
    *  empilés seraient inertes l'un sous l'autre (injecté par le
    *  bootstrap). */
   onOpening: () => void = () => {};
+  /** Connexion liée (en-tête du groupe « Serveur » du rail) — injecté. */
+  server: () => { label: string; up: boolean } | null = () => null;
+  /** Vues serveur du rail (Composants, Orchestrateur…) — injecté. */
+  serverLinks: () => ServerLink[] = () => [];
+  /** « Vérifier les mises à jour » : fenêtre Mises à jour (injecté). */
+  openUpdates: (anchor?: HTMLElement) => void = () => {};
+
+  private snav = new SettingsNav({
+    server: () => this.server(),
+    serverLinks: () => this.serverLinks(),
+    dirtyIds: () => this.dirtyIds,
+    leave: () => this.requestClose(),
+  });
 
   /** Options stagées par id de contrôle (#190) : `apply` relit la
    *  valeur du contrôle au clic « Enregistrer » (persistance incluse),
@@ -104,11 +119,21 @@ export class SettingsPanel {
     this.syncDirty();
   }
 
+  /** Barre d'enregistrement : visible seulement avec des modifications
+   *  en attente — leur nombre et leurs noms, plus la pastille du rail. */
   private syncDirty() {
     const d = this.dirtyIds.size > 0;
     ($("s-save") as HTMLButtonElement).disabled = !d;
     ($("s-cancel") as HTMLButtonElement).disabled = !d;
     $("s-dirty").hidden = !d;
+    $("s-savebar").hidden = !d;
+    if (d) {
+      const names = [...new Set([...this.dirtyIds].map(settingName))];
+      const n = names.length;
+      $("s-dirty-msg").innerHTML =
+        `<b>${esc(t(n === 1 ? "s_unsaved_1" : "s_unsaved_n", { n }))}</b> · ${esc(names.join(", "))}`;
+    }
+    this.snav.render();
   }
 
   /** « Enregistrer » : applique toutes les options modifiées d'un coup —
@@ -136,6 +161,7 @@ export class SettingsPanel {
     this.syncSndOpts();
     this.syncNotifOpts();
     this.syncSecStates();
+    this.snav.syncVisual();
   }
   /** Clé connKey de la connexion actuellement liée — pré-sélectionne le
    *  serveur dans le select « Appairer » (injecté par le bootstrap). */
@@ -203,8 +229,8 @@ export class SettingsPanel {
     );
     $("s-snd-blocked").hidden = !sounds.blocked();
     this.syncSndOpts();
-    // Notifications OS : canal Tauri seulement — bloc masqué en web.
-    $("s-notif-block").hidden = isWeb;
+    // Notifications OS : canal Tauri seulement — colonne masquée en web.
+    $("s-alerts").classList.toggle("no-os", isWeb);
     ($("s-notif") as HTMLInputElement).checked = notifEnabled();
     for (const k of ["done", "question", "error"] as AlertKind[]) {
       ($(`s-notif-${k}`) as HTMLInputElement).checked = notifTypeOn(k);
@@ -217,13 +243,12 @@ export class SettingsPanel {
         $("s-notif-denied").hidden = !blocked || !notifEnabled();
       })
       .catch(() => {});
-    $("s-update-status").textContent = "";
-    ($("s-doupdate") as HTMLButtonElement).hidden = true;
-    ($("s-dodaemon") as HTMLButtonElement).hidden = true;
     // Web : pas de reconnexion optionnelle (la conn unique est vitale) ni
-    // d'update client (la SPA suit le binaire démon) → sections masquées.
+    // de canal client (la SPA suit le binaire démon) → lignes masquées ;
+    // « Vérifier » reste (fenêtre Mises à jour = update du démon).
     $("s-sec-conn").hidden = isWeb;
-    $("s-sec-update").hidden = isWeb;
+    $("s-autoconn-row").hidden = isWeb;
+    $("s-rcchan-row").hidden = isWeb;
     // Voix on-device : Android natif uniquement (modèles dans filesDir
     // de l'app — ni desktop ni web SPA). STT + TTS partagent le gate.
     const voiceOk = isAndroid() && !isWeb;
@@ -244,6 +269,8 @@ export class SettingsPanel {
         this.syncSecStates();
       });
     this.syncSecStates();
+    this.snav.syncVisual();
+    this.snav.render();
     const view = $("settings-view");
     view.hidden = false;
     this.setChatInert(true);
@@ -254,10 +281,32 @@ export class SettingsPanel {
     nav.push("settings");
   }
 
+  /** Fermeture demandée par l'utilisateur (✕, Échap, icône, Ctrl+,,
+   *  back Android, lien du rail) : avec des modifications en attente,
+   *  demande Enregistrer / Ignorer / Rester. `false` = on reste. */
+  async requestClose(): Promise<boolean> {
+    if (!this.isOpen()) return true;
+    if (this.dirtyIds.size) {
+      const c = await askUnsaved(t("unsaved_settings_msg"));
+      if (c === "stay") return false;
+      if (c === "save") this.save();
+    }
+    this.close();
+    return true;
+  }
+
+  /** Ouvre le panneau sur une section (rail desktop, sous-écran Android). */
+  openSection(id: string) {
+    this.open();
+    this.snav.select(id);
+  }
+
   close() {
-    // Modifications stagées non enregistrées → annulation silencieuse
-    // (revert des aperçus live inclus) : jamais d'application partielle.
+    // Chemin programmatique (une autre vue s'ouvre) : modifications
+    // stagées annulées (aperçus live revertés) — jamais d'application
+    // partielle. Les fermetures utilisateur passent par requestClose.
     this.cancelStaged();
+    this.snav.resetSearch();
     // L'inert est retiré même si le panneau avait déjà été masqué par un
     // autre chemin (early-return historique : un résiduel gelait #chat
     // sans cause visible — le watchdog core/modal filet de sécurité).
@@ -278,7 +327,7 @@ export class SettingsPanel {
   }
 
   toggle() {
-    if (this.isOpen()) this.close();
+    if (this.isOpen()) void this.requestClose();
     else this.open();
   }
 
@@ -312,6 +361,7 @@ export class SettingsPanel {
     ($("s-pair-go") as HTMLButtonElement).disabled = none;
     $("s-pair-none").hidden = !none;
     $("s-pacc").hidden = none;
+    this.syncSecStates();
     void this.refreshPairAccess();
   }
 
@@ -327,89 +377,31 @@ export class SettingsPanel {
     });
   }
 
-  /** "Vérifier les mises à jour" : remote vs local → statut + bouton maj.
-   *  Couvre aussi le démon de la connexion active (versions affichées
-   *  côte à côte, update proposée via update_daemon/ensure_daemon). */
-  private async runUpdateCheck() {
-    const btn = $("s-checkupdate") as HTMLButtonElement;
-    const dbtn = $("s-dodaemon") as HTMLButtonElement;
-    const status = $("s-update-status");
-    const go = $("s-doupdate") as HTMLButtonElement;
-    go.hidden = true;
-    dbtn.hidden = true;
-    status.textContent = t("update_checking");
-    btn.disabled = true;
-    try {
-      const ck = this.activeConnKey();
-      const [{ local, remote }, dst] = await Promise.all([
-        checkUpdate(),
-        ck
-          ? call<Record<string, unknown>>("daemon_status", { conn: ck })
-              .catch(() => null)
-          : Promise.resolve(null),
-      ]);
-      const dv = typeof dst?.version === "string" ? dst.version : "";
-      const parts = [
-        t("update_versions", { lv: local, dv: dv || "—", rv: remote || "?" }),
-      ];
-      if (cmpVer(remote, local) > 0) {
-        go.hidden = false;
-        go.onclick = async () => {
-          go.disabled = true;
-          const prev = go.textContent;
-          go.textContent = t("update_installing", { v: remote });
-          try {
-            await performClientUpdate(remote);
-          } finally {
-            go.disabled = false;
-            go.textContent = prev;
-          }
-        };
-        parts.push(t("update_available", { v: remote }));
-      } else {
-        parts.push(t("update_uptodate", { v: local }));
-      }
-      // Cible d'update du démon = la version vers laquelle tout converge
-      // (client à jour → sa version locale ; client en retard → la
-      // dernière release — les assets démon sont tagués pareil).
-      const dTarget = cmpVer(remote, local) > 0 ? remote : local;
-      if (dv && ck && cmpVer(dv, dTarget) < 0) {
-        dbtn.hidden = false;
-        dbtn.onclick = async () => {
-          dbtn.disabled = true;
-          try {
-            await performDaemonUpdate({
-              conn: ck,
-              target: dTarget,
-              current: dv,
-              cfg: await daemonCfgFor(ck),
-            });
-          } finally {
-            dbtn.disabled = false;
-          }
-        };
-        parts.push(t("daemon_update_available", { v: dTarget }));
-      }
-      status.textContent = parts.join(" — ");
-    } catch {
-      status.textContent = t("update_failed");
-    } finally {
-      btn.disabled = false;
-    }
-  }
-
   init() {
     this.stt.init(this.stager);
     this.ttsModels.init();
     this.tts?.bindSettings(this.stager);
     $("tb-settings").onclick = () => this.toggle();
-    $("settings-close").onclick = () => this.close();
+    $("settings-close").onclick = () => void this.requestClose();
     // Échap ferme le panneau (les <dialog> l'avaient nativement, pas un div)
     // — sauf si un dialogue est ouvert par-dessus (About…) : Échap = lui.
+    // Ctrl/Cmd+, : raccourci desktop usuel des préférences.
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && this.isOpen() && !document.querySelector("dialog[open]"))
-        this.close();
+        void this.requestClose();
+      else if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === "," && !isAndroid()) {
+        e.preventDefault();
+        this.toggle();
+      }
     });
+    // Back Android avec des modifications en attente : même question que
+    // le ✕ — la fermeture n'a lieu qu'après la réponse.
+    nav.addBackGuard((id) => {
+      if (id !== "settings" || !this.dirtyIds.size) return true;
+      void this.requestClose();
+      return false;
+    });
+    this.snav.init();
 
     // Options stagées (#190) : `apply` (persistant) n'a lieu qu'au clic
     // « Enregistrer » — les cosmétiques gardent un aperçu live : le
@@ -493,6 +485,7 @@ export class SettingsPanel {
       apply: () => {
         setLang(($("s-lang") as HTMLSelectElement).value as Lang);
         this.langChanged();
+        this.snav.render();
         // setLang → applyStatic a retraduit les options → lire leurs
         // libellés après coup pour les résumés de section.
         this.syncSecStates();
@@ -766,10 +759,14 @@ export class SettingsPanel {
         );
       },
     });
-    ($("s-checkupdate") as HTMLButtonElement).onclick = () => this.runUpdateCheck();
-    // « Voir les logs » : la visionneuse client.log partagée — la télémétrie
-    // update (check → install) y est lisible sans quitter les paramètres.
+    ($("s-checkupdate") as HTMLButtonElement).onclick = (e) =>
+      this.openUpdates(e.currentTarget as HTMLElement);
+    // Journal client (section Diagnostic) : la visionneuse client.log
+    // partagée — la télémétrie update (check → install) y est lisible.
     bindLogView($("s-logs") as HTMLDetailsElement);
+    // Valeur du volume affichée à côté du curseur (le staging garde
+    // `oninput` — un listener séparé ne l'écrase pas).
+    $("s-snd-vol").addEventListener("input", () => this.syncVolLabel());
     // Staging (#190) : « Enregistrer » applique tout, « Annuler »
     // restaure — inactifs tant que rien n'est modifié.
     ($("s-save") as HTMLButtonElement).onclick = () => this.save();
@@ -783,6 +780,9 @@ export class SettingsPanel {
     const opt = (id: string) =>
       ($(id) as HTMLSelectElement).selectedOptions[0]?.textContent?.trim() ??
       "";
+    $("s-st-general").textContent = [opt("s-lang"), $("s-version").textContent]
+      .filter(Boolean)
+      .join(" · ");
     $("s-st-appearance").textContent =
       `${opt("s-theme")} · ${opt("s-accent")} · ${opt("s-accent-int")}`;
     $("s-st-chat").textContent = `${opt("s-sendmode")} · ${opt("s-images")}`;
@@ -792,10 +792,9 @@ export class SettingsPanel {
       sndOn ? `${t("st_on")} · ${($("s-snd-vol") as HTMLInputElement).value}%` : t("st_off"),
       ...(isWeb ? [] : [`${t("notif_short")} ${notifOn ? t("st_on") : t("st_off")}`]),
     ].join(" · ");
-    $("s-st-conn").textContent = ($("s-autoconn") as HTMLInputElement).checked
-      ? t("st_on")
-      : t("st_off");
-    $("s-st-update").textContent = $("s-version").textContent;
+    $("s-st-conn").textContent = this.pairConns.length
+      ? String(this.pairConns.length)
+      : "";
     $("s-st-files").textContent = opt("s-encoding");
     $("s-st-diag").textContent = ($("s-telemetry") as HTMLInputElement)
       .checked
@@ -803,28 +802,35 @@ export class SettingsPanel {
       : t("st_off");
   }
 
-  /** Master off → les sous-options sons sont grisées/inertes — sauf les
-   *  boutons « Tester », qui restent cliquables (preview au volume réglé
-   *  et déblocage de l'autoplay par le geste utilisateur). */
+  /** Master « Son » off → cases et presets de la colonne grisés/inertes
+   *  — sauf les boutons « Tester », qui restent cliquables (preview au
+   *  volume réglé et déblocage de l'autoplay par le geste utilisateur). */
   private syncSndOpts() {
     const off = !($("s-snd") as HTMLInputElement).checked;
-    $("s-snd-opts").classList.toggle("off", off);
-    for (const el of $("s-snd-opts").querySelectorAll<
-      HTMLInputElement | HTMLSelectElement
-    >("input, select")) {
-      el.disabled = off;
+    for (const cell of document.querySelectorAll<HTMLElement>("#s-alerts .mx-snd")) {
+      cell.classList.toggle("off", off);
+      for (const el of cell.querySelectorAll<HTMLInputElement | HTMLSelectElement>(
+        "input, select",
+      )) {
+        el.disabled = off;
+      }
     }
+    this.syncVolLabel();
   }
 
-  /** Même grisage pour le bloc notifications — sauf le bouton « Tester »,
-   *  cliquable même canal coupé (le test vérifie permission + rendu OS). */
+  private syncVolLabel() {
+    $("s-snd-volv").textContent = `${($("s-snd-vol") as HTMLInputElement).value} %`;
+  }
+
+  /** Même grisage pour la colonne notifications système — le bouton
+   *  « Envoyer un test » (en-tête) reste cliquable même canal coupé. */
   private syncNotifOpts() {
     const off = !($("s-notif") as HTMLInputElement).checked;
-    $("s-notif-opts").classList.toggle("off", off);
-    for (const el of $("s-notif-opts").querySelectorAll<
-      HTMLInputElement | HTMLButtonElement
-    >("input, button")) {
-      el.disabled = off && el.id !== "s-notif-test";
+    for (const cell of document.querySelectorAll<HTMLElement>("#s-alerts .mx-os")) {
+      cell.classList.toggle("off", off);
+      for (const el of cell.querySelectorAll<HTMLInputElement>("input")) {
+        el.disabled = off;
+      }
     }
   }
 }

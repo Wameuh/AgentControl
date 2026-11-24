@@ -35,6 +35,16 @@ export class OverlayNav {
   /** Véto sur la fermeture par back système — `false` = l'overlay reste
    *  (l'état history est re-poussé). Posé par FileExplorer (buffer sale). */
   backGuard?: (id: string) => boolean;
+  /** Vétos supplémentaires (Paramètres : modifications en attente) —
+   *  cumulés avec `backGuard`, chacun peut retenir la fermeture. */
+  private guards: ((id: string) => boolean)[] = [];
+  addBackGuard(g: (id: string) => boolean) {
+    this.guards.push(g);
+  }
+  private allowBack(id: string): boolean {
+    if (this.backGuard && !this.backGuard(id)) return false;
+    return this.guards.every((g) => g(id));
+  }
   /** Bascule d'écran (m-home/m-map posées par homeSync) — posé par
    *  mobile/shell.ts pour resynchroniser le chrome d'accueil. */
   onHomeChange?: () => void;
@@ -79,7 +89,7 @@ export class OverlayNav {
       while (true) {
         const top = this.stack[this.stack.length - 1];
         if (!top || (n != null && top.n <= n)) break;
-        if (this.backGuard && !this.backGuard(top.id)) {
+        if (!this.allowBack(top.id)) {
           try { history.pushState({ ac: top.id, n: top.n }, ""); } catch { /* noop */ }
           this.homeSync();
           return;
@@ -193,6 +203,9 @@ export class OverlayNav {
     } else if (id === "plugin") {
       // Idem : le ✕ de la vue plugin démonte l'iframe (token éphémère).
       $("pv-close")?.click();
+    } else if (id === "updates") {
+      // Fenêtre Mises à jour (feuille sous Android) : son ✕ la referme.
+      $("upd-close").click();
     } else if (id.startsWith("dlg:")) {
       (document.getElementById(id.slice(4)) as HTMLDialogElement | null)?.close();
     }

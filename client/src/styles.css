@@ -6,11 +6,14 @@
 @import "./styles/layout.css";  /* squelette #app, titlebar, resize, statusbar */
 @import "./styles/sidebar.css"; /* liste des sessions, groupes, états de connexion */
 @import "./styles/chat.css";    /* conversation, messages, tools, composer, badges */
+@import "./styles/settings.css"; /* préférences : rail, sections, matrice alertes, barre d'enregistrement */
+@import "./styles/options.css";  /* menu Options de la titlebar + fenêtre Mises à jour */
 @import "./styles/dialogs.css"; /* dialogs, menus contextuels, spinners */
 @import "./styles/files.css";   /* panneau + explorateur de fichiers, viewer */
 @import "./styles/map.css";     /* vue diagramme composants/sessions */
 @import "./styles/term.css";    /* panneau terminal PTY (xterm.js) */
 @import "./styles/components.css"; /* panneau composants managés (§2.6) */
+@import "./styles/params.css";   /* vue pleine page des paramètres de composant */
 @import "./styles/logs.css";      /* panneau logs live client + démon */
 @import "./styles/mobile/base.css";    /* Android : chrome, scrim, cibles tactiles */
 @import "./styles/mobile/sheets.css";  /* Android : dialogs en bottom-sheet, menus */
