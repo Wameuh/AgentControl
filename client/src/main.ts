@@ -9,7 +9,7 @@
 import "./styles.css";
 import "./mesh-bg.ts";
 import { invoke, listen, isWeb } from "./core/bridge";
-import { $, logUi, notify } from "./core/dom";
+import { $, logUi, notify, copyText } from "./core/dom";
 import { app } from "./core/state";
 import { initRpc } from "./core/rpc";
 import { initModalGuard } from "./core/modal";
@@ -546,6 +546,33 @@ $("btn-agent-caps").onclick = () =>
 conns.init();
 connView.init();
 chat.init();
+// Copier/sélection clavier sur contenu NON éditable (#370) : WebKitGTK
+// (webview Tauri Linux) n'exécute ni le copier natif ni le select-all
+// sur une sélection de texte ordinaire — même trou que le menu
+// « Copier » du clic droit, comblé ici. Ctrl+C / Cmd+C / Ctrl+Insert →
+// copyText (clipboard API + fallback execCommand) ; Ctrl+A dans le fil →
+// tout #events. Cible éditable (input/textarea/select/contenteditable)
+// → on laisse le comportement natif, rien n'est intercepté.
+window.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented || e.isComposing || !(e.ctrlKey || e.metaKey) || e.altKey) return;
+  const t = e.target as HTMLElement | null;
+  if (
+    t instanceof HTMLInputElement ||
+    t instanceof HTMLTextAreaElement ||
+    t instanceof HTMLSelectElement ||
+    !!t?.isContentEditable
+  )
+    return;
+  const k = e.key.toLowerCase();
+  if (k === "c" || k === "insert") {
+    const txt = window.getSelection()?.toString() ?? "";
+    if (!txt) return;
+    e.preventDefault();
+    void copyText(txt);
+    return;
+  }
+  if (k === "a" && chat.selectAll()) e.preventDefault();
+});
 search.init();
 sidebar.init();
 composer.init();
