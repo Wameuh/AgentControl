@@ -149,7 +149,7 @@ def write(path, body, mode=0o644):
 
 def run_scenario(probe, install, *, ver=None, port="free", tcpmode=None,
                  tcpver=None, shell="sh", ak=None, agenthome=False,
-                 dockermode=None, compose=False):
+                 bin_exists=False, dockermode=None, compose=False):
     tmp = tempfile.mkdtemp(prefix="ac-ensure-")
     home, fakes, state = (os.path.join(tmp, d) for d in ("home", "fakes", "state"))
     for d in (home, fakes, state):
@@ -174,6 +174,11 @@ def run_scenario(probe, install, *, ver=None, port="free", tcpmode=None,
         write(os.path.join(home, ".ssh/authorized_keys"), ak)
     if agenthome:
         write(os.path.join(home, ".agentcontrol/config.toml"), "[x]\n")
+    if bin_exists:
+        # Binaire natif déjà posé (démon installé puis arrêté) —
+        # ~/.agentcontrol seul n'est alors plus une trace « managé ».
+        write(os.path.join(home, ".local/bin/agentcontrol-daemon"),
+              "#!/bin/sh\nexit 0\n", 0o755)
     if compose:
         write(os.path.join(home, "dev/AgentControl/.devcontainer/compose.yml"),
               "services:\n  dev:\n    ports:\n      - \"127.0.0.1:%s:%s\"\n" % (PORT, PORT))
@@ -256,9 +261,17 @@ def main():
                                  f"busy:127.0.0.1:{PORT}", False),
         ("démon down, port libre", dict(), f"installed:{TAG}", True),
         # BUG C — traces « managé ailleurs » : managed:<detail>, rien
-        # d'installé tant que l'utilisateur n'a pas confirmé.
-        ("~/.agentcontrol présent", dict(agenthome=True),
+        # d'installé tant que l'utilisateur n'a pas confirmé. La garde
+        # ne s'applique que si AUCUN démon ne répond (ver vide).
+        ("~/.agentcontrol sans binaire", dict(agenthome=True),
                                  "managed:agentcontrol-home", False),
+        ("démon natif arrêté (home+bin)", dict(agenthome=True, bin_exists=True),
+                                 f"installed:{TAG}", True),
+        ("démon natif répond + home", dict(ver="1.0.0", agenthome=True),
+                                 f"installed:{TAG}", True),
+        ("démon natif répond + authorized_keys",
+                                 dict(ver="1.0.0", ak=AK_PERMITOPEN),
+                                 f"installed:{TAG}", True),
         ("authorized_keys permitopen", dict(ak=AK_PERMITOPEN),
                                  "managed:authorized-keys", False),
         ("authorized_keys marqueur", dict(ak=AK_PERMITOPEN.replace(

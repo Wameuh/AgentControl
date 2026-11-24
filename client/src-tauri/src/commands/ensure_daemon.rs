@@ -62,17 +62,18 @@ const RELEASES: &str = "https://github.com/Wameuh/AgentControl/releases";
 /// `echo step:<id> >&2` : marqueurs streamés → events `daemon-step`
 /// (stdout garde le résultat métier en dernière ligne).
 ///
-/// Garde « managé ailleurs » (incident v0.11.0-rc.2 BUG C) : port
-/// libre + aucun démon joignable ne suffit PAS à conclure `install:` —
-/// un démon peut être géré par un conteneur/superviseur momentanément
-/// down, et l'install dépose une unit systemd sur l'hôte de prod.
-/// Avant `install:` la sonde cherche les TRACES d'une telle gestion
-/// (~/.agentcontrol, clé `agentcontrol*`/`permitopen` dans
-/// authorized_keys, conteneur/projet docker, compose publiant le port)
+/// Garde « managé ailleurs » (incident v0.11.0-rc.2 BUG C) : elle ne
+/// s'applique QUE quand aucun démon ne répond (`ver` vide — un démon
+/// natif qui répond, même ancien, a le droit à son upgrade normal).
+/// Les TRACES cherchées : ~/.agentcontrol SANS le binaire natif
+/// ~/.local/bin/agentcontrol-daemon (le home seul est ambigu — toute
+/// install native y vit), clé `agentcontrol*`/`permitopen` dans
+/// authorized_keys, conteneur/projet docker, compose publiant le port
 /// → `managed:<detail>` : le client affiche l'avertissement et
 /// n'installe qu'après confirmation explicite (`{f}`=1). Toutes les
 /// détections docker/compose sont optionnelles (`command -v`,
-/// `2>/dev/null`) — une machine sans docker dégrade proprement.
+/// `timeout`, `2>/dev/null`) — une machine sans docker dégrade
+/// proprement.
 const PROBE_SCRIPT: &str = "set -e; echo step:check >&2; arch=$(uname -m); \
     case $arch in x86_64|aarch64) ;; *) echo \"unsupported arch: $arch\" >&2; exit 1;; esac; \
     bin=$HOME/.local/bin/agentcontrol-daemon; \
@@ -97,15 +98,16 @@ const PROBE_SCRIPT: &str = "set -e; echo step:check >&2; arch=$(uname -m); \
     fi; \
     if [ -z \"$own\" ] || [ \"$own\" != \"$ver\" ]; then echo busy:127.0.0.1:{p}; exit 0; fi; \
     fi; \
-    if [ \"{f}\" != \"1\" ]; then \
+    if [ \"{f}\" != \"1\" ] && [ -z \"$ver\" ]; then \
     mg=\"\"; \
     ah=\"${AGENTCONTROL_HOME:-$HOME/.agentcontrol}\"; \
-    [ -d \"$ah\" ] && mg=\"agentcontrol-home\"; \
+    [ -d \"$ah\" ] && [ ! -x \"$bin\" ] && mg=\"agentcontrol-home\"; \
     if [ -z \"$mg\" ] && [ -f \"$HOME/.ssh/authorized_keys\" ] && \
        grep -Eq 'permitopen=[^ ]*127\\.0\\.0\\.1:{p}| agentcontrol' \"$HOME/.ssh/authorized_keys\" 2>/dev/null; then mg=\"authorized-keys\"; fi; \
     if [ -z \"$mg\" ] && command -v docker >/dev/null 2>&1; then \
-    docker ps -a --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -qiE 'agentcontrol|devcontainer' && mg=\"docker\"; \
-    if [ -z \"$mg\" ]; then docker compose ls 2>/dev/null | grep -qi agentcontrol && mg=\"docker-compose\"; fi; \
+    dto=$(command -v timeout >/dev/null 2>&1 && echo \"timeout 5\" || true); \
+    $dto docker ps -a --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -qiE 'agentcontrol|devcontainer-dev' && mg=\"docker\"; \
+    if [ -z \"$mg\" ]; then $dto docker compose ls 2>/dev/null | grep -qi agentcontrol && mg=\"docker-compose\"; fi; \
     fi; \
     if [ -z \"$mg\" ]; then \
     for cf in \"$HOME\"/dev/*/.devcontainer/compose.yml \"$HOME\"/dev/*/compose.yml; do \
