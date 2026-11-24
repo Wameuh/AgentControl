@@ -39,7 +39,8 @@ const DEDUP_METHODS = new Set([
   "list_native_sessions", "get_blob", "read_file", "download_path",
   "daemon_log_tail", "list_components", "component_info",
   "component_logs", "component_catalog", "component_query",
-  "forge_list", "pr_list", "pr_sync", "backlog_metrics", "subscribe",
+  "forge_list", "pr_list", "pr_list_page", "pr_sync", "backlog_metrics",
+  "subscribe",
 ]);
 
 class WsClient {
@@ -278,7 +279,13 @@ class WsClient {
     }
     if ((method === "list_sessions" || method === "pr_list") && conn === undefined) {
       try {
-        const arr = await this.callInner<Record<string, unknown>[]>(method, p);
+        // pr_list passe par la variante paginée (le registre complet
+        // dépassait 1,9 Mo en une ligne → saturation transport, item
+        // #367) ; repli automatique sur pr_list pour les vieux démons.
+        const arr =
+          method === "pr_list"
+            ? await this.prListAll(p)
+            : await this.callInner<Record<string, unknown>[]>(method, p);
         return arr.map((x) => ({ ...x, conn: WEB_CONN })) as T;
       } catch (e) {
         console.error(`[ws] ${method}:`, e);
@@ -286,6 +293,47 @@ class WsClient {
       }
     }
     return this.callInner<T>(method, p);
+  }
+
+  /** `pr_list` paginé via `pr_list_page` — même contrat que le bridge
+   *  Tauri : pages bornées (~128 Kio côté démon), `next_offset` null =
+   *  fin ; repli sur `pr_list` (réponse unique) si le démon est trop
+   *  vieux (`parse: unknown variant`). */
+  private async prListAll(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>[]> {
+    const all: Record<string, unknown>[] = [];
+    let offset = 0;
+    for (let i = 0; i < 40; i++) {
+      let v: {
+        prs?: Record<string, unknown>[];
+        next_offset?: number | null;
+      };
+      try {
+        v = await this.callInner("pr_list_page", {
+          ...params,
+          limit: 50,
+          offset,
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("pr_list_page") || msg.includes("unknown variant")) {
+          return this.callInner<Record<string, unknown>[]>("pr_list", params);
+        }
+        throw e;
+      }
+      const prs = v.prs;
+      if (!Array.isArray(prs)) throw new Error("pr_list_page: malformed response");
+      all.push(...prs);
+      const next = v.next_offset;
+      if (typeof next === "number" && next > offset) {
+        offset = next;
+      } else {
+        return all;
+      }
+    }
+    console.warn("[ws] pr_list: borne de pages atteinte — liste tronquée");
+    return all;
   }
 
   private async callInner<T>(method: string, params: Record<string, unknown>): Promise<T> {

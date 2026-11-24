@@ -1153,6 +1153,7 @@ fn req_heavy(name: &str) -> bool {
         "list_sessions"
             | "list_sessions_page"
             | "pr_list"
+            | "pr_list_page"
             | "pr_sync"
             | "events"
             | "search_events"
@@ -1200,6 +1201,7 @@ fn req_dedupable(name: &str) -> bool {
             | "component_query"
             | "forge_list"
             | "pr_list"
+            | "pr_list_page"
             | "pr_sync"
             | "backlog_metrics"
             | "subscribe"
@@ -1233,6 +1235,11 @@ struct OutQueue {
     heavy: std::collections::VecDeque<Queued>,
 }
 
+/// Canal de réponse d'un waiter — `Arc<Value>` : le `result` n'est
+/// matérialisé qu'une fois par ligne reçue, partagé entre les waiters
+/// dédupliqués sans re-parser le JSON.
+type WaiterTx = oneshot::Sender<Result<Arc<Value>, String>>;
+
 /// Une requête écrite sur le wire, partagée par N callers (dedup) —
 /// `waiters` = (waiter_id, sender) de chaque `call` en vol.
 struct InflightEntry {
@@ -1244,7 +1251,11 @@ struct InflightEntry {
     /// couvrent que le trafic réellement sur le wire (une requête
     /// encore en file ne consomme pas encore la socket).
     written: bool,
-    waiters: Vec<(u64, oneshot::Sender<Result<Value, String>>)>,
+    /// Réponse `Result<Arc<Value>>` : la ligne géante n'est
+    /// matérialisée qu'une fois pour N waiters dédupliqués — avant,
+    /// chaque waiter recevait un clone profond du Value complet
+    /// (N × 1,9 Mo de tree JSON pour un pr_list).
+    waiters: Vec<(u64, WaiterTx)>,
 }
 
 /// Table des requêtes en vol : `by_id` = routage des réponses,
@@ -1261,7 +1272,16 @@ struct Inflight {
 /// la solde encore, l'appel a été abandonné en vol (timeout externe,
 /// JoinSet droppé, écriture ko) — compteur exposé aux sondes pour
 /// distinguer lenteur et RPC fantôme.
-fn settle_waiter(m: &mut Inflight, c: &Client, id: u64, waiter: u64) {
+///
+/// Entrée dédupliquable soldée à zéro waiter : elle est CONSERVÉE un
+/// temps (ORPHAN_GRACE) au lieu d'être retirée — la réponse du démon
+/// arrive quand même et le prochain appel identique (retry UI après
+/// timeout) se ré-attache via `by_key` au lieu de réémettre une
+/// requête lourde. C'est le pendant client de la dédup des waiters
+/// simultanés, étendu au-delà du timeout (item #367 : pr_list 1,9 Mo
+/// × retries = mort du client). Sans grace, chaque timeout lançait une
+/// nouvelle réponse géante en vol — amplification mortelle.
+fn settle_waiter(m: &mut Inflight, c: &Arc<Client>, id: u64, waiter: u64) {
     let Some(e) = m.by_id.get_mut(&id) else {
         return;
     };
@@ -1273,11 +1293,45 @@ fn settle_waiter(m: &mut Inflight, c: &Client, id: u64, waiter: u64) {
     if !e.waiters.is_empty() {
         return;
     }
-    let e = m.by_id.remove(&id).unwrap();
-    if let Some(k) = e.dedup_key {
-        m.by_key.remove(&k);
+    if e.dedup_key.is_none() {
+        // Non dédupliquable : personne ne pourra jamais se ré-attacher
+        // — retrait immédiat comme avant.
+        let e = m.by_id.remove(&id).unwrap();
+        c.dec_open(e.class, e.written);
+        return;
     }
-    c.dec_open(e.class, e.written);
+    schedule_orphan_expiry(Arc::clone(c), id);
+}
+
+/// Durée de grâce d'une entrée orpheline (tous waiters abandonnés,
+/// réponse pas encore arrivée) : un retry identique dans cette
+/// fenêtre se rattache à l'appel en vol au lieu d'en lancer un
+/// nouveau. > await_resp (60 s) pour couvrir l'appelant le plus
+/// patient, borné pour ne pas retenir une entrée dont la réponse ne
+/// viendra jamais.
+const ORPHAN_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Retire une entrée orpheline à ORPHAN_GRACE si elle n'a toujours
+/// aucun waiter (ré-attachée entre-temps → on laisse vivre ; réponse
+/// arrivée → le reader l'a déjà soldée). Une entrée orpheline n'est
+/// jamais écrite deux fois : le writer saute les ids absents de
+/// by_id.
+fn schedule_orphan_expiry(c: Arc<Client>, id: u64) {
+    tokio::spawn(async move {
+        tokio::time::sleep(ORPHAN_GRACE).await;
+        let mut m = c.pending.lock().await;
+        let Some(e) = m.by_id.get(&id) else {
+            return;
+        };
+        if !e.waiters.is_empty() {
+            return;
+        }
+        let e = m.by_id.remove(&id).unwrap();
+        if let Some(k) = e.dedup_key {
+            m.by_key.remove(&k);
+        }
+        c.dec_open(e.class, e.written);
+    });
 }
 
 /// Seuil du warn « giant line » à la réception — symétrique de la borne
@@ -1286,11 +1340,34 @@ fn settle_waiter(m: &mut Inflight, c: &Client, id: u64, waiter: u64) {
 /// compteurs rx/tx (#302).
 const GIANT_RX_LINE_BYTES: usize = 256 * 1024;
 
+/// Sonde minimaliste d'une ligne NDJSON reçue : `id`/`ok`/`push`
+/// seulement — `result` n'est jamais matérialisé à ce stade. Les
+/// champs inconnus sont sautés par serde sans allocation : une
+/// réponse de 1,9 Mo dont l'appel est déjà abandonné (timeout →
+/// waiter parti) ne doit pas produire un Value complet pour rien
+/// (item #367).
+#[derive(serde::Deserialize)]
+struct RxProbe {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    ok: Option<bool>,
+    /// Présence du champ `push` — la valeur n'est pas lue.
+    #[serde(default)]
+    push: Option<serde::de::IgnoredAny>,
+}
+
 /// Dispatch d'une ligne NDJSON reçue : push broadcast ou réponse RPC.
 /// Une entrée dédupliquée est possible : la réponse est clonée pour
-/// chaque waiter.
-async fn dispatch_rx_line(c: &Client, line: &str) {
-    if line.trim().is_empty() {
+/// chaque waiter — en `Arc<Value>` : une seule matérialisation du
+/// JSON pour N callers, et aucune pour les appels déjà soldés.
+///
+/// Parse paresseux : la réponse n'est désérialisée en `Response`
+/// (result complet) que si l'entrée a encore des waiters. Sinon la
+/// ligne est jetée après la sonde — les réponses tardives sans
+/// waiter sont comptées (`late`) pour les sondes transport.
+async fn dispatch_rx_line(c: &Client, line: &[u8]) {
+    if line.iter().all(|b| b.is_ascii_whitespace()) {
         return;
     }
     if line.len() > GIANT_RX_LINE_BYTES {
@@ -1299,36 +1376,78 @@ async fn dispatch_rx_line(c: &Client, line: &str) {
             format!("conn {}: giant line {} bytes", c.desc, line.len()),
         );
     }
-    let v: Value = match serde_json::from_str(line) {
-        Ok(v) => v,
+    let probe: RxProbe = match serde_json::from_slice(line) {
+        Ok(p) => p,
         Err(_) => return,
     };
-    if v.get("push").is_some() {
-        let _ = c.pushes.send(v);
+    if probe.push.is_some() {
+        // Push : le broadcast a besoin du Value complet — les events
+        // sont bornés côté démon (excerpts ~4 Kio) et term_data a sa
+        // propre pompe côté client.
+        if let Ok(v) = serde_json::from_slice::<Value>(line) {
+            let _ = c.pushes.send(v);
+        }
         return;
     }
-    if let Ok(resp) = serde_json::from_value::<Response>(v) {
-        let entry = {
-            let mut m = c.pending.lock().await;
-            let e = m.by_id.remove(&resp.id);
-            if let Some(e) = &e {
-                if let Some(k) = &e.dedup_key {
-                    m.by_key.remove(k);
-                }
-            }
-            e
-        };
-        if let Some(e) = entry {
-            c.dec_open(e.class, e.written);
-            let result = if resp.ok {
-                Ok(resp.result.unwrap_or(Value::Null))
-            } else {
-                Err(resp.error.unwrap_or_else(|| "?".into()))
-            };
-            for (_, tx) in e.waiters {
-                let _ = tx.send(result.clone());
+    // Réponse = id + ok présents (Response serde l'exige aussi).
+    let Some(id) = probe.id.filter(|_| probe.ok.is_some()) else {
+        return;
+    };
+    let entry = {
+        let mut m = c.pending.lock().await;
+        let e = m.by_id.remove(&id);
+        if let Some(e) = &e {
+            if let Some(k) = &e.dedup_key {
+                m.by_key.remove(k);
             }
         }
+        e
+    };
+    let Some(e) = entry else {
+        // Id inconnu : réponse tardive d'un appel soldé depuis longtemps
+        // (entrée déjà retirée) — le `result` n'est PAS parsé.
+        c.late_responses.fetch_add(1, Ordering::Relaxed);
+        if line.len() > GIANT_RX_LINE_BYTES {
+            log(
+                Level::Warn,
+                format!(
+                    "conn {}: late response id={id} {} bytes — unknown id, result skipped",
+                    c.desc,
+                    line.len()
+                ),
+            );
+        }
+        return;
+    };
+    c.dec_open(e.class, e.written);
+    if e.waiters.is_empty() {
+        // Entrée orpheline en grace : la réponse arrive mais plus
+        // personne n'attend — même traitement, pas de parse `result`.
+        c.late_responses.fetch_add(1, Ordering::Relaxed);
+        if line.len() > GIANT_RX_LINE_BYTES {
+            log(
+                Level::Warn,
+                format!(
+                    "conn {}: late response id={id} {} bytes — orphan, result skipped",
+                    c.desc,
+                    line.len()
+                ),
+            );
+        }
+        return;
+    }
+    c.parsed_responses.fetch_add(1, Ordering::Relaxed);
+    let resp: Response = match serde_json::from_slice(line) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let result = if resp.ok {
+        Ok(Arc::new(resp.result.unwrap_or(Value::Null)))
+    } else {
+        Err(resp.error.unwrap_or_else(|| "?".into()))
+    };
+    for (_, tx) in e.waiters {
+        let _ = tx.send(result.clone());
     }
 }
 
@@ -1384,6 +1503,10 @@ pub struct ClientStats {
     /// timeout pendant qu'un gros fetch se vide montre rx_partial en
     /// hausse (réponse indivisible en vol) plutôt qu'un trou de lien.
     pub rx_partial: u64,
+    /// Réponses arrivées sans waiter — `result` jamais parsé (parse
+    /// paresseux). En hausse sous retry storm : les appels timeout
+    /// ont payé leur ligne sans que personne ne la lise.
+    pub late: u64,
 }
 
 pub struct Client {
@@ -1456,6 +1579,13 @@ pub struct Client {
     /// Appels RPC soldés par abandon (timeout/drop/write ko) — compteur
     /// monotone exposé aux sondes : un pic à la mort = RPC fantômes.
     abandoned_calls: AtomicU64,
+    /// Réponses arrivées sans aucun waiter (appel abandonné ou entrée
+    /// orpheline en grace) — leur `result` n'est pas parsé. Exposé aux
+    /// sondes (`late`) : la croissance mesure le gaspillage évité.
+    late_responses: AtomicU64,
+    /// Réponses effectivement matérialisées (`Response` parsé) —
+    /// instrumentation : late + parsed ≈ lignes réponse reçues.
+    parsed_responses: AtomicU64,
 }
 
 fn now_ms() -> u64 {
@@ -1557,6 +1687,8 @@ impl Client {
             rx_partial: AtomicU64::new(0),
             last_tx_ms: AtomicU64::new(now_ms()),
             abandoned_calls: AtomicU64::new(0),
+            late_responses: AtomicU64::new(0),
+            parsed_responses: AtomicU64::new(0),
             me: std::sync::OnceLock::new(),
         });
         let _ = client.me.set(Arc::downgrade(&client));
@@ -1709,10 +1841,12 @@ impl Client {
                         if lb.last() == Some(&b'\r') {
                             lb = &lb[..lb.len() - 1];
                         }
-                        let line = String::from_utf8_lossy(lb).into_owned();
                         start = end + 1;
                         c.rx_lines.fetch_add(1, Ordering::Relaxed);
-                        dispatch_rx_line(&c, &line).await;
+                        // Bytes bruts : la sonde ne copie pas la ligne —
+                        // une réponse de 1,9 Mo orpheline ne produit ni
+                        // String ni Value (item #367).
+                        dispatch_rx_line(&c, lb).await;
                     }
                     if start > 0 {
                         pending.drain(..start);
@@ -1722,8 +1856,7 @@ impl Client {
                 if !pending.is_empty() {
                     // Reliquat sans '\n' à l'EOF — lines() le rendait
                     // comme dernière ligne ; on garde la parité.
-                    let line = String::from_utf8_lossy(&pending).into_owned();
-                    dispatch_rx_line(&c, &line).await;
+                    dispatch_rx_line(&c, &pending).await;
                 }
                 // Fin de boucle = transport mort (EOF ou erreur de lecture).
                 // Post-mortem : cause réelle journalisée + exposée à
@@ -1802,6 +1935,7 @@ impl Client {
             silent_ms: self.silent_ms(),
             tx_age_ms: now_ms().saturating_sub(self.last_tx_ms.load(Ordering::Relaxed)),
             rx_partial: self.rx_partial.load(Ordering::Relaxed),
+            late: self.late_responses.load(Ordering::Relaxed),
         }
     }
 
@@ -2009,10 +2143,10 @@ impl Client {
     async fn await_resp(
         &self,
         name: &str,
-        rx: oneshot::Receiver<Result<Value, String>>,
+        rx: oneshot::Receiver<Result<Arc<Value>, String>>,
     ) -> Result<Value> {
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-            Ok(Ok(Ok(v))) => Ok(v),
+            Ok(Ok(Ok(v))) => Ok((*v).clone()),
             Ok(Ok(Err(e))) => {
                 log(Level::Warn, format!("daemon {name}: {e}"));
                 bail!(e)

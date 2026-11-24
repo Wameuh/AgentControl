@@ -3,7 +3,7 @@
 //! journal).
 
 use super::*;
-use proto::EventKind;
+use proto::{EventKind, PrEntry};
 
 use crate::forges::{Forges, PrRef};
 use crate::prs::{ref_key, PrRegistry, TrackIn};
@@ -499,6 +499,62 @@ impl Daemon {
         None
     }
 
+    /// Jointure `native_review` sur une entrée — partagée par
+    /// `h_pr_list` et `h_pr_list_page`.
+    fn pr_entry_json(
+        e: &PrEntry,
+        reviews: &HashMap<String, Value>,
+        requests: &HashMap<String, Value>,
+    ) -> Result<Value> {
+        let mut j = serde_json::to_value(e)?;
+        // Jointure toutes forges : la review orchestrateur prend
+        // désormais n'importe quelle forge connue (git nu exclu —
+        // pas de review auto, l'entrée n'y arrive pas de toute
+        // façon par la détection).
+        if let Some(nr) = Self::native_review_of(reviews, requests, &e.repo, e.pr) {
+            j["native_review"] = json!(nr);
+        }
+        Ok(j)
+    }
+
+    /// Empreinte des maps de reviews natives — entre dans le `version`
+    /// de `pr_list_page` : une review qui démarre/termine doit
+    /// invalider le `unchanged` même si le registre prs.json est figé.
+    /// Clés triées : l'itération d'une HashMap n'est pas stable.
+    fn orch_pr_fingerprint(
+        reviews: &HashMap<String, Value>,
+        requests: &HashMap<String, Value>,
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (tag, map) in [(0u8, reviews), (1u8, requests)] {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for k in keys {
+                tag.hash(&mut h);
+                k.hash(&mut h);
+                if let Some(v) = map.get(k) {
+                    v.to_string().hash(&mut h);
+                }
+            }
+        }
+        h.finish()
+    }
+
+    /// Version courte du jeu « registre + reviews natives » — voir
+    /// `PrListPage::if_version`. `prs.rev()` couvre toutes les
+    /// mutations du registre (save() est l'entonnoir unique) ;
+    /// l'empreinte orch couvre `native_review`.
+    fn pr_list_version(&self) -> (String, HashMap<String, Value>, HashMap<String, Value>) {
+        let st = self.orch.state.lock().unwrap();
+        let fp = Self::orch_pr_fingerprint(&st.pr_reviews, &st.pr_review_requests);
+        (
+            format!("{}-{:016x}", self.prs.rev(), fp),
+            st.pr_reviews.clone(),
+            st.pr_review_requests.clone(),
+        )
+    }
+
     pub(super) async fn h_pr_list(self: &Arc<Self>, session: Option<String>) -> Result<Value> {
         let mut v = self.prs.list();
         if let Some(sid) = session {
@@ -513,17 +569,68 @@ impl Daemon {
         };
         let mut out = Vec::with_capacity(v.len());
         for e in &v {
-            let mut j = serde_json::to_value(e)?;
-            // Jointure toutes forges : la review orchestrateur prend
-            // désormais n'importe quelle forge connue (git nu exclu —
-            // pas de review auto, l'entrée n'y arrive pas de toute
-            // façon par la détection).
-            if let Some(nr) = Self::native_review_of(&reviews, &requests, &e.repo, e.pr) {
-                j["native_review"] = json!(nr);
-            }
-            out.push(j);
+            out.push(Self::pr_entry_json(e, &reviews, &requests)?);
         }
         Ok(json!(out))
+    }
+
+    /// Page de pr_list : le registre complet dépassait 1,9 Mo en une
+    /// seule ligne NDJSON sur les grosses instances — flood du lien
+    /// puis retry storm côté client (item #367). Même motif que
+    /// `h_list_sessions_page`, avec deux garde-fous en plus : une page
+    /// bornée en OCTETS (les entrées PR font ~4-8 Kio, 50 entrées
+    /// dépasseraient encore le seuil « giant line ») et `if_version`
+    /// pour sauter la sérialisation quand rien n'a changé.
+    pub(super) async fn h_pr_list_page(
+        self: &Arc<Self>,
+        session: Option<String>,
+        limit: Option<u32>,
+        offset: Option<u64>,
+        if_version: Option<String>,
+    ) -> Result<Value> {
+        const DEFAULT_PAGE: u64 = 50;
+        const MAX_PAGE: u64 = 200;
+        const PAGE_BYTES: usize = 128 * 1024;
+        let (version, reviews, requests) = self.pr_list_version();
+        if if_version.as_deref() == Some(version.as_str()) {
+            return Ok(json!({ "unchanged": true, "version": version }));
+        }
+        let limit = limit
+            .map(|l| l as u64)
+            .unwrap_or(DEFAULT_PAGE)
+            .clamp(1, MAX_PAGE);
+        let offset = offset.unwrap_or(0);
+        let mut v = self.prs.list();
+        if let Some(sid) = session {
+            v.retain(|e| e.session == sid);
+        }
+        let total = v.len() as u64;
+        let start = (offset as usize).min(v.len());
+        let mut out: Vec<Value> = Vec::new();
+        let mut bytes = 0usize;
+        for e in &v[start..] {
+            if out.len() as u64 >= limit {
+                break;
+            }
+            let j = Self::pr_entry_json(e, &reviews, &requests)?;
+            let sz = serde_json::to_string(&j)?.len();
+            // Toujours au moins une entrée par page : une entrée seule
+            // plus grosse que la borne ne doit pas produire une page
+            // vide en boucle infinie.
+            if !out.is_empty() && bytes + sz > PAGE_BYTES {
+                break;
+            }
+            bytes += sz;
+            out.push(j);
+        }
+        let end = start + out.len();
+        let next = (end < v.len()).then_some(end as u64);
+        Ok(json!({
+            "prs": out,
+            "next_offset": next,
+            "total": total,
+            "version": version,
+        }))
     }
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn h_pr_track(

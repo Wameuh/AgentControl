@@ -1258,6 +1258,32 @@ pub enum ReqKind {
         #[serde(default)]
         session: Option<String>,
     },
+    /// Variante paginée de PrList — même motif que ListSessionsPage :
+    /// le registre complet dépassait 1,9 Mo en une seule ligne NDJSON
+    /// sur les grosses instances, ce qui saturait le lien et déclenchait
+    /// des retry storms (item #367). Réponse
+    /// `{"prs": [...], "next_offset": n|null, "total": t, "version": v}`
+    /// ; `if_version` = version d'un fetch précédent → `{"unchanged":
+    /// true}` quand rien n'a bougé (registre + reviews natives). Requête
+    /// inconnue des vieux démons (`parse: unknown variant`) → le client
+    /// retombe sur PrList (réponse unique).
+    PrListPage {
+        #[serde(default)]
+        session: Option<String>,
+        /// Taille de page indicative (défaut côté démon : 50, plafond
+        /// 200) — la page est aussi bornée en octets (~128 Kio) pour
+        /// rester sous le seuil « giant line » quelle que soit la
+        /// taille des entrées.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        /// Décalage dans la liste (plus récent d'abord).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
+        /// `version` renvoyée par un fetch précédent — inchangée →
+        /// réponse `{"unchanged": true}` sans sérialiser les entrées.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_version: Option<String>,
+    },
     /// Upsert manuel d'une entrée (champs Some écrasent, None conservent —
     /// `session` requis pour une entrée nouvelle). Prime sur `via: detected`.
     /// `forge`/`host`/`change_id`/`url` adressent les forges non-GitHub
@@ -1629,6 +1655,7 @@ impl ReqKind {
             Self::TermResize { .. } => "term_resize",
             Self::TermClose { .. } => "term_close",
             Self::PrList { .. } => "pr_list",
+            Self::PrListPage { .. } => "pr_list_page",
             Self::PrTrack { .. } => "pr_track",
             Self::PrUntrack { .. } => "pr_untrack",
             Self::ForgeList {} => "forge_list",

@@ -86,6 +86,140 @@ async fn list_sessions_all(app: &AppHandle, k: &str, c: &Arc<Client>) -> Result<
     Ok(json!(all))
 }
 
+/// PRs par page `pr_list_page` — borne le poids d'une ligne NDJSON :
+/// le registre complet dépassait 1,9 Mo sur les grosses instances et
+/// chaque timeout 8 s relançait une réponse géante (retry storm →
+/// mort silencieuse du client, item #367). `if_version` + cache
+/// `pr_cache` : tant que le registre et les reviews natives n'ont pas
+/// bougé, le poll badge 60 s ne transfère que ~100 octets.
+const PR_PAGE_SIZE: u32 = 50;
+/// Garde-fou ~2000 entrées (les pages sont aussi bornées en octets
+/// côté démon) : au-delà on rend l'accumulé plutôt que boucler.
+const PR_PAGE_MAX: u64 = 40;
+
+/// `pr_list` paginé via `pr_list_page` quand le démon la connaît,
+/// sinon la réponse unique historique — même contrat de repli que
+/// `list_sessions_all` (capacité mémorisée par clé de connexion).
+/// Retourne le tableau JSON, comme `PrList`.
+async fn pr_list_all(
+    app: &AppHandle,
+    k: &str,
+    c: &Arc<Client>,
+    session: Option<&str>,
+) -> Result<Value> {
+    let cache_key = format!("{k}\u{0}{}", session.unwrap_or(""));
+    let supported = app
+        .state::<AppState>()
+        .pr_page
+        .lock()
+        .await
+        .get(k)
+        .copied()
+        .unwrap_or(true);
+    if !supported {
+        return c
+            .call(ReqKind::PrList {
+                session: session.map(String::from),
+            })
+            .await;
+    }
+    // Cache versionné : la première page porte `if_version` —
+    // `unchanged` rend le tableau mémorisé sans transfert.
+    let cached = app
+        .state::<AppState>()
+        .pr_cache
+        .lock()
+        .await
+        .get(&cache_key)
+        .cloned();
+    let mut all: Vec<Value> = Vec::new();
+    let mut offset = 0u64;
+    // Version de la 1re page — le registre peut muter en cours de
+    // pagination : une page suivante avec une version différente
+    // signalerait un tableau incohérent → on repagine une fois.
+    let mut version: Option<String> = None;
+    let mut restarted = false;
+    for _ in 0..PR_PAGE_MAX {
+        match c
+            .call(ReqKind::PrListPage {
+                session: session.map(String::from),
+                limit: Some(PR_PAGE_SIZE),
+                offset: Some(offset),
+                if_version: (offset == 0)
+                    .then(|| cached.as_ref().map(|(v, _)| v.clone()))
+                    .flatten(),
+            })
+            .await
+        {
+            Ok(v) => {
+                app.state::<AppState>()
+                    .pr_page
+                    .lock()
+                    .await
+                    .insert(k.to_string(), true);
+                if v.get("unchanged").and_then(Value::as_bool) == Some(true) {
+                    if let Some((_, arr)) = cached {
+                        return Ok(arr);
+                    }
+                    continue;
+                }
+                let pv = v.get("version").and_then(Value::as_str).map(String::from);
+                if let (Some(f), Some(p)) = (&version, &pv) {
+                    if f != p && !restarted {
+                        restarted = true;
+                        offset = 0;
+                        all.clear();
+                        version = None;
+                        continue;
+                    }
+                }
+                if version.is_none() {
+                    version = pv;
+                }
+                let Some(prs) = v.get("prs").and_then(Value::as_array) else {
+                    anyhow::bail!("pr_list_page: malformed response");
+                };
+                let next = v.get("next_offset").and_then(Value::as_u64);
+                all.extend(prs.iter().cloned());
+                match next {
+                    Some(n) if n > offset => offset = n,
+                    _ => {
+                        if let Some(ver) = version {
+                            app.state::<AppState>()
+                                .pr_cache
+                                .lock()
+                                .await
+                                .insert(cache_key, (ver, json!(all.clone())));
+                        }
+                        return Ok(json!(all));
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if msg.contains("pr_list_page") || msg.contains("unknown variant") {
+                    app.state::<AppState>()
+                        .pr_page
+                        .lock()
+                        .await
+                        .insert(k.to_string(), false);
+                    return c
+                        .call(ReqKind::PrList {
+                            session: session.map(String::from),
+                        })
+                        .await;
+                }
+                return Err(e);
+            }
+        }
+    }
+    client_core::log(
+        Level::Warn,
+        format!("pr_list {k}: borne de pages atteinte — liste tronquée"),
+    );
+    Ok(json!(all))
+}
+
 /// Compteurs transport exposés sous `_ac_transport` dans les sondes et
 /// les marqueurs `conn_error` — le frontend les recopie dans client.log
 /// pour reconstruire la chronologie sans deviner depuis les timeouts.
@@ -102,6 +236,7 @@ pub(crate) fn ac_transport_json(st: &client_core::ClientStats) -> Value {
         "silent_ms": st.silent_ms,
         "tx_age_ms": st.tx_age_ms,
         "rx_partial": st.rx_partial,
+        "late": st.late,
     })
 }
 
@@ -145,28 +280,32 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
         // Timeout par conn : 8 s pour les sondes (SILENT_KILL_MS côté
         // frontend = la fenêtre de « trafic récent » qui excuse un
         // timeout — pas le même réglage, à ne pas aligner aveuglément).
-        // list_sessions paginé = N allers-retours séquentiels : 20 s —
-        // ce n'est pas une sonde de vie (daemon_status la joue), un
-        // timeout allongé n'aggrave pas la détection des vraies morts.
+        // list_sessions / pr_list paginés = N allers-retours séquentiels :
+        // 20 s — ce n'est pas une sonde de vie (daemon_status la joue),
+        // un timeout allongé n'aggrave pas la détection des vraies morts.
         let secs = if method == "pr_sync" {
             60
-        } else if method == "list_sessions" {
+        } else if method == "list_sessions" || method == "pr_list" {
             20
         } else {
             8
         };
         let is_list_sessions = method == "list_sessions";
+        let is_pr_list = method == "pr_list";
         let mut set = tokio::task::JoinSet::new();
         for (k, c) in pairs {
             let req = req.clone();
             let app = app.clone();
             set.spawn(async move {
                 let t0 = std::time::Instant::now();
-                // list_sessions passe par la variante paginée (filtre
-                // les grosses lignes NDJSON) — même timeout global.
+                // list_sessions / pr_list passent par les variantes
+                // paginées (filtrent les grosses lignes NDJSON) —
+                // même timeout global.
                 let callfut = async {
                     if is_list_sessions {
                         list_sessions_all(&app, &k, &c).await
+                    } else if is_pr_list {
+                        pr_list_all(&app, &k, &c, None).await
                     } else {
                         c.call(req).await
                     }

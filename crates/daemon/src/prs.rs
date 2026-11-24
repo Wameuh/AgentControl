@@ -21,6 +21,7 @@ use anyhow::{Context, Result};
 use proto::PrEntry;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::forges::{Forges, PrRef};
@@ -28,6 +29,10 @@ use crate::forges::{Forges, PrRef};
 pub struct PrRegistry {
     path: PathBuf,
     map: Mutex<BTreeMap<String, PrEntry>>,
+    /// Révision monotone — incrémentée à chaque `save()` : combinée à
+    /// l'empreinte des reviews natives, elle forme le `version` de
+    /// `pr_list_page` (if_version → `unchanged` sans resérialiser).
+    rev: AtomicU64,
 }
 
 /// Paramètres d'un upsert manuel (`pr_track`).
@@ -85,12 +90,18 @@ impl PrRegistry {
         Self {
             path,
             map: Mutex::new(map),
+            rev: AtomicU64::new(0),
         }
     }
 
     pub fn list(&self) -> Vec<PrEntry> {
         // BTreeMap trié par clé canonique — présenté du plus récent au plus ancien.
         self.map.lock().unwrap().values().rev().cloned().collect()
+    }
+
+    /// Révision courante — voir champ `rev`.
+    pub fn rev(&self) -> u64 {
+        self.rev.load(Ordering::Relaxed)
     }
 
     /// Upsert manuel (`pr_track`) : `Some` écrase, `None` conserve ;
@@ -392,6 +403,9 @@ impl PrRegistry {
     /// Rewrite atomique (tmp + rename) — un kill en cours d'écriture ne
     /// laisse pas un fichier tronqué.
     fn save(&self) -> Result<()> {
+        // Avant l'écriture : un save en échec laisse quand même la map
+        // mutée en mémoire — la version doit changer dans les deux cas.
+        self.rev.fetch_add(1, Ordering::Relaxed);
         let v = {
             let g = self.map.lock().unwrap();
             serde_json::json!({ "prs": g.values().collect::<Vec<_>>() })

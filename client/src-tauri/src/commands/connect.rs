@@ -138,9 +138,17 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
         }
     };
     // Nouveau client = démon possiblement upgradé depuis le dernier
-    // verdict : on oublie la capacité list_sessions_page mémorisée —
+    // verdict : on oublie les capacités de pagination mémorisées —
     // un `false` hérité blacklisterait la pagination jusqu'au restart.
     state.list_page.lock().await.remove(&key);
+    state.pr_page.lock().await.remove(&key);
+    // Le cache pr_list est indexé par version : une nouvelle gen de
+    // client peut pointer sur un autre daemon/root — purge conservatrice.
+    state
+        .pr_cache
+        .lock()
+        .await
+        .retain(|k, _| !k.starts_with(&format!("{key}\u{0}")));
     // Liaison consignée : les appels suivants du cycle de vie doivent
     // pouvoir remonter à la conn qui les a portés — « transport ssh:…
     // ouvert » (client-core) ne porte pas la clé de conn du client.
@@ -356,6 +364,42 @@ async fn ssh_postmortem(conn: &str, d: SshDiag) {
     client_core::log(Level::Info, format!("post-mortem {conn}: {out}"));
 }
 
+/// Seuil « event géant » pour la pompe pushes → webview : au-delà, le
+/// payload est émis sous forme de marqueur `history_replayed` (le
+/// frontend recharge le journal via l'RPC `events`, borné) plutôt
+/// qu'en intégral — un event de plusieurs Mo sérialisé dans la file
+/// IPC du main process fait gonfler la RSS jusqu'au kill (même classe
+/// de mort que les giant lines pr_list, item #367).
+const PUSH_GIANT_BYTES: usize = 256 * 1024;
+
+/// Taille approximative (octets de chaînes + clés) d'un push —
+/// early-exit au seuil : le coût reste borné même sur un payload
+/// immense, et les events courants (~4 Kio d'excerpt) ne paient que
+/// leur parcours.
+fn push_payload_bytes(v: &Value) -> usize {
+    let mut total = 0usize;
+    let mut stack: Vec<&Value> = vec![v];
+    while let Some(x) = stack.pop() {
+        match x {
+            Value::String(s) => {
+                total += s.len();
+                if total > PUSH_GIANT_BYTES {
+                    return total;
+                }
+            }
+            Value::Array(a) => stack.extend(a.iter()),
+            Value::Object(o) => {
+                for (k, val) in o {
+                    total += k.len();
+                    stack.push(val);
+                }
+            }
+            _ => {}
+        }
+    }
+    total
+}
+
 /// Subscribe sur la connexion principale et re-émet les push
 /// comme events Tauri `session-event` ({session, event}).
 #[tauri::command]
@@ -434,6 +478,38 @@ pub(crate) async fn subscribe(
             // repartent à 1 — last_seq doit suivre le cycle courant.
             if let Some(s) = v.pointer("/event/seq").and_then(Value::as_u64) {
                 last_seq = s;
+            }
+            // Backpressure webview : un event géant ne part pas en
+            // intégral dans la file IPC — marqueur refetch à la place
+            // (le frontend recharge le journal borné via `events`).
+            // Le seq est conservé : le resync Lagged et le rendu
+            // gardent leur cohérence de cycle.
+            let payload_bytes = push_payload_bytes(&v);
+            if payload_bytes > PUSH_GIANT_BYTES {
+                let seq = v
+                    .pointer("/event/seq")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                client_core::log(
+                    Level::Warn,
+                    format!(
+                        "subscribe {sid_log}: event seq {seq} ≈{payload_bytes} o — marqueur refetch"
+                    ),
+                );
+                let _ = app.emit(
+                    "session-event",
+                    serde_json::json!({
+                        "push": "event",
+                        "session": v.get("session").cloned().unwrap_or(Value::Null),
+                        "event": {
+                            "seq": seq,
+                            "ts": proto::now_iso(),
+                            "type": "history_replayed",
+                            "events": 1,
+                        },
+                    }),
+                );
+                continue;
             }
             let _ = app.emit("session-event", v);
         }
