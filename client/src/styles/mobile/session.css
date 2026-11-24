@@ -338,6 +338,9 @@ body.android #perm-dock {
 }
 body.android #perm-dock[hidden] { display: none; }
 body.android .pd-card { padding: 8px 10px 10px; }
+/* Envoi du respond en vol (carte .pending) : le dock reflète l'état —
+   boutons désactivés, carte estompée. */
+body.android .pd-card.pending { opacity: .7; }
 body.android .pd-head {
   display: flex; align-items: center; gap: 8px; min-height: 40px;
 }

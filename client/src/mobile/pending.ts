@@ -65,6 +65,12 @@ export function sortPermOptions<T extends { kind: string }>(opts: T[]): T[] {
   return [...opts].sort((a, b) => rank(a.kind) - rank(b.kind));
 }
 
+/** Réponses `respond` en vol, clé `${conn}:${session}:${requestId}` —
+ *  dédup des surfaces sans verrou propre (actions de notification,
+ *  cartes « À traiter » de l'accueil) : un second appel pendant le
+ *  roundtrip reçoit la même promesse au lieu d'un doublon. */
+const inflight = new Map<string, Promise<unknown>>();
+
 /** Répond à une demande en attente, session ouverte ou non — `conn` est
  *  obligatoire : sans lui call() viserait la connexion courante. Signature
  *  légère (id + conn) réutilisable par les actions de notification (P4).
@@ -76,10 +82,18 @@ export function respondPending(
   requestId: string,
   reply: { option_id: string } | { answer: unknown },
 ): Promise<unknown> {
-  return call("respond", {
+  const key = `${s.conn ?? ""}:${s.id}:${requestId}`;
+  const cur = inflight.get(key);
+  if (cur) return cur;
+  const p = call("respond", {
     session: s.id, conn: s.conn, request_id: requestId, ...reply,
   }).then((r) => {
     tick("resolve");
     return r;
   });
+  inflight.set(key, p);
+  void p.finally(() => {
+    if (inflight.get(key) === p) inflight.delete(key);
+  });
+  return p;
 }

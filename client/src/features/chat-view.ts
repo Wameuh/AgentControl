@@ -60,6 +60,7 @@ interface ConvCache {
   toolBlocks: Map<string, HTMLElement>;
   pendingToolUpdates: Map<string, AcEvent[]>;
   answered: Set<string>;
+  pending: Set<string>;
   lastText: { thought: boolean; norm: string; el: HTMLElement } | null;
   userMsgs: number;
   headSeen: boolean;
@@ -342,6 +343,7 @@ export class ChatView {
     this.renderer.toolBlocks = new Map();
     this.renderer.pendingToolUpdates = new Map();
     this.renderer.answered = new Set();
+    this.renderer.pending = new Set();
     this.renderer.lastText = null;
     this.renderer.userMsgs = 0;
     this.renderer.headSeen = false;
@@ -399,6 +401,7 @@ export class ChatView {
       toolBlocks: this.renderer.toolBlocks,
       pendingToolUpdates: this.renderer.pendingToolUpdates,
       answered: this.renderer.answered,
+      pending: this.renderer.pending,
       lastText: this.renderer.lastText,
       userMsgs: this.renderer.userMsgs,
       headSeen: this.renderer.headSeen,
@@ -439,6 +442,7 @@ export class ChatView {
     this.renderer.toolBlocks = c.toolBlocks;
     this.renderer.pendingToolUpdates = c.pendingToolUpdates;
     this.renderer.answered = c.answered;
+    this.renderer.pending = c.pending;
     this.renderer.lastText = c.lastText;
     this.renderer.userMsgs = c.userMsgs;
     this.renderer.headSeen = c.headSeen;
