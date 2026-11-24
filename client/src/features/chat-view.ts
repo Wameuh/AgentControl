@@ -1639,6 +1639,19 @@ export class ChatView {
     placeMenu(ctx, "evctx", x, y);
   }
 
+  /** Ctrl+A scopé au fil (#370) — appelé par le handler global de
+   *  main.ts : WebKitGTK n'exécute pas le select-all natif hors contenu
+   *  éditable. Renvoie true si la sélection/le focus touche #events
+   *  (tout le fil est alors sélectionné) ; false sinon → le raccourci
+   *  garde son comportement par défaut ailleurs. */
+  selectAll(): boolean {
+    const sel = getSelection();
+    const node = sel?.anchorNode ?? document.activeElement;
+    if (!node || !this.eventsEl.contains(node)) return false;
+    sel?.selectAllChildren(this.eventsEl);
+    return true;
+  }
+
   /** Ligne système dans le fil (retourne l'élément pour mises à jour). */
   sysline(text: string, ic: IconName = "sys"): HTMLElement {
     const d = document.createElement("div");
