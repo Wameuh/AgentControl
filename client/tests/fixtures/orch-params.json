@@ -1,0 +1,550 @@
+{
+ "_comment": "Orchestrator params for tests/readme-shots.mjs (Configure view): stored values + params_schema as served by the daemon's backlog-orchestrator component.",
+ "params": {
+  "enabled": "true",
+  "max_workers": "5",
+  "pr_review_max_parallel": "2",
+  "worker_pool": "[{\"profile\":\"claude\",\"count\":3,\"model\":\"opus\",\"effort\":\"high\",\"mode\":\"\"},{\"profile\":\"devin\",\"count\":2,\"model\":\"\",\"effort\":\"\",\"mode\":\"\"}]",
+  "pr_review": "true",
+  "state_dir": "/srv/agentbacklog"
+ },
+ "params_schema": [
+  {
+   "key": "max_workers",
+   "label": "Max workers",
+   "description": "simultaneous worker sessions (asleep excluded) — 0 = no spawn; a nudge waking a sleeping worker also consumes a slot",
+   "required": false,
+   "kind": "int",
+   "default": "5",
+   "group": "workers"
+  },
+  {
+   "key": "max_working",
+   "label": "Max active workers",
+   "description": "simultaneous ACTIVE worker sessions — a worker parked on an ac-wait waiter (review, CI checks…) frees an active slot but keeps its max_workers slot; spawn and wake require headroom on both caps; 0 = follows max_workers",
+   "required": false,
+   "kind": "int",
+   "default": "0",
+   "group": "workers"
+  },
+  {
+   "key": "worker_pool",
+   "label": "Worker pool",
+   "description": "worker team — one row per profile: count slots + own model/effort/mode (empty = global values); when set, the sum of counts replaces max_workers for worker capacity (max_working still applies); empty = legacy worker_agent + max_workers",
+   "required": false,
+   "kind": "json",
+   "default": "[]",
+   "group": "workers"
+  },
+  {
+   "key": "title_prefix",
+   "label": "Worker prefix",
+   "description": "worker session title prefix (\"Backlog-W\") — changing it mid-flight « loses » running workers (their title no longer matches), too short a prefix would adopt foreign sessions (min 4 chars); empty = default",
+   "required": false,
+   "kind": "string",
+   "default": "Backlog-W",
+   "group": "workers"
+  },
+  {
+   "key": "worker_agent",
+   "label": "Worker profile (Backlog-W*)",
+   "description": "`[agents.*]` profile for workers; empty = the agent param",
+   "required": false,
+   "kind": "enum",
+   "default": "",
+   "choices": [
+    "claude",
+    "devin",
+    "cursor",
+    "codex"
+   ],
+   "open_enum": true,
+   "group": "workers"
+  },
+  {
+   "key": "prompt",
+   "label": "Worker prompt",
+   "description": "custom worker prompt — empty = built-in prompt; item dispatch (agentbacklog ≥ 0.7) substitutes {WS} {REPO} {ID} {ITEM} {DOD} {BASE} {REVIEW_TRIGGER} {WORKTREE_DIR} {MERGE_RULE} {RULES} and pre-assigns the item (no --pop)",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "workers"
+  },
+  {
+   "key": "planner_agent",
+   "label": "Planner profile (Backlog-P*)",
+   "description": "`[agents.*]` profile for planners and implementers; empty = the agent param",
+   "required": false,
+   "kind": "enum",
+   "default": "",
+   "choices": [
+    "claude",
+    "devin",
+    "cursor",
+    "codex"
+   ],
+   "open_enum": true,
+   "group": "pipeline"
+  },
+  {
+   "key": "reviewer_agent",
+   "label": "Reviewer profile (Backlog-R*)",
+   "description": "`[agents.*]` profile for plan reviewers; empty = the agent param",
+   "required": false,
+   "kind": "enum",
+   "default": "",
+   "choices": [
+    "claude",
+    "devin",
+    "cursor",
+    "codex"
+   ],
+   "open_enum": true,
+   "group": "pipeline"
+  },
+  {
+   "key": "plan_review",
+   "label": "Plan→review pipeline",
+   "description": "each no_plan=0 item is planned (Backlog-P*, planner_mode), reviewed by an ephemeral reviewer (Backlog-R*, verdict relayed to the planner), then implemented by the same planner after compact + implement_mode — requires agentbacklog ≥ 0.7; off = direct worker dispatch",
+   "required": false,
+   "kind": "bool",
+   "default": "false",
+   "group": "pipeline"
+  },
+  {
+   "key": "planner_mode",
+   "label": "Planner mode",
+   "description": "mode requested at Backlog-P* spawn; empty = the profile's default",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "pipeline"
+  },
+  {
+   "key": "reviewer_mode",
+   "label": "Reviewer mode",
+   "description": "mode requested at Backlog-R* spawn; empty = the profile's default",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "pipeline"
+  },
+  {
+   "key": "implement_mode",
+   "label": "Implementation mode",
+   "description": "mode of no_plan item workers and implementers (approved planner or new session); empty = the profile's default",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "pipeline"
+  },
+  {
+   "key": "planner_model",
+   "label": "Planner model",
+   "description": "model requested at Backlog-P* spawn (planners AND implementers); empty = the global model param",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "pipeline"
+  },
+  {
+   "key": "planner_effort",
+   "label": "Planner effort",
+   "description": "thought_level applied after Backlog-P* spawn; empty = the global thought_level",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "pipeline"
+  },
+  {
+   "key": "reviewer_model",
+   "label": "Reviewer model",
+   "description": "model requested at Backlog-R* spawn (plan reviewers); empty = the global model param",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "pipeline"
+  },
+  {
+   "key": "reviewer_effort",
+   "label": "Reviewer effort",
+   "description": "thought_level applied after Backlog-R* spawn; empty = the global thought_level",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "pipeline"
+  },
+  {
+   "key": "max_review_rounds",
+   "label": "Max review rounds",
+   "description": "beyond that, a denied/conditional verdict freezes the item in plan_review « stalled — human review required »",
+   "required": false,
+   "kind": "int",
+   "default": "5",
+   "group": "pipeline"
+  },
+  {
+   "key": "plan_rereview",
+   "label": "Plan re-review",
+   "description": "off: a single review round per item — a denied/conditional verdict on round 1 freezes it directly « stalled » (equivalent to max_review_rounds=1)",
+   "required": false,
+   "kind": "bool",
+   "default": "true",
+   "group": "pipeline"
+  },
+  {
+   "key": "reviewer_reuse",
+   "label": "Persistent reviewer",
+   "description": "off: a fresh Backlog-R* session each round, deleted after the verdict (pre-reuse behavior)",
+   "required": false,
+   "kind": "bool",
+   "default": "true",
+   "group": "pipeline"
+  },
+  {
+   "key": "pr_reviewer_agent",
+   "label": "PR reviewer profile (PRReview-*)",
+   "description": "`[agents.*]` profile for PR reviewers; empty = the agent param",
+   "required": false,
+   "kind": "enum",
+   "default": "",
+   "choices": [
+    "claude",
+    "devin",
+    "cursor",
+    "codex"
+   ],
+   "open_enum": true,
+   "group": "pr_reviews"
+  },
+  {
+   "key": "pr_review",
+   "label": "Daemon PR review",
+   "description": "trigger comment on an open PR → fresh reviewer session on the exact head, « ## Verdict: … » posted by the daemon — opt-in (replaces missing/dead external automation)",
+   "required": false,
+   "kind": "bool",
+   "default": "false",
+   "group": "pr_reviews"
+  },
+  {
+   "key": "pr_rereview",
+   "label": "PR re-review",
+   "description": "off: one review per PR — triggers after a review settled done are ignored (failed stays replayable)",
+   "required": false,
+   "kind": "bool",
+   "default": "true",
+   "group": "pr_reviews"
+  },
+  {
+   "key": "pr_review_trigger",
+   "label": "PR review trigger",
+   "description": "bare trigger comment (exact body); author must be OWNER/MEMBER/COLLABORATOR",
+   "required": false,
+   "kind": "string",
+   "default": "/mr review",
+   "group": "pr_reviews"
+  },
+  {
+   "key": "pr_reviewer_mode",
+   "label": "PR reviewer mode",
+   "description": "mode requested at PRReview-<N> spawn; empty = the profile's default",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "pr_reviews"
+  },
+  {
+   "key": "pr_reviewer_model",
+   "label": "PR reviewer model",
+   "description": "model requested at PRReview-<N> spawn; empty = the global model param",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "pr_reviews"
+  },
+  {
+   "key": "pr_reviewer_effort",
+   "label": "PR reviewer effort",
+   "description": "thought_level applied after PRReview-<N> spawn; empty = the global thought_level",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "pr_reviews"
+  },
+  {
+   "key": "pr_review_max_parallel",
+   "label": "Parallel PR reviews",
+   "description": "pool separate from max_workers — workers waiting on a review must not starve reviews",
+   "required": false,
+   "kind": "int",
+   "default": "2",
+   "group": "pr_reviews"
+  },
+  {
+   "key": "pr_review_timeout",
+   "label": "PR review timeout (s)",
+   "description": "max PR reviewer session duration: kill + post « review failed » beyond it",
+   "required": false,
+   "kind": "int",
+   "default": "2700",
+   "group": "pr_reviews"
+  },
+  {
+   "key": "review_trigger_mode",
+   "label": "Review trigger mode",
+   "description": "when daemon PR reviews fire: comment = bare `pr_review_trigger` comment (default, forge comment scan); auto_open = when the change first shows up open; auto_push = on every head differing from the reviewed sha; manual = acctl pr review / internal RPC only (no forge scan at all); off = nothing, internal requests refused too (in-flight reviews still settle — flip pr_review off to abort them). auto_open/auto_push only review TRUSTED changes — same-repo branch or OWNER/MEMBER/COLLABORATOR author (fork/external PRs are skipped, see auto_review_untrusted). Per-repo override via review_overrides",
+   "required": false,
+   "kind": "enum",
+   "default": "comment",
+   "choices": [
+    "comment",
+    "auto_open",
+    "auto_push",
+    "manual",
+    "off"
+   ],
+   "group": "pr_reviews"
+  },
+  {
+   "key": "auto_review_untrusted",
+   "label": "Auto review untrusted PRs",
+   "description": "trust filter of the auto trigger modes (auto_open/ auto_push): false (default) = a review only launches on a trusted change — same-repo branch OR OWNER/MEMBER/COLLABORATOR author; a PR from a fork by an external author never spawns a reviewer session (untrusted changes are remembered, not re-evaluated every tick). true = review everything — risky on public repos. comment mode and internal requests are not filtered. Per-repo override via review_overrides",
+   "required": false,
+   "kind": "bool",
+   "default": "false",
+   "group": "pr_reviews"
+  },
+  {
+   "key": "review_prompt",
+   "label": "PR review prompt",
+   "description": "custom reviewer template — {PR} {REPO} {SHA} {BASE} {WS} {TITLE} {BODY} {TRIGGER} {VERDICT_APPROVED} {VERDICT_CHANGES} {RULES} placeholders; empty = built-in template",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "pr_reviews"
+  },
+  {
+   "key": "verdict_approved",
+   "label": "Approve verdict label",
+   "description": "approval heading posted as « ## <label> » — default « Verdict: APPROVED »; the repo's merge policy must accept the chosen label (merge hooks / verdict grep)",
+   "required": false,
+   "kind": "string",
+   "default": "Verdict: APPROVED",
+   "group": "pr_reviews"
+  },
+  {
+   "key": "verdict_changes",
+   "label": "Changes verdict label",
+   "description": "« changes requested » heading posted as « ## <label> » — default « Verdict: CHANGES_REQUESTED »",
+   "required": false,
+   "kind": "string",
+   "default": "Verdict: CHANGES_REQUESTED",
+   "group": "pr_reviews"
+  },
+  {
+   "key": "review_overrides",
+   "label": "Per-repo review overrides",
+   "description": "JSON object {repo_path: {trigger_mode, pr_review_trigger, review_prompt, verdict_approved, verdict_changes, auto_review_untrusted, rules_files}} — key = repo path (owner/name, gerrit project; short name resolves too); same as TOML [backlog_orchestrator.review.<repo>]; empty = global params only",
+   "required": false,
+   "kind": "json",
+   "default": null,
+   "group": "pr_reviews"
+  },
+  {
+   "key": "enabled",
+   "label": "Enabled at boot",
+   "description": "persisted value — applying it also flips the runtime; `orch on|off` remains the non-persisted runtime toggle",
+   "required": false,
+   "kind": "bool",
+   "default": "false",
+   "group": "general"
+  },
+  {
+   "key": "watch_prs",
+   "label": "PR watch",
+   "description": "cycle « gh » probes: retention of workers with an open PR, post-merge recycling, orphan wip release — unchecking = queue only: no forge probe on workers (the release-PR guard falls under auto_patchnotes) and no orphan recovery",
+   "required": false,
+   "kind": "bool",
+   "default": "true",
+   "group": "general"
+  },
+  {
+   "key": "auto_patchnotes",
+   "label": "Auto patchnotes",
+   "description": "patchnotes item + ready/draft flip of the release PR when the queue empties/fills",
+   "required": false,
+   "kind": "bool",
+   "default": "true",
+   "group": "general"
+  },
+  {
+   "key": "spawn_managers",
+   "label": "Proposable Managers",
+   "description": "one Manager per routed workspace (backlog panel section)",
+   "required": false,
+   "kind": "bool",
+   "default": "true",
+   "group": "general"
+  },
+  {
+   "key": "integration_branch",
+   "label": "Integration branch",
+   "description": "feature-PR base: PR-review guard and `gh pr list --base` scan, {BASE} prompt placeholder, release-PR head (with release_branch as base); empty = default",
+   "required": false,
+   "kind": "string",
+   "default": "next_release",
+   "group": "general"
+  },
+  {
+   "key": "release_branch",
+   "label": "Release branch",
+   "description": "release-PR base (head = integration_branch) — EMPTY = « none » workflow: no release PR is looked up and no head is excluded",
+   "required": false,
+   "kind": "string",
+   "default": "main",
+   "group": "general"
+  },
+  {
+   "key": "worktree_dir",
+   "label": "Worktree root",
+   "description": "root dir of the agents' dedicated worktrees — {WORKTREE_DIR} prompt placeholder (the fine naming convention stays with the repo's rules file); empty = default",
+   "required": false,
+   "kind": "path",
+   "default": "~/worktrees",
+   "group": "general"
+  },
+  {
+   "key": "merge_rule",
+   "label": "Agent merge rule",
+   "description": "text substituted into the {MERGE_RULE} prompt placeholder — EMPTY = prompts defer to the repo's own rules file (agent merges only when its rules allow it, otherwise merge stays with the user)",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "general"
+  },
+  {
+   "key": "rules_files",
+   "label": "Repo rules files",
+   "description": "workspace-relative rule file(s) rendered into the {RULES} prompt placeholder — the first EXISTING file is cited, the rest listed as fallback; per-repo override via review_overrides; empty = default",
+   "required": false,
+   "kind": "list",
+   "default": "AGENTS.md,CLAUDE.md",
+   "group": "general"
+  },
+  {
+   "key": "metrics",
+   "label": "Metrics (sampling)",
+   "description": "each tick appends a {ts, pending, wip, workers} sample to ~/.agentbacklog/metrics.jsonl (30d / ~100k samples retention) served by the backlog_metrics RPC; unchecking = no series (item aggregates still computed)",
+   "required": false,
+   "kind": "bool",
+   "default": "true",
+   "group": "general"
+  },
+  {
+   "key": "poll_secs",
+   "label": "Cycle period (s)",
+   "description": "tick cadence — effective min 10 s",
+   "required": false,
+   "kind": "int",
+   "default": "60",
+   "group": "general"
+  },
+  {
+   "key": "nudge_cooldown_secs",
+   "label": "Nudge cooldown (s)",
+   "description": "between two relaunches of the same worker",
+   "required": false,
+   "kind": "int",
+   "default": "900",
+   "group": "general"
+  },
+  {
+   "key": "group",
+   "label": "Sidebar group",
+   "description": "group of spawned sessions — empty = ungrouped",
+   "required": false,
+   "kind": "string",
+   "default": "AgentControl",
+   "group": "general"
+  },
+  {
+   "key": "workspace",
+   "label": "Worker workspace",
+   "description": "cwd of untagged items and of the orchestrator's CLI calls — tagged items are routed via repo_workspaces; empty = git root of the daemon cwd (rev-parse --show-toplevel), else its cwd",
+   "required": false,
+   "kind": "path",
+   "default": null,
+   "group": "general"
+  },
+  {
+   "key": "state_dir",
+   "label": "State directory",
+   "description": "orchestrator state — flock, pause, state.json, plans/, metrics.jsonl, review worktrees; empty = ~/.agentbacklog (every orchestrator of the same queue must share it)",
+   "required": false,
+   "kind": "path",
+   "default": null,
+   "group": "general"
+  },
+  {
+   "key": "agent",
+   "label": "Agent profile",
+   "description": "`[agents.*]` profile for spawns; empty = first available profile — also the fallback for every `*_agent` left empty",
+   "required": false,
+   "kind": "enum",
+   "default": null,
+   "choices": [
+    "claude",
+    "devin",
+    "cursor",
+    "codex"
+   ],
+   "open_enum": true,
+   "group": "general"
+  },
+  {
+   "key": "mode",
+   "label": "Spawn mode",
+   "description": "mode requested for spawned sessions; empty = the profile's default",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "general"
+  },
+  {
+   "key": "model",
+   "label": "Spawn model",
+   "description": "model requested for spawned sessions; empty = the profile's default",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "general"
+  },
+  {
+   "key": "thought_level",
+   "label": "Thought level",
+   "description": "applied after each spawn — empty = set nothing",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "general"
+  },
+  {
+   "key": "manager_prompt",
+   "label": "Manager prompt",
+   "description": "Manager template — placeholders {REPO} {WS} {BASE} {REVIEW_TRIGGER} {WORKTREE_DIR} {MERGE_RULE} {RULES}; empty = built-in template",
+   "required": false,
+   "kind": "string",
+   "default": null,
+   "group": "general"
+  },
+  {
+   "key": "repo_workspaces",
+   "label": "Routed workspaces",
+   "description": "« repo=/cwd » entries separated by commas — routes sessions by item repo tag (worker, planner, reviewer, Manager); a tag with no entry = item waiting; empty = default",
+   "required": false,
+   "kind": "list",
+   "default": null,
+   "group": "general"
+  }
+ ]
+}

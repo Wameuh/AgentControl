@@ -38,7 +38,9 @@ body.android .ft-rec {
   font-family: Mono, ui-monospace, monospace; font-size: 12px; color: var(--ink);
 }
 body.android .ft-rec .ic { width: 14px; height: 14px; flex: none; color: var(--dim); }
-body.android #ft-side:not([hidden]) { flex: 1; width: auto; }
+/* max-width : le plafond desktop (calc(100% - 200px), place gardée à la
+   preview du split) amputait l'explorateur de 200 px sur téléphone. */
+body.android #ft-side:not([hidden]) { flex: 1; width: auto; max-width: none; }
 /* Pas de split horizontal sur Android : explorateur plein écran,
    viewer en overlay — la poignée desktop reste masquée. */
 body.android #file-body #ft-split { display: none; }

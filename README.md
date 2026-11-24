@@ -55,15 +55,20 @@ the device keeps its own:
 
 ![AgentControl — pair a device by QR](docs/screenshots/desktop-pair.png)
 
-| Watch the shared backlog — queue, in-flight work, throughput | Tune the feel — themes, accents, sounds, notifications, updates |
+| Watch the shared backlog — queue, in-flight work, throughput | Tune the feel — themes, accents, sounds, notifications |
 |:-:|:-:|
 | ![AgentControl — backlog panel](docs/screenshots/desktop-backlog.png) | ![AgentControl — settings](docs/screenshots/desktop-settings.png) |
 
+Configure the backlog orchestrator from the app — worker team, plan and
+PR reviews — and check every change before it is applied:
+
+![AgentControl — orchestrator configuration](docs/screenshots/desktop-orchestrator.png)
+
 Same sessions, same agents — native mobile UI on Android:
 
-| Chat | Sessions & groups | Files |
+| Chat | Sessions at a glance | Files |
 |:-:|:-:|:-:|
-| ![Android chat](docs/screenshots/android-chat.png) | ![Android drawer](docs/screenshots/android-drawer.png) | ![Android files](docs/screenshots/android-files.png) |
+| ![Android chat](docs/screenshots/android-chat.png) | ![Android home](docs/screenshots/android-home.png) | ![Android files](docs/screenshots/android-files.png) |
 
 ## Install
 
