@@ -23,6 +23,7 @@ struct TestDaemon {
     home: PathBuf,
     addr: String,
     child: Child,
+    keep_home: bool,
 }
 
 impl TestDaemon {
@@ -47,6 +48,12 @@ impl TestDaemon {
         let home = std::env::temp_dir().join(format!("ac-tcpauth-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
+        Self::launch_in(home, config, addr, envs)
+    }
+
+    /// Lance le démon sur un home existant (restart = même
+    /// AGENTCONTROL_HOME) — ne purge pas le répertoire.
+    fn launch_in(home: PathBuf, config: &str, addr: &str, envs: &[(&str, &str)]) -> Self {
         std::fs::write(home.join("config.toml"), config).unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_agentcontrol-daemon"));
         cmd.env("AGENTCONTROL_HOME", &home)
@@ -61,7 +68,36 @@ impl TestDaemon {
             home,
             addr: addr.to_string(),
             child,
+            keep_home: false,
         }
+    }
+
+    /// Home temporaire + port TCP libre (bind :0, lecture, drop — le
+    /// démon re-bind aussitôt ; race acceptable en test).
+    fn prepare(tag: &str) -> (PathBuf, String) {
+        let home = std::env::temp_dir().join(format!("ac-tcpauth-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = free.local_addr().unwrap().to_string();
+        drop(free);
+        (home, addr)
+    }
+
+    /// Boot un démon sur un home existant (restart = même home/addr).
+    async fn spawn_at(home: PathBuf, addr: String) -> Self {
+        let config = format!("bind_tcp = \"{addr}\"\n");
+        let d = Self::launch_in(home, &config, &addr, &[]);
+        d.wait_ready().await;
+        d
+    }
+
+    /// Arrêt contrôlé pour un restart de test : garde le home (le
+    /// second boot doit relire daemon.token) et attend la mort du
+    /// process.
+    async fn stop(mut self) {
+        self.keep_home = true;
+        let _ = self.child.kill().await;
     }
 
     /// Le listener TCP monte avant la fin de l'init (chargement des
@@ -145,7 +181,9 @@ impl TestDaemon {
 impl Drop for TestDaemon {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
-        let _ = std::fs::remove_dir_all(&self.home);
+        if !self.keep_home {
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
     }
 }
 
@@ -328,4 +366,23 @@ async fn loopback_guard_container() {
         .await
         .unwrap();
     assert_eq!(v["ok"], true, "auth over container-accepted bind: {v}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_token_survives_restart() {
+    let (home, addr) = TestDaemon::prepare("restart");
+    let d1 = TestDaemon::spawn_at(home.clone(), addr.clone()).await;
+    let token = d1.token();
+    d1.stop().await;
+
+    // Restart sur le même AGENTCONTROL_HOME : daemon.token est relu,
+    // pas régénéré — sinon tous les clients TCP existants casseraient.
+    let d2 = TestDaemon::spawn_at(home, addr).await;
+    assert_eq!(d2.token(), token, "daemon.token must survive restart");
+    let (mut r, mut w) = d2.tcp().await;
+    let auth = json!({"id": 1, "req": "auth", "token": token.as_str()}).to_string();
+    let v = TestDaemon::tcp_roundtrip(&mut r, &mut w, &auth)
+        .await
+        .unwrap();
+    assert_eq!(v["ok"], true, "pre-restart token still valid: {v}");
 }

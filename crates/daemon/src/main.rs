@@ -267,8 +267,25 @@ fn write_token_file(path: &std::path::Path, token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Format attendu d'un jeton persisté : 32 octets aléatoires rendus en
+/// 64 caractères hexadécimaux (`new_token`). Un fichier non vide mais
+/// d'une autre forme est traité comme corrompu et régénéré.
+fn is_token_shape(token: &str) -> bool {
+    token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Cycle de vie `daemon.token` (audit post-incident) : seuls le boot
+/// (`load_or_create_token` ci-dessous) et `token_rotate`
+/// (`server::misc::h_token_rotate` → `regen_token`) écrivent ce fichier.
+/// `selfupdate`, les composants gérés et `acctl daemon-update` ne le
+/// touchent pas ; `web.token` partage `regen_token` mais a son propre
+/// cycle (régénéré à chaque boot). L'écriture est atomique
+/// (`write_token_file` : `.part` + rename, 0600) — un `daemon.token.part`
+/// orphelin n'est jamais lu. Au boot, un fichier absent, vide ou
+/// malformé est régénéré ; un jeton valide est réutilisé tel quel pour
+/// survivre aux restarts sans invalider les clients.
 /// Jeton de service persisté (`<root>/<name>`, 0600) : réutilise le
-/// fichier existant s'il est non vide — `daemon.token` doit survivre
+/// fichier existant s'il est valide — `daemon.token` doit survivre
 /// aux restarts sinon chaque boot invaliderait les clients. Resserre
 /// les perms d'un fichier hérité trop lisible.
 fn load_or_create_token(root: &std::path::Path, name: &str) -> Result<String> {
@@ -276,19 +293,25 @@ fn load_or_create_token(root: &std::path::Path, name: &str) -> Result<String> {
     match std::fs::read_to_string(&p) {
         Ok(t) => {
             let t = t.trim().to_string();
-            if !t.is_empty() {
+            if is_token_shape(&t) {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
                     let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
                 }
+                tracing::info!("{name} reused existing");
                 return Ok(t);
+            }
+            if !t.is_empty() {
+                tracing::warn!("{name} malformed — regenerating");
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
     }
-    regen_token(root, name)
+    let t = regen_token(root, name)?;
+    tracing::info!("{name} generated (new install/root)");
+    Ok(t)
 }
 
 /// (Re)génère le jeton — neuf et atomique. `daemon.token` : appelé par
@@ -729,6 +752,72 @@ async fn shutdown_signal() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("ac-token-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn daemon_token_reused_across_restarts() {
+        let root = tmpdir("reuse");
+        let first = load_or_create_token(&root, "daemon.token").unwrap();
+        assert!(is_token_shape(&first));
+        // Second boot sur le même root = restart : le fichier gagne.
+        let second = load_or_create_token(&root, "daemon.token").unwrap();
+        assert_eq!(first, second);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn daemon_token_empty_or_malformed_regenerated() {
+        let root = tmpdir("regen");
+        for (i, contents) in ["", "   \n", "not-a-token", "abc\nextra"]
+            .iter()
+            .enumerate()
+        {
+            let p = root.join(format!("case-{i}.token"));
+            std::fs::write(&p, contents).unwrap();
+            let t = load_or_create_token(&root, &format!("case-{i}.token")).unwrap();
+            assert!(is_token_shape(&t), "{contents:?} -> {t}");
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), t);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn daemon_token_orphan_part_never_read() {
+        let root = tmpdir("part");
+        // Jeton valide + .part orphelin : le .part est ignoré, pas de regen.
+        let kept = "a".repeat(64);
+        std::fs::write(root.join("daemon.token"), &kept).unwrap();
+        std::fs::write(root.join("daemon.token.part"), "garbage").unwrap();
+        assert_eq!(load_or_create_token(&root, "daemon.token").unwrap(), kept);
+        // Sans jeton principal, un .part valide ne doit pas être promu.
+        std::fs::remove_file(root.join("daemon.token")).unwrap();
+        std::fs::write(root.join("daemon.token.part"), "b".repeat(64)).unwrap();
+        let t = load_or_create_token(&root, "daemon.token").unwrap();
+        assert!(is_token_shape(&t));
+        assert_ne!(t, "b".repeat(64));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn regen_token_rotates_atomically() {
+        let root = tmpdir("rotate");
+        let first = load_or_create_token(&root, "daemon.token").unwrap();
+        let second = regen_token(&root, "daemon.token").unwrap();
+        assert_ne!(first, second);
+        assert!(is_token_shape(&second));
+        assert_eq!(
+            std::fs::read_to_string(root.join("daemon.token")).unwrap(),
+            second
+        );
+        assert!(!root.join("daemon.token.part").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     // Le garde n'admet que du loopback résolu — 127.0.0.0/8 entier,
     // ::1 et les noms (`localhost`) — et refuse jokers et adresses

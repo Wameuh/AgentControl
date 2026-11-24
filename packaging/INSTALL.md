@@ -48,11 +48,15 @@ The daemon listens on:
 
 The TCP port requires an authentication token as the first line of
 every connection: `~/.agentcontrol/daemon.token` is generated at first
-start (mode `0600`). Loopback alone is not per-user isolation — another
-local account, or anything reaching your forwarded port, would
-otherwise get full RPC access. SSH connections read the token over the
-already-authenticated SSH channel; nothing to configure there.
-Direct-TCP profiles carry the token in the connection form.
+start (mode `0600`) and reused across restarts. If the file is missing,
+empty or malformed the daemon regenerates it atomically (`.part` +
+rename, never a half-written token); a stray `daemon.token.part` is
+ignored. Loopback alone is not per-user isolation — another local
+account, or anything reaching your forwarded port, would otherwise get
+full RPC access. SSH connections read the token over the
+already-authenticated SSH channel and retry once with a fresh read when
+the daemon refuses it; nothing to configure there. Direct-TCP profiles
+carry the token in the connection form.
 Rotate it any time with `acctl token rotate` (open TCP connections are
 dropped; clients re-read the file or field on reconnect).
 

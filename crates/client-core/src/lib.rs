@@ -1514,6 +1514,13 @@ impl Client {
                     AuthOutcome::Authed | AuthOutcome::PreAuth => break,
                     AuthOutcome::Refused if attempt == 0 => {
                         invalidate_token(t);
+                        log(
+                            Level::Warn,
+                            format!(
+                                "transport {} auth refused — refreshing daemon.token",
+                                transport_desc(t)
+                            ),
+                        );
                         let (r2, w2, g2) = open_transport(t).await?;
                         br = BufReader::new(r2);
                         w = w2;

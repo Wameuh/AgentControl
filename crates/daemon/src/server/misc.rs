@@ -148,6 +148,10 @@ impl Daemon {
         let t = tokio::task::spawn_blocking(move || crate::regen_token(&root, "daemon.token"))
             .await
             .context("token rotate task")??;
+        // Distinct du boot : une rotation invalide les jetons déjà
+        // présentés — les « auth required » clients qui suivent sont
+        // corrélables à cette ligne dans le journal.
+        tracing::warn!("daemon.token rotated — open TCP conns must re-auth");
         let tx = self.tcp_token.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;

@@ -1337,27 +1337,46 @@ impl Daemon {
                     let raw: Value = match serde_json::from_slice(&line) {
                         Ok(v) => v,
                         Err(_) => {
+                            warn!("conn {peer}: malformed auth line — closing");
                             Self::send_resp(&outbox, &Response::err(0, proto::ERR_AUTH_REQUIRED))?;
                             Self::drain_outbox(&outbox).await;
                             return Ok(());
                         }
                     };
                     let id = raw.get("id").and_then(Value::as_u64).unwrap_or(0);
+                    let is_auth_req = raw.get("req").and_then(Value::as_str) == Some("auth");
                     // Échec uniforme : même réponse pour mauvais jeton,
                     // mauvaise requête ou schéma invalide — aucun oracle
-                    // ne distingue un jeton « presque bon ».
-                    let good = serde_json::from_value::<Request>(raw)
-                        .ok()
-                        .is_some_and(|r| match r.req {
-                            ReqKind::Auth { token } => {
-                                ct_eq(token.as_bytes(), gate.token.borrow_and_update().as_bytes())
+                    // ne distingue un jeton « presque bon ». Le journal,
+                    // lui, garde la cause pour le diagnostic post-incident.
+                    let good = match serde_json::from_value::<Request>(raw) {
+                        Ok(Request {
+                            req: ReqKind::Auth { token },
+                            ..
+                        }) => {
+                            let ok =
+                                ct_eq(token.as_bytes(), gate.token.borrow_and_update().as_bytes());
+                            if !ok {
+                                warn!("conn {peer}: token mismatch — closing");
                             }
-                            _ => false,
-                        });
+                            ok
+                        }
+                        Ok(_) => {
+                            info!("conn {peer}: non-auth request — closing");
+                            false
+                        }
+                        Err(_) if is_auth_req => {
+                            warn!("conn {peer}: malformed auth line — closing");
+                            false
+                        }
+                        Err(_) => {
+                            info!("conn {peer}: non-auth request — closing");
+                            false
+                        }
+                    };
                     if !good {
                         Self::send_resp(&outbox, &Response::err(id, proto::ERR_AUTH_REQUIRED))?;
                         Self::drain_outbox(&outbox).await;
-                        info!("conn {peer}: auth required — closing");
                         return Ok(());
                     }
                     Self::send_resp(&outbox, &Response::ok(id, json!({"auth": "ok"})))?;
