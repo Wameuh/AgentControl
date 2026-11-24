@@ -151,6 +151,8 @@ pub fn run() {
             cli_conn: cli_conn_arg(),
             next_gen: std::sync::atomic::AtomicU64::new(0),
             list_page: Mutex::new(std::collections::HashMap::new()),
+            pr_page: Mutex::new(std::collections::HashMap::new()),
+            pr_cache: Mutex::new(std::collections::HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect::connect,

@@ -298,6 +298,167 @@ async fn serve_conn_req_inconnue_reste_ouverte() {
         .unwrap();
 }
 
+type TestRd = BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>;
+type TestWr = tokio::io::WriteHalf<tokio::io::DuplexStream>;
+
+/// Une requête NDJSON → sa ligne de réponse (len brute + Value).
+async fn rpc_call(
+    rd: &mut TestRd,
+    wr: &mut TestWr,
+    serve: &mut tokio::task::JoinHandle<anyhow::Result<()>>,
+    id: u64,
+    body: &str,
+) -> (usize, Value) {
+    wr.write_all(format!("{{\"id\":{id},{body}}}\n").as_bytes())
+        .await
+        .unwrap();
+    wr.flush().await.unwrap();
+    // Les pushes partagent le même flux : on saute toute ligne qui
+    // n'est pas la réponse de CET id.
+    loop {
+        let mut line = String::new();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(15), rd.read_line(&mut line))
+            .await
+            .expect("timeout")
+            .unwrap();
+        if n == 0 {
+            let res = (&mut *serve).await;
+            panic!("id={id}: EOF — serve result: {res:?}");
+        }
+        let len = line.len();
+        let v: Value = serde_json::from_str(&line)
+            .unwrap_or_else(|e| panic!("id={id} ligne {len} o non-JSON ({e}): {:.200}", line));
+        if v.get("id").and_then(Value::as_u64) == Some(id) {
+            return (len, v);
+        }
+        eprintln!("id={id}: ligne ignorée ({} o): {:.160}", len, line);
+    }
+}
+
+/// `pr_list_page` : pagination bornée en octets + `if_version` →
+/// `unchanged` (item #367 — le pr_list intégral dépassait 1,9 Mo).
+#[tokio::test]
+#[allow(unused_assignments)] // le compteur `next_id` déborde après le dernier appel!
+async fn pr_list_page_pagination_and_version() {
+    let d = daemon_test("prpage").await;
+    // 25 entrées à notes volumineuses (~20 Kio) : la borne 128 Kio
+    // page ~6 entrées même avec limit=50 — chaque ligne NDJSON reste
+    // très en dessous du seuil « giant line ».
+    for i in 0..25u64 {
+        d.prs
+            .track(crate::prs::TrackIn {
+                session: Some("s-x".into()),
+                repo: format!("o/r{i}"),
+                pr: i + 1,
+                forge: String::new(),
+                host: String::new(),
+                change_id: None,
+                url: None,
+                branch: None,
+                title: None,
+                status: None,
+                note: Some("n".repeat(20 * 1024)),
+                sync_fails: None,
+                review: None,
+                ci: None,
+            })
+            .unwrap();
+    }
+    let (client, server) = tokio::io::duplex(4 * 1024 * 1024);
+    let mut serve = {
+        let d = Arc::clone(&d);
+        tokio::spawn(async move { d.serve_conn(server, "unix#prpage", None).await })
+    };
+    let (rd, mut wr) = tokio::io::split(client);
+    let mut rd = BufReader::new(rd);
+    let mut next_id = 1u64;
+    macro_rules! call {
+        ($body:expr) => {{
+            let id = next_id;
+            next_id += 1;
+            rpc_call(&mut rd, &mut wr, &mut serve, id, $body).await
+        }};
+    }
+    // Page 1 : ~6 entrées (borne octets), total=25, version posée.
+    let (len1, p1) = call!(r#""req":"pr_list_page","limit":50,"offset":0"#);
+    assert_eq!(p1["id"], 1);
+    assert_eq!(p1["ok"], true, "{p1}");
+    let prs1 = p1["result"]["prs"].as_array().unwrap();
+    assert!(!prs1.is_empty() && prs1.len() < 25, "{}", prs1.len());
+    assert_eq!(p1["result"]["total"], 25);
+    assert!(p1["result"]["version"].as_str().is_some());
+    // La ligne reste bornée (~128 Kio + enveloppe) — très sous giant.
+    assert!(len1 < 160 * 1024, "page1 = {len1} o");
+    let version = p1["result"]["version"].as_str().unwrap().to_string();
+    let off = p1["result"]["next_offset"].as_u64().unwrap();
+    assert_eq!(off as usize, prs1.len());
+    // if_version identique → unchanged, aucune entrée sérialisée.
+    let (_, p2) = call!(&format!(
+        r#""req":"pr_list_page","limit":50,"offset":0,"if_version":"{version}""#
+    ));
+    assert_eq!(p2["result"]["unchanged"], true, "{p2}");
+    assert!(p2["result"].get("prs").is_none(), "{p2}");
+    // Pages suivantes : on collecte tout le registre sans doublon.
+    let mut seen: Vec<u64> = prs1.iter().map(|e| e["pr"].as_u64().unwrap()).collect();
+    let mut offset = off;
+    for _ in 0..10 {
+        let (_, pg) = call!(&format!(
+            r#""req":"pr_list_page","limit":50,"offset":{offset}"#
+        ));
+        let arr = pg["result"]["prs"].as_array().unwrap();
+        for e in arr {
+            seen.push(e["pr"].as_u64().unwrap());
+        }
+        match pg["result"]["next_offset"].as_u64() {
+            Some(n) if n > offset => offset = n,
+            _ => break,
+        }
+    }
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen, (1..=25).collect::<Vec<u64>>(), "{seen:?}");
+    // Mutation du registre → version change → if_version ne matche plus.
+    d.prs
+        .track(crate::prs::TrackIn {
+            session: Some("s-x".into()),
+            repo: "o/new".into(),
+            pr: 99,
+            forge: String::new(),
+            host: String::new(),
+            change_id: None,
+            url: None,
+            branch: None,
+            title: None,
+            status: None,
+            note: None,
+            sync_fails: None,
+            review: None,
+            ci: None,
+        })
+        .unwrap();
+    let (_, p3) = call!(&format!(
+        r#""req":"pr_list_page","limit":50,"offset":0,"if_version":"{version}""#
+    ));
+    assert_ne!(
+        p3["result"].get("unchanged"),
+        Some(&Value::Bool(true)),
+        "{p3}"
+    );
+    assert_eq!(p3["result"]["total"], 26);
+    // Filtre session + repli legacy pr_list (tableau brut, inchangé).
+    let (_, p4) = call!(r#""req":"pr_list_page","limit":50,"offset":0,"session":"nope""#);
+    assert_eq!(p4["result"]["total"], 0);
+    let (_, p5) = call!(r#""req":"pr_list""#);
+    assert_eq!(p5["result"].as_array().unwrap().len(), 26);
+    drop(wr);
+    drop(rd);
+    tokio::time::timeout(std::time::Duration::from_secs(5), serve)
+        .await
+        .expect("serve_conn stuck")
+        .expect("serve_conn task")
+        .unwrap();
+}
+
 /// Une ligne non-JSON (autre qu'HTTP) : l'erreur parse part d'abord,
 /// puis la connexion se ferme.
 #[tokio::test]

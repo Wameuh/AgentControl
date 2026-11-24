@@ -1116,6 +1116,15 @@ impl Daemon {
             ReqKind::DeleteSession { session } => self.h_delete_session(session).await,
             ReqKind::KillSession { session } => self.h_kill_session(session).await,
             ReqKind::PrList { session } => self.h_pr_list(session).await,
+            ReqKind::PrListPage {
+                session,
+                limit,
+                offset,
+                if_version,
+            } => {
+                self.h_pr_list_page(session, limit, offset, if_version)
+                    .await
+            }
             ReqKind::PrTrack {
                 session,
                 repo,
