@@ -235,7 +235,20 @@ async function fillPending(body: HTMLElement, s: SessionMeta, row: HTMLElement) 
     }
     return;
   }
-  // question_request : message + champ + « Répondre ».
+  // question_request : message + champ + « Répondre » — sauf formulaire
+  // structuré (schema.properties), répondu dans la session (« Ouvrir »).
+  const formSchema =
+    req.schema && typeof req.schema === "object"
+      ? (req.schema as { properties?: Record<string, unknown> }).properties
+      : undefined;
+  if (formSchema && Object.keys(formSchema).length > 0) {
+    body.innerHTML =
+      `<div class="mh-card-t">${esc(req.title ?? "")}</div>` +
+      `<div class="mh-card-acts"><button class="btn mh-open">${esc(t("home_open"))}</button></div>`;
+    body.querySelector<HTMLButtonElement>(".mh-open")!.onclick =
+      () => row.click();
+    return;
+  }
   body.innerHTML =
     `<div class="mh-card-t">${esc(req.title ?? "")}</div>` +
     `<div class="mh-card-acts mh-q-row">` +

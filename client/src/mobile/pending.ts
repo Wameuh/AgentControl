@@ -16,6 +16,9 @@ export interface PendingReq {
   kind?: string;
   detail?: string;
   options: { option_id: string; name: string; kind: string }[];
+  /** Schéma de formulaire d'une question (elicitation) — sa présence
+   *  distingue le formulaire structuré de la saisie libre. */
+  schema?: unknown;
 }
 
 /** Demandes en attente d'une session, même non ouverte : ids via
@@ -45,6 +48,7 @@ export async function findPending(s: SessionMeta): Promise<PendingReq[]> {
       kind: ev.kind as string | undefined,
       detail: ev.detail as string | undefined,
       options: (ev.options as PendingReq["options"]) ?? [],
+      schema: ev.schema,
     });
   }
   return out;
