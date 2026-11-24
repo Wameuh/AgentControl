@@ -251,3 +251,4 @@ sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart
 459: Hardened the question-form render pipeline — a single failing live event no longer freezes the rest of the batch, malformed JSON schemas (null/true entries in oneOf/anyOf) render safely, and object answers show as readable JSON instead of "[object Object]".
 460: Selection markers are now crystal gems — round for single choice, square for multiple, slate when unselected and tinted with the theme accent when selected (question forms and appearance settings).
 462: Sidebar group/connection folding is now instant — toggling a group no longer fires list_sessions/pr_list RPCs or rebuilds the whole session list; only the folded subtree's display is toggled.
+463: Ctrl+C / Cmd+C / Ctrl+Insert now copy the selected text outside editable fields (WebKitGTK ran no native copy on non-editable selections), and Ctrl+A selects the whole conversation thread.
