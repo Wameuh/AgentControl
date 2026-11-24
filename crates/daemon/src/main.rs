@@ -141,6 +141,19 @@ fn parse_cli() -> Result<Cli> {
     Ok(cli)
 }
 
+/// Vrai si `addr` se résout et que TOUTES les SocketAddr sont loopback
+/// (127.0.0.0/8 ou ::1) : un enregistrement mixte loopback+externe
+/// exposerait le port. Échec de résolution → faux.
+async fn addr_is_loopback(addr: &str) -> bool {
+    match tokio::net::lookup_host(addr).await {
+        Ok(it) => {
+            let addrs: Vec<_> = it.collect();
+            !addrs.is_empty() && addrs.iter().all(|sa| sa.ip().is_loopback())
+        }
+        Err(_) => false,
+    }
+}
+
 /// Les listeners du démon ne doivent JAMAIS exposer le démon sur le
 /// réseau : loopback strict, l'accès distant passe par le tunnel SSH
 /// (`ssh -L`). `name` = la clé de config fautive, `escape` = la clé
@@ -151,15 +164,8 @@ fn parse_cli() -> Result<Cli> {
 /// SocketAddr résolues sont loopback (127.0.0.0/8 ou ::1) : un
 /// enregistrement mixte loopback+externe exposerait le port.
 async fn check_loopback(name: &str, addr: &str, escape: Option<&str>) -> Result<()> {
-    let loopback = match tokio::net::lookup_host(addr).await {
-        Ok(it) => {
-            let addrs: Vec<_> = it.collect();
-            !addrs.is_empty() && addrs.iter().all(|sa| sa.ip().is_loopback())
-        }
-        Err(_) => false,
-    };
     anyhow::ensure!(
-        loopback,
+        addr_is_loopback(addr).await,
         "{name} « {addr} » is not loopback — use 127.0.0.1 / ::1 \
          (remote access goes through `ssh -L`, never network exposure){}",
         escape
@@ -167,6 +173,54 @@ async fn check_loopback(name: &str, addr: &str, escape: Option<&str>) -> Result<
             .unwrap_or_default()
     );
     Ok(())
+}
+
+/// Environnement conteneur ? Marqueurs standards : `/.dockerenv`
+/// (Docker), `/run/.containerenv` (podman/systemd-nspawn) et le cgroup
+/// de PID 1 (docker, kubepods, containerd, lxc, podman/libpod, cri-o…).
+/// Dans un conteneur, binder `0.0.0.0` est le SEUL moyen d'être joint
+/// (docker-proxy ne DNAT que vers l'IP eth0, pas la loopback interne)
+/// et l'exposition réelle est bornée par le port publishing de
+/// l'orchestrateur — le garde loopback y est donc rétrogradé en warn.
+/// `AGENTCONTROL_CONTAINER=1|0` force le verdict (tests, conteneurs
+/// sans marqueur — nested, userns, runtime exotique).
+fn in_container() -> bool {
+    if let Ok(v) = std::env::var("AGENTCONTROL_CONTAINER") {
+        return matches!(v.trim(), "1" | "true" | "yes" | "on");
+    }
+    container_markers(
+        std::path::Path::new("/.dockerenv"),
+        std::path::Path::new("/run/.containerenv"),
+        std::path::Path::new("/proc/1/cgroup"),
+    )
+}
+
+/// Verdict conteneur sur des chemins injectés — testable hors Docker.
+fn container_markers(
+    dockerenv: &std::path::Path,
+    containerenv: &std::path::Path,
+    cgroup: &std::path::Path,
+) -> bool {
+    dockerenv.is_file()
+        || containerenv.is_file()
+        || std::fs::read_to_string(cgroup)
+            .map(|s| {
+                let s = s.to_ascii_lowercase();
+                [
+                    "docker",
+                    "kubepods",
+                    "containerd",
+                    "libpod",
+                    "podman",
+                    "lxc",
+                    "cri-o",
+                    "crio",
+                    "garden",
+                ]
+                .iter()
+                .any(|k| s.contains(k))
+            })
+            .unwrap_or(false)
 }
 
 /// Jeton 64 hex — 32 octets /dev/urandom. Source partagée par
@@ -446,17 +500,32 @@ async fn serve(root: &std::path::Path) -> Result<()> {
 
     // TCP loopback (pour tunnel SSH `ssh -L`) — même garde que
     // bind_http : un bind_tcp hors loopback exposerait le démon sur le
-    // réseau. `allow_non_loopback_tcp` est l'échappatoire explicite
-    // (conteneur, réseau privé isolé), tracée par un warn à chaque
+    // réseau. Deux échappatoires : `allow_non_loopback_tcp` explicite,
+    // et la détection conteneur — en conteneur `0.0.0.0` est le seul
+    // bind joignable (docker-proxy ne DNAT que vers l'IP eth0) et
+    // l'exposition réelle est bornée par le port publishing (incident
+    // v0.11.0-rc.2 : le garde transformait le devcontainer en
+    // crash-loop). Dans les deux cas un warn est journalisé à chaque
     // démarrage — l'auth daemon.token reste exigée sur chaque connexion.
-    if cfg.allow_non_loopback_tcp {
-        tracing::warn!(
-            "allow_non_loopback_tcp — bind_tcp « {} » is exposed outside \
-             loopback; every TCP connection still requires daemon.token",
-            cfg.bind_tcp
-        );
-    } else {
-        check_loopback("bind_tcp", &cfg.bind_tcp, Some("allow_non_loopback_tcp")).await?;
+    // Hors conteneur le fatal est conservé.
+    if !addr_is_loopback(&cfg.bind_tcp).await {
+        if cfg.allow_non_loopback_tcp {
+            tracing::warn!(
+                "allow_non_loopback_tcp — bind_tcp « {} » is exposed outside \
+                 loopback; every TCP connection still requires daemon.token",
+                cfg.bind_tcp
+            );
+        } else if in_container() {
+            tracing::warn!(
+                "bind_tcp « {} » is not loopback — accepted: container \
+                 environment detected (exposure bounded by the runtime's \
+                 port publishing; every TCP connection still requires \
+                 daemon.token)",
+                cfg.bind_tcp
+            );
+        } else {
+            check_loopback("bind_tcp", &cfg.bind_tcp, Some("allow_non_loopback_tcp")).await?;
+        }
     }
     let tcp_listener = tokio::net::TcpListener::bind(&cfg.bind_tcp)
         .await
@@ -465,6 +534,11 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // Listener web (opt-in) : SPA + WS/RPC/media loopback, token dans
     // web.token. Une panne/erreur de ce listener ne doit pas abattre le
     // démon → tâche séparée, hors du select de shutdown.
+    // Garde loopback SANS échappatoire conteneur, contrairement à
+    // bind_tcp : la web UI expose un terminal et le filesystem —
+    // surface bien plus large que la RPC authentifiée. En conteneur,
+    // la garder sur 127.0.0.1 et publier le port reste la bonne
+    // topologie (le client y accède via tunnel SSH comme ailleurs).
     if let Some(addr) = &bind_http {
         check_loopback("bind_http", addr, None).await?;
         let token = gen_web_token(root)?;
@@ -678,5 +752,34 @@ mod tests {
                 "{a} should fail"
             );
         }
+    }
+
+    // Détection conteneur sur chemins injectés : /.dockerenv ou
+    // /run/.containerenv suffisent ; sinon on grep le cgroup de PID 1
+    // (docker, kubepods, containerd, lxc, podman…). Chemins absents →
+    // faux, jamais de panique.
+    #[test]
+    fn container_markers_detects() {
+        let dir = std::env::temp_dir().join(format!("ac-cmark-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let none = dir.join("absent");
+        let docker = dir.join(".dockerenv");
+        let containerenv = dir.join("containerenv");
+        let cgroup = dir.join("cgroup");
+        std::fs::write(&docker, "").unwrap();
+        std::fs::write(&cgroup, "12:memory:/docker/abc123\n").unwrap();
+
+        assert!(container_markers(&docker, &none, &none));
+        assert!(!container_markers(&none, &containerenv, &none));
+        std::fs::write(&containerenv, "engine=podman\n").unwrap();
+        assert!(container_markers(&none, &containerenv, &none));
+        assert!(container_markers(&none, &none, &cgroup));
+        // cgroup v2 sans marqueur → pas conteneur.
+        std::fs::write(&cgroup, "0::/user.slice/user-1000.slice\n").unwrap();
+        assert!(!container_markers(&none, &none, &cgroup));
+        assert!(!container_markers(&none, &none, &none));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
