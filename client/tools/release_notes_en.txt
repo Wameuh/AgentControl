@@ -240,3 +240,4 @@ sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart
 447: [skip] internal release-bump tooling fix, no user-facing change
 449: [skip] internal CI-wait tooling, no user-facing change
 448: The memory dialog no longer counts threads as processes — sysinfo listed /proc/<pid>/task/<tid> entries as children of their leader, each carrying the whole process RSS (identical per-thread values and an inflated "other processes" total); process groups now also report a Pss-based total so shared pages are not double-counted.
+450: [skip] version reset to 0.11.0 (scan bound), no user-facing change

@@ -623,6 +623,20 @@ self-maintained bound in all cases:
 - Releases number from the **last semver tag**, not from
   `package.json` — the file version can drift between releases,
   it's realigned at the release bump.
+- ⚠️ **`release-bump` runs `main`'s script**, not the head's
+  (`git show origin/main:client/tools/bump_version.py`). Until a
+  release ships `--bound`/`--detect-level` to `main`, the job falls
+  back to the inline rule of `version.yml`: bound = newest
+  `chore: bump version` that is tagged or carries `(reset`, and the
+  keyword grep runs on **full commit bodies**. A body quoting the
+  major keyword with its parentheses re-bumps the cycle to the next
+  major (happened three times: #435, #446, then #447's own body).
+  Keep parenthesized keywords out of every commit body until then.
+- ⚠️ **A `(reset` commit is a scan bound**: keywords merged before it
+  leave the range. If the cycle already carried a protocol break,
+  restate it after the reset with a commit whose **subject** carries
+  the sync keyword — otherwise the release ships as a patch and
+  older clients are not told they must update (#410 → 0.11.0, #450).
 
 Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
 
