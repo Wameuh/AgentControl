@@ -27,6 +27,11 @@ interface Geometry {
   faces: { points: Pt[]; tone: number }[];
 }
 
+/** Silhouette de la gemme : « gem » = polygone irrégulier (défaut,
+ *  identité app) ; « round » = pastille quasi circulaire (sélection
+ *  unique) ; « square » = quadrilatère (sélection multiple). */
+export type GemShape = "gem" | "round" | "square";
+
 const cache = new Map<string, Geometry>();
 
 function mulberry(key: string): () => number {
@@ -40,16 +45,43 @@ function mulberry(key: string): () => number {
   };
 }
 
-function geometry(key: string): Geometry {
-  const hit = cache.get(key);
-  if (hit) return hit;
-  const random = mulberry(key);
+/** Contour de la gemme selon sa forme. `random` est le générateur
+ *  mulberry de la geometry — chaque forme a son propre flux (la graine
+ *  inclut la forme), donc gem/round/square ne partagent pas de
+ *  silhouette. */
+function shapeBoundary(shape: GemShape, random: () => number): Pt[] {
+  const boundary: Pt[] = [];
+  if (shape === "round") {
+    // Pastille : nombreux sommets quasi équidistants, rayon quasi
+    // constant — le jitter reste faible pour garder une silhouette
+    // circulaire (pas un blob), les facettes font le « cristal ».
+    const count = 18 + Math.floor(random() * 6);
+    const rotation = random() * Math.PI * 2;
+    const r = 30;
+    for (let i = 0; i < count; i++) {
+      const angle = (i / count) * Math.PI * 2 + rotation + (random() - 0.5) * 0.1;
+      const radius = r * (0.94 + random() * 0.1);
+      boundary.push([Math.cos(angle) * radius, Math.sin(angle) * radius - 8]);
+    }
+    return boundary;
+  }
+  if (shape === "square") {
+    // Carré : 4 sommets près des diagonales (carré aux côtés
+    // horizontaux), rayon et angle jitterés — silhouette carrée.
+    // Rayon ~42 : les sommets sont en diagonale, le demi-côté vaut
+    // rayon/√2 ≈ 30 — même emprise que la pastille ronde.
+    for (let k = 0; k < 4; k++) {
+      const angle = Math.PI / 4 + (k * Math.PI) / 2 + (random() - 0.5) * 0.14;
+      const radius = 42 * (0.9 + random() * 0.16);
+      boundary.push([Math.cos(angle) * radius, Math.sin(angle) * radius - 8]);
+    }
+    return boundary;
+  }
   const count = 9 + Math.floor(random() * 4);
   const rotation = random() * Math.PI * 2;
   const rx = 32 + random() * 15;
   const ry = 27 + random() * 13;
   const lean = (random() - 0.5) * 16;
-  const boundary: Pt[] = [];
   for (let i = 0; i < count; i++) {
     const angle = ((i + (random() - 0.5) * 0.3) / count) * Math.PI * 2 + rotation;
     const radius = 0.72 + random() * 0.38;
@@ -58,6 +90,18 @@ function geometry(key: string): Geometry {
       Math.sin(angle) * ry * radius - 8,
     ]);
   }
+  return boundary;
+}
+
+function geometry(key: string, shape: GemShape = "gem"): Geometry {
+  // « gem » garde la graine historique (« agentcontrol ») : la silhouette
+  // des gemmes existantes ne change pas. Les autres formes ont leur
+  // propre clé (graine + cache) pour une silhouette stable par forme.
+  const ck = shape === "gem" ? key : `${key}:${shape}`;
+  const hit = cache.get(ck);
+  if (hit) return hit;
+  const random = mulberry(ck);
+  const boundary = shapeBoundary(shape, random);
   const points: Pt[] = [...boundary];
   // Réseau intérieur jitteré → beaucoup de jonctions de facettes.
   for (let y = 0; y < 3; y++) {
@@ -97,15 +141,15 @@ function geometry(key: string): Geometry {
       .filter((t) => t.every((i) => i < size))
       .map((t) => ({ points: t.map((i) => points[i]), tone: Math.floor(random() * 8) })),
   };
-  cache.set(key, geo);
+  cache.set(ck, geo);
   return geo;
 }
 
 let uid = 0;
 
 /** SVG complet d'une gemme. `role` ∈ agent|human|neutral|slate|inference|wait. */
-export function gemSVG(role: string): string {
-  const g = geometry("agentcontrol");
+export function gemSVG(role: string, shape: GemShape = "gem"): string {
+  const g = geometry("agentcontrol", shape);
   const pal = PALETTES[role] ?? PALETTES.neutral;
   const base = BASES[role] ?? BASES.slate;
   const xs = g.boundary.map((p) => p[0]);
@@ -125,4 +169,22 @@ export function gemSVG(role: string): string {
     `<polygon points="${loc(g.boundary)}"/></clipPath></defs>` +
     `<g clip-path="url(#${id})"><polygon points="${loc(g.boundary)}" fill="${base}"/>${faces}</g></svg>`
   );
+}
+
+/** Palette gemme de chaque accent d'interface (réglages « Couleur
+ *  d'accent ») : la teinte sélectionnée doit se lire comme l'accent
+ *  du thème — « violet » reprend la palette « agent » (améthyste,
+ *  comme gem_icon.py), « grey » la « slate », etc. */
+const ACCENT_ROLE: Record<string, string> = {
+  sage: "neutral",
+  gold: "human",
+  grey: "slate",
+  violet: "agent",
+  red: "inference",
+};
+
+/** Gemme teintée de l'accent `name` (sage|gold|grey|violet|red) —
+ *  repli « neutral » pour une valeur inconnue. */
+export function gemAccentSVG(name: string, shape: GemShape = "gem"): string {
+  return gemSVG(ACCENT_ROLE[name] ?? "neutral", shape);
 }

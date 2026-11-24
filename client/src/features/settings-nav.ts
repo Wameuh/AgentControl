@@ -10,7 +10,8 @@
 // ---------------------------------------------------------------------------
 
 import { $, esc } from "../core/dom";
-import { isAndroid } from "../core/chrome";
+import { currentAccent, isAndroid } from "../core/chrome";
+import { gemAccentSVG, gemSVG } from "../crystal";
 import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
 
@@ -212,6 +213,14 @@ export class SettingsNav {
   }
 
   private bindVisualControls() {
+    // Pastilles d'accent : la gemme ronde est teintée de la couleur
+    // d'accent PROPOSÉE par chaque pastille (aperçu de l'accent, pas
+    // indicateur de sélection — celui-ci reste aria-checked + anneau).
+    for (const el of document.querySelectorAll<HTMLElement>(
+      "#settings-view .s-swatch [data-accent]",
+    )) {
+      el.innerHTML = gemAccentSVG(el.dataset.accent!, "round");
+    }
     for (const g of this.groups()) {
       const sel = $(g.dataset.for!) as HTMLSelectElement;
       const pick = (v: string) => {
@@ -248,6 +257,14 @@ export class SettingsNav {
         const on = b.dataset.v === v;
         b.setAttribute("aria-checked", on ? "true" : "false");
         b.tabIndex = on ? 0 : -1;
+        // Tuile de thème : la gemme remplace l'ancien check — ardoise
+        // au repos, teintée de l'accent du thème une fois sélectionnée.
+        const gem = b.querySelector<HTMLElement>(".s-tile-gem");
+        if (gem) {
+          gem.innerHTML = on
+            ? gemAccentSVG(currentAccent(), "round")
+            : gemSVG("slate", "round");
+        }
       }
     }
   }

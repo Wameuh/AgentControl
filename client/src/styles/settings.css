@@ -208,8 +208,11 @@ body:not(.android) .s-row.chk > input[type="checkbox"]:focus-visible, body:not(.
 .pv-light i:nth-child(2), .pv-light i:nth-child(3) { background: rgba(43, 42, 36, .14); }
 .pv-light b { background: #8a6f3e; }
 .s-tile-nm { display: flex; justify-content: space-between; align-items: center; padding: 0 3px 1px; font-size: 12.5px; color: var(--ink); }
-.s-tile-nm .ic { width: 14px; height: 14px; color: var(--accent); visibility: hidden; display: block; }
-.s-tile[aria-checked="true"] .s-tile-nm .ic { visibility: visible; }
+/* Gemme indicateur de sélection (remplace l'ancien check) : ardoise
+   au repos, teintée accent quand la tuile est cochée — synchronisée
+   par settings-nav.syncVisual. */
+.s-tile-gem { width: 16px; height: 16px; flex: none; display: inline-flex; border-radius: 50%; }
+.s-tile-gem svg { width: 100%; height: 100%; display: block; }
 
 /* ---- Pastilles d'accent ---- */
 .s-swatches { display: flex; gap: 16px; flex-wrap: wrap; }
@@ -219,17 +222,15 @@ body:not(.android) .s-row.chk > input[type="checkbox"]:focus-visible, body:not(.
   font-size: 12px; color: var(--muted);
 }
 .s-swatch:hover:not(:disabled) { background: transparent; color: var(--ink); }
-.s-swatch i {
-  width: 28px; height: 28px; border-radius: 50%; display: block;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .18);
-}
+/* Gemme ronde teintée de l'accent proposé (settings-nav) — la couleur
+   est le contenu de la pastille, l'anneau marque la sélection. */
+.s-swatch .s-gem { width: 28px; height: 28px; display: block; }
+.s-swatch .s-gem svg { width: 100%; height: 100%; display: block; }
 .s-swatch[aria-checked="true"] { color: var(--ink); }
-.s-swatch[aria-checked="true"] i { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); }
-.sw-sage { background: #cdb68c; } .sw-gold { background: #e0c996; } .sw-grey { background: #c6cdd5; }
-.sw-violet { background: #c4a9dc; } .sw-red { background: #f2a79a; }
-:root.light .sw-sage { background: #8a6f3e; } :root.light .sw-gold { background: #8a6a1a; }
-:root.light .sw-grey { background: #5d6b78; } :root.light .sw-violet { background: #6b4d8c; }
-:root.light .sw-red { background: #a03d33; }
+.s-swatch[aria-checked="true"] .s-gem {
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+}
 
 /* ---- Contrôle segmenté (intensité, canal de mise à jour) ---- */
 .s-seg {
