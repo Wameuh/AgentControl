@@ -606,6 +606,68 @@ export class Sidebar {
   /** Signature du dernier rendu de renderList() — voir renderSig(). */
   private listSig: string | null = null;
 
+  /** Clés `ac-grp-*` lues lors du dernier rendu — renderSig() n'a pas
+   *  besoin de scanner tout localStorage à chaque appel (#369) : seules
+   *  ces clés gouvernent le HTML produit (les autres sont des restes
+   *  de groupes dissous, sans effet sur le DOM). */
+  private foldKeys = new Set<string>();
+
+  /** Par clé de pliage : éléments dont la visibilité dépend d'elle.
+   *  `chain` = TOUTES les clés ac-grp-* gouvernant l'élément (conn +
+   *  groupes ancêtres + groupe porteur pour les sessions) — l'état
+   *  courant n'y figure pas : un toggle recalcule le display depuis
+   *  localStorage, donc un groupe replié le reste même si un ancêtre
+   *  se déplie. Rempli pendant renderList(), vidé à chaque rebuild. */
+  private foldSubs = new Map<string, { el: HTMLElement; chain: string[] }[]>();
+
+  /** display:none si une clé de pliage gouvernante est « 1 » — jamais
+   *  sous filtre (l'arbre y est forcé déplié). */
+  private foldHidden(chain: string[]): boolean {
+    return !this.filter && chain.some((k) => localStorage.getItem(k) === "1");
+  }
+
+  /** Enregistre un élément sous chaque clé de sa chaîne de pliage —
+   *  appelé pour tout nœud rendu (headers de groupe ET sessions). */
+  private foldReg(chain: string[], el: HTMLElement) {
+    for (const k of chain) this.foldSubs.get(k)?.push({ el, chain });
+  }
+
+  /** Toggle de pliage ciblé (#369) : le pliage est un état purement
+   *  local — ni RPC ni rebuild. On inverse la clé, on bascule la
+   *  classe/chevron du header et on recalcule le display des éléments
+   *  indexés (chaque élément revalide sa chaîne entière : un groupe
+   *  replié reste caché quand un ancêtre se déplie). Repli sur
+   *  renderList() si la liste a changé depuis le dernier rendu (sig≠)
+   *  ou qu'un rebuild est déjà différé (édition de titre / drag). */
+  private toggleFold(key: string, head: HTMLElement) {
+    const flipped = localStorage.getItem(key) !== "1";
+    if (this.editCount > 0 || this.dragging > 0 || this.renderSig() !== this.listSig) {
+      localStorage.setItem(key, flipped ? "1" : "0");
+      this.renderList();
+      return;
+    }
+    localStorage.setItem(key, flipped ? "1" : "0");
+    head.classList.toggle("closed", flipped);
+    const arrow = head.querySelector(".grp-arrow");
+    if (arrow) arrow.innerHTML = icon(flipped ? "chev-right" : "chev-down");
+    const cache = new Map<string, boolean>();
+    const isFolded = (k: string) => {
+      let v = cache.get(k);
+      if (v === undefined) {
+        v = localStorage.getItem(k) === "1";
+        cache.set(k, v);
+      }
+      return v;
+    };
+    for (const it of this.foldSubs.get(key) ?? []) {
+      it.el.style.display = it.chain.some(isFolded) ? "none" : "";
+    }
+    // Les clés ac-grp-* font partie de renderSig() : resynchroniser la
+    // signature pour qu'un refresh() sans autre changement ne déclenche
+    // pas un rebuild complet pour ce seul toggle.
+    this.listSig = this.renderSig();
+  }
+
   /** Tous les intrants dont dépend le HTML produit par renderList(),
    *  sérialisés : sessions (champs réellement affichés — ni cwd ni
    *  timestamps), état/nom des conns, groupes stockés, badges PR,
@@ -638,10 +700,13 @@ export class Sidebar {
         p.title ?? "", p.status ?? "", p.url ?? "",
       ]),
     ]);
+    // Seules les clés vues au dernier rendu comptent (foldKeys) — voir
+    // le champ : un scan de tout localStorage à chaque appel était le
+    // 3e coût du toggle de groupe (#369).
     const fold: Record<string, string> = {};
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith("ac-grp-")) fold[k] = localStorage.getItem(k) ?? "";
+    for (const k of this.foldKeys) {
+      const v = localStorage.getItem(k);
+      if (v !== null) fold[k] = v;
     }
     return JSON.stringify([
       this.filter, getLang(), app.current?.id ?? "", sess, conns,
@@ -670,6 +735,10 @@ export class Sidebar {
     this.rebuildPending = false;
     if (sig === this.listSig) return; // DOM déjà à jour — rien à refaire
     this.listSig = sig;
+    // Index de pliage ciblé (#369) : reconstruit avec le DOM — les
+    // handlers de toggle et renderSig() siguiente lisent cet état.
+    this.foldKeys = new Set();
+    this.foldSubs = new Map();
     const el = $("session-list");
     el.innerHTML = "";
     const f = this.filter;
@@ -749,7 +818,13 @@ export class Sidebar {
       shown += plain.length + treeRows;
 
       const key = `ac-grp-${conn}`;
+      this.foldKeys.add(key);
+      if (!this.foldSubs.has(key)) this.foldSubs.set(key, []);
       const connClosed = !f && localStorage.getItem(key) === "1";
+      // Toutes les clés gouvernant les descendants de la connexion :
+      // le pli de la conn masque l'arbre entier, celui d'un groupe
+      // masque son sous-arbre (renderNode ajoute sa propre clé).
+      const connChain = [key];
       const st = this.conns.state(conn) ?? "ok";
       const ch = document.createElement("div");
       ch.className = "grp-head grp-conn" + (connClosed ? " closed" : "");
@@ -765,10 +840,9 @@ export class Sidebar {
         `<span class="grp-add-lbl">${esc(t("new_group_lbl"))}</span></button>`;
       ch.onclick = () => {
         // Sous filtre l'arbre est forcé déplié : toggler persisterait un
-        // état invisible à l'écran (+ RPC refresh inutile).
+        // état invisible à l'écran.
         if (this.filter) return;
-        localStorage.setItem(key, connClosed ? "0" : "1");
-        void this.refresh();
+        this.toggleFold(key, ch);
       };
       ch.querySelector(".grp-add")!.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -799,12 +873,18 @@ export class Sidebar {
         }
         return undefined;
       };
-      const renderNode = (n: GNode, gDepth: number, foldedAbove: boolean) => {
+      // `chain` = toutes les clés de pliage gouvernant ce nœud et sa
+      // descendance (conn + groupes ancêtres — sa propre clé est ajoutée
+      // pour les enfants). Un nœud est masqué dès qu'une clé de sa
+      // chaîne vaut "1" ; son propre pli ne masque que ses enfants.
+      const renderNode = (n: GNode, gDepth: number, chain: string[]) => {
         const gkey = `ac-grp-${conn}::${n.path}`;
+        this.foldKeys.add(gkey);
         const folded = !f && localStorage.getItem(gkey) === "1";
+        if (!this.foldSubs.has(gkey)) this.foldSubs.set(gkey, []);
         const g = document.createElement("div");
         g.className = "grp-sub" + (folded ? " closed" : "");
-        if (foldedAbove) g.style.display = "none";
+        if (this.foldHidden(chain)) g.style.display = "none";
         if (gDepth > 0) g.style.paddingLeft = `${18 + 14 * gDepth}px`;
         g.title = t("drop_to_group"); // tooltip hors nom (le nom porte le chemin)
         g.innerHTML = `<span class="grp-arrow">${icon(folded ? "chev-right" : "chev-down")}</span> ` +
@@ -813,9 +893,11 @@ export class Sidebar {
           `<span class="grp-add-lbl">${esc(t("new_sess_grp_lbl"))}</span></button>`;
         g.onclick = () => {
           if (this.filter) return; // idem : pas de toggle invisible sous filtre
-          localStorage.setItem(gkey, localStorage.getItem(gkey) === "1" ? "0" : "1");
-          void this.refresh();
+          this.toggleFold(gkey, g);
         };
+        // Le header n'est masqué que par ses ancêtres (sa propre clé ne
+        // le gouverne pas) ; les enfants porteront [...chain, gkey].
+        this.foldReg(chain, g);
         // + : nouvel agent dans le groupe — agent + workspace du 1er
         // membre du sous-arbre préremplis (tri titre → "premier affiché").
         const ref = firstMember(n);
@@ -829,19 +911,21 @@ export class Sidebar {
         this.bindDropTarget(g, conn, n.path);
         this.bindGroupDrag(g, conn, n.path);
         el.appendChild(g);
-        const innerFolded = foldedAbove || folded;
+        // Enfants : la clé du nœud s'ajoute à la chaîne de pliage —
+        // qu'il soit plié ou non (le toggle la relira dans localStorage).
+        const childChain = [...chain, gkey];
         for (const k of [...n.kids.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-          renderNode(k, gDepth + 1, innerFolded);
+          renderNode(k, gDepth + 1, childChain);
         }
         for (const { s, depth } of nestSessions(n.rows)) {
-          el.appendChild(this.sessRow(s, conn, gDepth + 1, innerFolded, depth));
+          el.appendChild(this.sessRow(s, conn, gDepth + 1, childChain, depth));
         }
       };
       for (const n of [...gRoot.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-        renderNode(n, 0, connClosed);
+        renderNode(n, 0, connChain);
       }
       for (const { s, depth } of nestSessions(plain)) {
-        el.appendChild(this.sessRow(s, conn, 0, connClosed, depth));
+        el.appendChild(this.sessRow(s, conn, 0, connChain, depth));
       }
     }
     if (f && !shown) {
@@ -944,7 +1028,7 @@ export class Sidebar {
   /** Ligne session standalone pour l'accueil « par état » (N3) : même
    *  clic, même appui long, même gemme que l'arbre, sans indentation. */
   buildRow(s: SessionMeta): HTMLElement {
-    return this.sessRow(s, s.conn ?? "default", 0, false);
+    return this.sessRow(s, s.conn ?? "default", 0, []);
   }
 
   /** Menu contextuel session (clic droit / appui long) : rename / fork /
@@ -1152,12 +1236,15 @@ export class Sidebar {
     inp.addEventListener("blur", () => done(true));
   }
 
-  private sessRow(s: SessionMeta, conn: string, gDepth: number, closed: boolean, depth = 0): HTMLElement {
+  private sessRow(s: SessionMeta, conn: string, gDepth: number, chain: string[], depth = 0): HTMLElement {
     const div = document.createElement("div");
     div.dataset.sid = s.id;
     div.className = "sess" + (gDepth ? " in-grp" : "") + (depth > 0 ? " sub" : "") +
       (s.offline ? " offline" : "") + (app.current?.id === s.id ? " active" : "");
-    if (closed) div.style.display = "none";
+    // `chain` = clés de pliage gouvernant la ligne (conn + groupe
+    // porteur + ancêtres) — indexées pour le toggle ciblé (#369).
+    if (this.foldHidden(chain)) div.style.display = "none";
+    this.foldReg(chain, div);
     // Indentation = profondeur de groupe (14px/niveau) + profondeur de
     // sous-agent (14px/niveau, cap visuel — les arbres de délégation
     // restent peu profonds), tooltip = provenance.
