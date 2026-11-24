@@ -179,7 +179,8 @@ export class EventRenderer {
         const d = mkEv("resolved", ev.seq);
         const rid = ev.request_id as string;
         this.answered.add(rid);
-        d.innerHTML = `${icon("check")} ${esc(t("resolved") + ((ev.outcome ?? ev.answer) as string))}`;
+        const raw = ev.outcome ?? ev.answer;
+        d.innerHTML = `${icon("check")} ${esc(t("resolved") + formatResolved(raw))}`;
         const card = $("events").querySelector(`[data-req="${rid}"]`);
         if (card) card.classList.add("done");
         return d;
@@ -688,13 +689,25 @@ export class EventRenderer {
     // une chaîne).
     const metas = new Map<string, { multi: boolean; consts: unknown[] }>();
 
-    for (const [key, p] of Object.entries(props)) {
-      const ptype = p?.type as string | undefined;
-      const options = Array.isArray(p?.oneOf)
-        ? (p.oneOf as Record<string, unknown>[])
-        : ptype === "array" && Array.isArray((p.items as Record<string, unknown> | undefined)?.anyOf)
-          ? ((p.items as Record<string, unknown>).anyOf as Record<string, unknown>[])
+    for (const [key, pRaw] of Object.entries(props)) {
+      // Les schémas JSON admettent des formes inattendues (`true` comme
+      // propriété, `null` dans oneOf/anyOf…) : on normalise en objet et
+      // on filtre les options non-objet avant de lire .const/.title —
+      // sinon un TypeError figerait tout le formulaire.
+      const p = (pRaw && typeof pRaw === "object" ? pRaw : {}) as Record<string, unknown>;
+      const ptype = p.type as string | undefined;
+      const items =
+        p.items && typeof p.items === "object"
+          ? (p.items as Record<string, unknown>)
           : null;
+      const rawOptions = Array.isArray(p.oneOf)
+        ? p.oneOf
+        : ptype === "array" && items && Array.isArray(items.anyOf)
+          ? items.anyOf
+          : null;
+      const options = rawOptions?.filter(
+        (o): o is Record<string, unknown> => !!o && typeof o === "object",
+      ) ?? null;
       const field = document.createElement("div");
       field.className = "q-field";
       field.dataset.key = key;
@@ -710,7 +723,8 @@ export class EventRenderer {
         box.className = "q-opts";
         options.forEach((o, i) => {
           const val = o.const;
-          const label = (o.title as string) ?? String(val ?? "");
+          const label =
+            typeof o.title === "string" && o.title ? o.title : String(val ?? "");
           const od = typeof o.description === "string" && o.description ? o.description : null;
           const lab = document.createElement("label");
           lab.className = "q-opt";
@@ -782,6 +796,21 @@ export class EventRenderer {
     if (this.answered.has(ev.request_id as string)) d.classList.add("done");
     return d;
   }
+}
+
+/** Réponse affichée sur la ligne « résolu » : les réponses de
+ *  formulaire sont des objets ({question_0: "…", question_1: […]}) —
+ *  JSON compact borné plutôt que « [object Object] ». */
+function formatResolved(v: unknown): string {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  let s: string;
+  try {
+    s = JSON.stringify(v) ?? String(v);
+  } catch {
+    s = String(v);
+  }
+  return s.length > 160 ? `${s.slice(0, 157)}…` : s;
 }
 
 /** Permission « sortie de plan » (ExitPlanMode / exit_plan_mode) :

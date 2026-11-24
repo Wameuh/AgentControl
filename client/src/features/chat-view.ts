@@ -1181,7 +1181,15 @@ export class ChatView {
           if (ev.seq > this.maxRendered) this.maxRendered = ev.seq;
           continue;
         }
-        this.appendEventNow(ev, true);
+        // Un event qui jette (render ou updateToolBlock) ne doit pas
+        // manger le reste du batch : sans catch le finally s'exécute mais
+        // tous les events suivants du frame sont perdus → vue figée,
+        // perçue comme un crash. On loggue l'event fautif et on continue.
+        try {
+          this.appendEventNow(ev, true);
+        } catch (err) {
+          console.error(`[chat] appendEvent seq=${ev.seq} type=${ev.type}:`, err);
+        }
       }
     } finally {
       this.liveBatch = null;
