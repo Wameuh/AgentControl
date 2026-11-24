@@ -178,6 +178,15 @@ export function accentPref(): Accent {
   return (ACCENTS as string[]).includes(v ?? "") ? (v as Accent) : "sage";
 }
 
+/** Accent réellement appliqué à l'UI — les classes theme-* reflètent
+ *  applyAccent, donc la couleur de connexion et l'aperçu stagé des
+ *  réglages sont couverts ; « sage » (aucune classe) par défaut. */
+export function currentAccent(): Accent {
+  const cl = document.documentElement.classList;
+  for (const a of ACCENTS) if (a !== "sage" && cl.contains(`theme-${a}`)) return a;
+  return "sage";
+}
+
 /** Applique l'accent ; `persist:false` pour un accent temporaire (couleur
  *  de connexion — le réglage global ac-accent n'est pas écrasé). */
 export function applyAccent(name: Accent, persist = true) {

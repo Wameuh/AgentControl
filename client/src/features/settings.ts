@@ -432,6 +432,8 @@ export class SettingsPanel {
       // d'override résiduel après revert.
       stageAccent(v === accentPref() ? null : v);
       this.themeChanged();
+      // La gemme de la tuile de thème suit l'accent aperçu.
+      this.snav.syncVisual();
       this.syncSecStates();
     };
     this.stage("s-accent", {
@@ -439,6 +441,7 @@ export class SettingsPanel {
         applyAccent(($("s-accent") as HTMLSelectElement).value as Accent);
         stageAccent(null);
         this.themeChanged();
+        this.snav.syncVisual();
         this.syncSecStates();
       },
       reset: () => {

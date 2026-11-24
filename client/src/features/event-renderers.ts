@@ -8,9 +8,10 @@
 import { $, copyText, esc, mkEv, q, showErr } from "../core/dom";
 import { linkify, mdRender } from "../core/format";
 import { call } from "../core/rpc";
-import { isAndroid } from "../core/chrome";
+import { currentAccent, isAndroid } from "../core/chrome";
 import { app } from "../core/state";
 import type { AcEvent, CmdInfo, ConfigOption } from "../core/types";
+import { gemAccentSVG, gemSVG, type GemShape } from "../crystal";
 import { t } from "../i18n";
 import { icon, qIco } from "../ui/icons";
 import { tick } from "../mobile/haptics";
@@ -728,11 +729,18 @@ export class EventRenderer {
           const od = typeof o.description === "string" && o.description ? o.description : null;
           const lab = document.createElement("label");
           lab.className = "q-opt";
+          // Gemme cristal = rendu du choix : ronde (radio, exclusif) ou
+          // carrée (checkbox, additif), ardoise au repos, teintée de
+          // l'accent du thème une fois cochée. L'input natif reste dans
+          // le label (masqué) : collect(), clavier et tests inchangés.
+          const shape: GemShape = multi ? "square" : "round";
           lab.innerHTML =
-            `<input type="${multi ? "checkbox" : "radio"}" name="${esc(key)}" data-oi="${i}" />` +
+            `<input type="${multi ? "checkbox" : "radio"}" name="${esc(key)}" data-oi="${i}" class="q-sr" />` +
+            `<span class="q-gem" data-shape="${shape}" aria-hidden="true"></span>` +
             `<span class="q-opt-t">${esc(label)}` +
             (od ? `<span class="q-opt-d">${esc(od)}</span>` : "") +
             `</span>`;
+          lab.querySelector(".q-gem")!.innerHTML = gemSVG("slate", shape);
           box.appendChild(lab);
         });
         field.appendChild(box);
@@ -748,6 +756,25 @@ export class EventRenderer {
       }
       form.appendChild(field);
     }
+
+    // La gemme suit l'état coché : un changement sur une option repeint
+    // toutes les gemmes du groupe (.q-opts — les radios décochés par le
+    // navigateur n'émettent pas de change, on relit .checked).
+    form.addEventListener("change", (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLInputElement) || !t.closest(".q-opt")) return;
+      const scope = t.closest(".q-opts") ?? form;
+      for (const o of scope.querySelectorAll<HTMLInputElement>(".q-opt input")) {
+        const opt = o.closest<HTMLElement>(".q-opt")!;
+        const gem = opt.querySelector<HTMLElement>(".q-gem");
+        if (!gem) continue;
+        const shape = (gem.dataset.shape ?? "round") as GemShape;
+        opt.classList.toggle("on", o.checked);
+        gem.innerHTML = o.checked
+          ? gemAccentSVG(currentAccent(), shape)
+          : gemSVG("slate", shape);
+      }
+    });
 
     const collect = (): Record<string, unknown> => {
       const out: Record<string, unknown> = {};
