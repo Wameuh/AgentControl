@@ -4,7 +4,7 @@
 // quand le démon est plus récent (minor).
 // ---------------------------------------------------------------------------
 
-import { invoke, getVersion, isWeb } from "../core/bridge";
+import { invoke, getVersion, isWeb, listen, listenPlugin } from "../core/bridge";
 import { $, esc, logUi, notify } from "../core/dom";
 import { codedErrorMsg } from "../core/errcode";
 import { icon } from "../ui/icons";
@@ -74,6 +74,115 @@ async function androidReinstallRisk(): Promise<boolean> {
   return info?.update_in_place === "impossible";
 }
 
+// Progression du téléchargement APK + états du plugin ac-device : le
+// backend émet `update-progress` pendant le fetch et le Kotlin trigger
+// `update_install_state` au retour de l'installeur/réglages (install
+// annulée, bloquée, permission, installée). Le tag mémorisé garde la
+// relance « une case » possible sans redownload (cache Rust conservé).
+type UpdateProgressPayload = {
+  tag?: string;
+  downloaded?: number;
+  total?: number | null;
+  percent?: number | null;
+};
+type AndroidInstallState = { status?: string; message?: string };
+
+// Le tag est persisté : un kill du process pendant l'install (cas
+// nominal — l'APK remplace l'app) recharge le module à zéro, et le
+// dialogue « installation annulée ? » doit pouvoir relancer sans
+// retélécharger (le cache Rust est conservé).
+let androidUpdateTag: string | null = isWeb
+  ? null
+  : localStorage.getItem("ac-android-update-tag");
+let androidUpdateListeners = false;
+let updateProgressEl: HTMLElement | null = null;
+
+function ensureAndroidUpdateListeners() {
+  if (androidUpdateListeners) return;
+  androidUpdateListeners = true;
+  void listen<UpdateProgressPayload>("update-progress", (e) => {
+    const p = e.payload;
+    if (!p) return;
+    if (androidUpdateTag && p.tag && p.tag !== androidUpdateTag) return;
+    showUpdateProgress(p);
+  });
+  void listenPlugin<AndroidInstallState>(
+    "ac-device",
+    "update_install_state",
+    (p) => void onAndroidInstallState(p),
+  );
+}
+
+function showUpdateProgress(p: UpdateProgressPayload) {
+  // Le cap de toasts (notify) peut évincer le toast de progression :
+  // recréer s'il a été détaché du DOM.
+  if (!updateProgressEl || !updateProgressEl.isConnected) {
+    const d = document.createElement("div");
+    d.className = "toast t-info update-progress";
+    d.innerHTML =
+      '<div class="upd-p-msg"></div><div class="upd-p-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><i></i></div>';
+    $("toasts").appendChild(d);
+    updateProgressEl = d;
+  }
+  const msg = updateProgressEl.querySelector(".upd-p-msg") as HTMLElement;
+  const barWrap = updateProgressEl.querySelector(".upd-p-bar") as HTMLElement;
+  const bar = updateProgressEl.querySelector(".upd-p-bar i") as HTMLElement;
+  const tag = p.tag || androidUpdateTag || "";
+  const pct = typeof p.percent === "number"
+    ? Math.max(0, Math.min(100, p.percent))
+    : null;
+  if (pct != null) {
+    updateProgressEl.classList.remove("indeterminate");
+    bar.style.width = `${pct}%`;
+    barWrap.setAttribute("aria-valuenow", String(pct));
+    msg.textContent = t("update_download_progress", { v: tag, pct });
+  } else {
+    updateProgressEl.classList.add("indeterminate");
+    bar.style.width = "40%";
+    barWrap.removeAttribute("aria-valuenow");
+    const mb = Math.max(1, Math.ceil((p.downloaded ?? 0) / 1_048_576));
+    msg.textContent = t("update_download_progress_mb", { v: tag, mb });
+  }
+}
+
+function hideUpdateProgress() {
+  updateProgressEl?.remove();
+  updateProgressEl = null;
+}
+
+async function onAndroidInstallState(p: AndroidInstallState) {
+  const tag = androidUpdateTag;
+  if (p.status === "launched") {
+    notify("info", t("update_android_reopen"));
+    return;
+  }
+  if (p.status === "permission_required") {
+    notify("warn", t("update_android_permission"));
+    return;
+  }
+  if (p.status === "installed") {
+    androidUpdateTag = null;
+    localStorage.removeItem("ac-android-update-tag");
+    notify("success", t("update_android_installed"));
+    return;
+  }
+  if (p.status === "unchanged" || p.status === "launch_blocked") {
+    const cancelled = p.status === "unchanged";
+    const ok = await confirmPair(
+      cancelled ? t("update_android_cancelled_h") : t("update_android_blocked_h"),
+      cancelled ? t("update_android_cancelled_msg") : t("update_android_blocked_msg"),
+      t("update_now"),
+    );
+    if (ok && tag) void performClientUpdate(tag);
+    return;
+  }
+  if (p.status === "missing" || p.status === "error") {
+    notify("error", t("update_failed_reason", {
+      reason: codedErrorMsg(p.message ?? "update", "update"),
+    }));
+  }
+}
+
 /// Update du client vers `tag` : desktop = installeur auto
 /// (`update_client`) ; Android = `update_client` aussi — le backend
 /// télécharge l'APK dans le cache de l'app, vérifie l'intégrité de la
@@ -92,6 +201,9 @@ async function androidReinstallRisk(): Promise<boolean> {
 /// exportables, #160) → re-pairing QR obligatoire.
 export async function performClientUpdate(tag: string) {
   if (isAndroid()) {
+    ensureAndroidUpdateListeners();
+    androidUpdateTag = tag;
+    localStorage.setItem("ac-android-update-tag", tag);
     // Garde-fou uninstall : si l'app installée ne peut pas upgrader
     // in-place (signature ≠ release), le chemin impose une
     // désinstallation qui efface TOUTES les données (allowBackup=false,
@@ -108,7 +220,11 @@ export async function performClientUpdate(tag: string) {
     notify("info", t("update_installing", { v: tag }));
     let status = "";
     try {
-      status = await invoke<string>("update_client", { tag });
+      status = await invoke<string>("update_client", {
+        tag,
+        notifyTitle: t("update_android_notify_title"),
+        notifyText: t("update_android_notify_text", { v: tag }),
+      });
     } catch (e) {
       const reason = codedErrorMsg(e, "update");
       notify("error", t("update_failed_reason", { reason }));
@@ -116,17 +232,27 @@ export async function performClientUpdate(tag: string) {
       // l'erreur backend cite déjà la cause exacte.
       shellOpen(`https://github.com/Wameuh/AgentControl/releases/tag/v${tag}`);
       return;
+    } finally {
+      hideUpdateProgress();
     }
     if (status === "permission_required") {
-      // Android a ouvert les réglages « sources inconnues » de l'app :
-      // l'utilisateur accorde puis relance la mise à jour (l'APK est
-      // retéléchargé et revérifié — le cache est purgé à chaque fois).
+      // Android a ouvert les réglages « sources inconnues » de l'app ou
+      // armé l'APK pour la reprise : le cache Rust évite le
+      // retéléchargement quand l'utilisateur revient.
       notify("warn", t("update_android_permission"));
       return;
     }
-    // L'installeur système est ouvert : le process meurt avec le
-    // remplacement de l'APK et Android ne permet pas à une app
-    // remplacée de se relancer seule — on guide explicitement.
+    if (status === "pending") {
+      // L'app était en arrière-plan à la fin du téléchargement : le
+      // plugin a armé l'APK + notification — onResume relance
+      // l'installeur (ou les réglages si la permission manque).
+      notify("info", t("update_android_pending"));
+      return;
+    }
+    // "launched" = l'installeur système est réellement ouvert (le plugin
+    // ne le rend plus sans startActivity au premier plan). Le process
+    // meurt avec le remplacement de l'APK et Android ne permet pas à une
+    // app remplacée de se relancer seule — on guide explicitement.
     notify("info", t("update_android_reopen"));
     return;
   }
@@ -399,6 +525,10 @@ export function checkBootUpdate(openPanel: (chip: HTMLElement) => void) {
   // Pas de client à mettre à jour en mode web : la SPA est livrée par le
   // démon — sa « version » suit celle du binaire qui la sert.
   if (isWeb) return;
+  // Android : les events `update_install_state` (install annulée,
+  // bloquée, permission) doivent être écoutés même sans clic update —
+  // le plugin les émet au onResume après retour de l'installeur.
+  if (isAndroid()) ensureAndroidUpdateListeners();
   void (async () => {
     await reportLastUpdateStatus();
     try {

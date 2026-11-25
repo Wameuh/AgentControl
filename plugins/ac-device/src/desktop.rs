@@ -19,7 +19,12 @@ impl<R: Runtime> Device<R> {
         Err(crate::Error::AndroidOnly)
     }
 
-    pub fn install_apk(&self, _path: &str) -> crate::Result<serde_json::Value> {
+    pub fn install_apk(
+        &self,
+        _path: &str,
+        _notify_title: &str,
+        _notify_text: &str,
+    ) -> crate::Result<serde_json::Value> {
         Err(crate::Error::AndroidOnly)
     }
 }
