@@ -45,6 +45,29 @@
 .toast-x { flex: none; padding: 0 5px; font-size: 11px; opacity: .55; }
 .toast-x:hover { opacity: 1; color: var(--accent); }
 
+/* Progression du téléchargement APK (update Android) : toast dédié non
+   auto-dismiss, remplacé par le résultat d'install. */
+.update-progress { flex-direction: column; gap: 8px; min-width: 260px; }
+.update-progress .upd-p-msg { width: 100%; }
+.update-progress .upd-p-bar {
+  width: 100%; height: 4px; border-radius: 999px; overflow: hidden;
+  background: var(--line);
+}
+.update-progress .upd-p-bar i {
+  display: block; height: 100%; width: 0; border-radius: inherit;
+  background: var(--accent); transition: width .2s ease-out;
+}
+.update-progress.indeterminate .upd-p-bar i {
+  width: 40%; animation: upd-p-slide 1.1s ease-in-out infinite;
+}
+@keyframes upd-p-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .update-progress.indeterminate .upd-p-bar i { animation: none; }
+}
+
 /* flex-wrap : quand la fenêtre est étroite, #chat-opts (order:20) part
    en 2e ligne scrollable — les actions (Stop…) restent visibles. */
 #chat-header {

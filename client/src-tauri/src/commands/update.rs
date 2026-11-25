@@ -457,27 +457,42 @@ fn fetch_release_asset(
 /// minisign + sha256, `verify_release_integrity`), puis demande au
 /// plugin ac-device de lancer l'installeur système (intent VIEW sur
 /// l'URI FileProvider du cache — la permission « installer des
-/// applications inconnues » est gérée par Android : absente, le
-/// Kotlin ouvre les réglages de l'app et rend `permission_required`).
-/// Le process meurt avec le remplacement de l'APK — pas de statut
-/// post-install, l'utilisateur est sur l'écran de l'installeur.
-/// Retour : "launched" | "permission_required".
+/// applications inconnues » et la reprise après retour sont gérées par
+/// le Kotlin : foreground seul pour startActivity, sinon APK armé +
+/// notification PendingIntent). Le process meurt avec le remplacement
+/// de l'APK — pas de statut post-install, l'utilisateur est sur l'écran
+/// de l'installeur.
+/// Retour : "launched" | "pending" | "permission_required".
 #[cfg(target_os = "android")]
 #[tauri::command]
 pub(crate) async fn update_client(
     app: tauri::AppHandle,
     tag: String,
+    notify_title: Option<String>,
+    notify_text: Option<String>,
 ) -> Result<String, String> {
     use tauri::Manager;
     ulog(format!("install v{tag} demandée (android)"));
     let apk = apk::fetch_apk(&app, &tag).await?;
     let dev = app.state::<tauri_plugin_ac_device::Device<tauri::Wry>>();
     let path = apk.to_string_lossy().to_string();
-    let v = dev.install_apk(&path).map_err(|e| e.to_string())?;
+    let v = dev
+        .install_apk(
+            &path,
+            notify_title.as_deref().unwrap_or(""),
+            notify_text.as_deref().unwrap_or(""),
+        )
+        .map_err(|e| e.to_string())?;
     match v["status"].as_str() {
         Some("launched") => {
             ulog(format!("install v{tag} : installeur système ouvert"));
             Ok("launched".into())
+        }
+        Some("pending") => {
+            ulog(format!(
+                "install v{tag} : APK armé — reprise au retour premier plan"
+            ));
+            Ok("pending".into())
         }
         Some("permission_required") => {
             ulog(format!("install v{tag} : permission « apps inconnues » requise"));

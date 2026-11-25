@@ -40,13 +40,24 @@ impl<R: Runtime> Device<R> {
     /// Lance l'installeur système sur l'APK `path` (déjà téléchargé et
     /// vérifié côté client — `update_client` Android) — `@Command
     /// installApk` Kotlin : FileProvider + intent VIEW, permission
-    /// « apps inconnues » gérée par Android. Retour brut
-    /// `{"status": "launched"|"permission_required"}`.
-    pub fn install_apk(&self, path: &str) -> crate::Result<serde_json::Value> {
+    /// « apps inconnues » et reprise après retour gérées par le plugin.
+    /// `notify_*` = texte localisé de la notification de secours quand
+    /// l'app est en arrière-plan. Retour brut
+    /// `{"status": "launched"|"pending"|"permission_required"}`.
+    pub fn install_apk(
+        &self,
+        path: &str,
+        notify_title: &str,
+        notify_text: &str,
+    ) -> crate::Result<serde_json::Value> {
         self.0
             .run_mobile_plugin(
                 "installApk",
-                serde_json::json!({ "path": path }),
+                serde_json::json!({
+                    "path": path,
+                    "notify_title": notify_title,
+                    "notify_text": notify_text,
+                }),
             )
             .map_err(Into::into)
     }

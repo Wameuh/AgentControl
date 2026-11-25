@@ -6,6 +6,9 @@
        (le flux navigateur historique exigeait ce droit du
        navigateur à la place). -->
   <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+  <!-- Notification de secours « APK prêt » (PendingIntent) — redondante
+       avec tauri-plugin-notification mais le plugin doit se suffire. -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <application>
     <provider
       android:name="dev.agentcontrol.device.AcDeviceFileProvider"
