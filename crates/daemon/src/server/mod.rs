@@ -56,6 +56,10 @@ pub(crate) mod orch_review;
 /// reviewer réutilisables par thread [repo,branche], slots,
 /// compact-first, reaper forge ; indépendante du pipeline `/mr review`.
 pub(crate) mod rq;
+/// Handlers RPC `review_queue_*` de la file de revue.
+pub(crate) mod rq_api;
+/// Settlement de la file : timeouts, completion, notifications.
+pub(crate) mod rq_done;
 /// Surface de config éditable à chaud de la file de revue (schéma
 /// params, validation de patch, persistance `[review_queue]`) —
 /// même mécanique que `orch_cfg.rs`.
@@ -63,6 +67,9 @@ pub(crate) mod rq_cfg;
 /// Verdicts forge du reaper review-queue (fonctions pures — tests
 /// sans forge réelle).
 pub(crate) mod rq_forge;
+/// Reaper review-queue : décision + suppression des sessions
+/// reviewer de threads terminés.
+pub(crate) mod rq_reap;
 mod peers;
 mod prs;
 mod sessions;

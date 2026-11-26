@@ -39,7 +39,9 @@ instructions}` (proto — additive extension).
    (group `Reviews` by default, title `RQ-<tid>-r<n>`, origin
    `component:review-queue`), round ≥2 reuses it: `/compact` is sent
    first (bounded by `compact_timeout_secs`, skipped when the
-   agent's `available_commands` does not announce `compact`), then
+   agent's `available_commands` does not announce `compact` — an
+   empty list counts as "not announced", unlike `session/compact`
+   which treats empty as unknown), then
    the round prompt — `NEW REVIEW ROUND <id>: disregard state from
    earlier rounds; the packet at <abs path> is the only authoritative
    input. Read <abs path> and follow it exactly.`
@@ -123,7 +125,7 @@ Section `[review_queue]` of `config.toml` (component
 | `reaper_github_host` / `reaper_gitlab_host` | `""` | host overrides (GHE/self-hosted) |
 | `reaper_interval_secs` | `300` | min delay between forge checks/thread |
 | `state_dir` | `""` | state + `runs/` — empty = `<root>/review-queue` |
-| `prompt` | built-in | packet template (`{REQUEST}` `{ROUND}` `{RUN_DIR}` `{REPOS}` `{INSTRUCTIONS}` `{COMPACT}`) |
+| `prompt` | built-in | packet template (`{REQUEST}` `{ROUND}` `{RUN_DIR}` `{REPOS}` `{INSTRUCTIONS}`) |
 
 State (`review-queue-state.json` + `runs/<id>/`) lives under
 `state_dir` and survives daemon restarts — threads keep their

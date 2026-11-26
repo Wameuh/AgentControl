@@ -42,8 +42,8 @@ pub(crate) const COMPONENT_NAME: &str = rq_cfg::COMPONENT_NAME;
 pub(crate) const ORIGIN: &str = "component:review-queue";
 
 /// Template intégré du packet — placeholders `{REQUEST}` `{ROUND}`
-/// `{RUN_DIR}` `{REPOS}` `{INSTRUCTIONS}` `{COMPACT}` (cfg.prompt
-/// l'override en entier).
+/// `{RUN_DIR}` `{REPOS}` `{INSTRUCTIONS}` (cfg.prompt l'override en
+/// entier).
 const PACKET_TEMPLATE: &str = r#"# Review request {REQUEST} — round {ROUND}
 
 You are the dedicated reviewer session for this thread. Follow this
@@ -69,8 +69,7 @@ Write into `{RUN_DIR}`:
 
 Then stop. Do NOT modify any reviewed repository — the queue flags
 the review as tainted if a reviewed checkout changes during the
-review (HEAD or working-tree status).
-{COMPACT}"#;
+review (HEAD or working-tree status)."#;
 
 // ---------------------------------------------------------------------------
 // État persisté — review-queue-state.json sous state_dir.
@@ -109,7 +108,7 @@ impl ReqState {
     fn active(self) -> bool {
         matches!(self, Self::Compacting | Self::Reviewing)
     }
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::Compacting => "compacting",
@@ -217,7 +216,7 @@ pub(crate) struct RqState {
 pub struct RqProbe {
     pub cfg: std::sync::RwLock<cfg::ReviewQueueCfg>,
     root: PathBuf,
-    state: std::sync::Mutex<RqState>,
+    pub(crate) state: std::sync::Mutex<RqState>,
     wake: tokio::sync::Notify,
     /// Bascule runtime — initialisée depuis `cfg.enabled` (boot),
     /// pilotée par component_start/stop et `enabled` du patch.
@@ -228,7 +227,7 @@ pub struct RqProbe {
 // Helpers purs — testables sans démon.
 // ---------------------------------------------------------------------------
 
-fn now_secs() -> f64 {
+pub(crate) fn now_secs() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -249,7 +248,7 @@ pub(crate) fn thread_key(pairs: &[RqPair]) -> String {
     .unwrap_or_default()
 }
 
-fn thread_tid(key: &str) -> String {
+pub(crate) fn thread_tid(key: &str) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in key.as_bytes() {
         h ^= *b as u64;
@@ -354,13 +353,12 @@ fn fill_packet(tpl: &str, req: &RqRequest, round: u64, repos_md: &str) -> String
         .replace("{RUN_DIR}", &req.run_dir)
         .replace("{REPOS}", repos_md)
         .replace("{INSTRUCTIONS}", &instr)
-        .replace("{COMPACT}", "")
 }
 
 /// Bloc markdown « Repositories » du packet — un sous-bloc par
 /// dépôt : chemin, branche, base, head figé, état du tree au
 /// dispatch, commandes de lecture du diff.
-fn repos_markdown(req: &RqRequest, cfg: &cfg::ReviewQueueCfg) -> String {
+fn repos_markdown(req: &RqRequest) -> String {
     let mut out = String::new();
     for (i, r) in req.repos.iter().enumerate() {
         let snap = req.snaps.get(i);
@@ -390,7 +388,6 @@ fn repos_markdown(req: &RqRequest, cfg: &cfg::ReviewQueueCfg) -> String {
             r.path,
         ));
     }
-    let _ = cfg;
     out
 }
 
@@ -428,11 +425,11 @@ impl RqProbe {
             proto::ComponentState::Stopped
         }
     }
-    fn state_dir(&self) -> PathBuf {
+    pub(crate) fn state_dir(&self) -> PathBuf {
         self.cfg.read().unwrap().state_dir(&self.root)
     }
 
-    fn save(&self) -> Result<()> {
+    pub(crate) fn save(&self) -> Result<()> {
         let sdir = self.state_dir();
         std::fs::create_dir_all(&sdir)?;
         let st = self.state.lock().unwrap().clone();
@@ -491,192 +488,6 @@ fn load_state(sdir: &Path) -> RqState {
 // ---------------------------------------------------------------------------
 
 impl Daemon {
-    /// `review_queue_request` — ingest d'une demande de revue.
-    /// `by` = session demandeuse (None = pas de steer résultat).
-    /// Validation immédiate des dépôts (chemin canonique, branche
-    /// résolue) : une spec invalide est refusée AVANT d'entrer en
-    /// file — le demandeur sait que rien ne sera revu.
-    pub(super) async fn h_review_queue_request(
-        self: &Arc<Self>,
-        by: Option<String>,
-        repos: Vec<ReviewRepoSpec>,
-        instructions: Option<String>,
-    ) -> Result<Value> {
-        anyhow::ensure!(!repos.is_empty(), "review_queue_request: no repos");
-        anyhow::ensure!(repos.len() <= 16, "review_queue_request: too many repos (>16)");
-        let mut resolved = Vec::with_capacity(repos.len());
-        let mut pairs = Vec::with_capacity(repos.len());
-        for spec in &repos {
-            let r = resolve_repo(spec)?;
-            pairs.push(RqPair {
-                path: r.path.clone(),
-                branch: r.branch.clone(),
-            });
-            resolved.push(r);
-        }
-        // Déduplique les paires identiques (même checkout+branche
-        // demandé deux fois = une seule entrée de thread).
-        pairs.sort_by(|a, b| (&a.path, &a.branch).cmp(&(&b.path, &b.branch)));
-        pairs.dedup();
-        let key = thread_key(&pairs);
-        let by = by.unwrap_or_default();
-        if !by.is_empty() {
-            // Le steer résultat suppose une session vivante ou
-            // reprenable — un id inconnu est refusé tout de suite
-            // (l'appelant peut reprendre sans `session`).
-            self.get_session(&by)
-                .await
-                .with_context(|| format!("unknown requester session « {by} »"))?;
-        }
-        let id = proto::new_id("rq");
-        let run_dir = self
-            .rq
-            .state_dir()
-            .join("runs")
-            .join(&id);
-        std::fs::create_dir_all(&run_dir)
-            .with_context(|| format!("creating run dir {}", run_dir.display()))?;
-        let now = now_secs();
-        let title_prefix = self.rq.cfg.read().unwrap().title_prefix.clone();
-        let mut st = self.rq.state.lock().unwrap();
-        // Round = dernier round du thread + 1 (0 si nouveau).
-        let round = st
-            .threads
-            .get(&key)
-            .map(|t| t.round + 1)
-            .unwrap_or(1);
-        let tid = thread_tid(&key);
-        let title = format!("{}{}-r{}", title_prefix, tid, round);
-        st.threads.entry(key.clone()).or_insert_with(|| RqThread {
-            key: key.clone(),
-            tid: tid.clone(),
-            pairs: pairs.clone(),
-            session: None,
-            title: title.clone(),
-            round: 0,
-            active: None,
-            last_active: now,
-            reap_checked_at: 0.0,
-            created_at: now,
-        });
-        let req = RqRequest {
-            id: id.clone(),
-            by,
-            repos: resolved,
-            instructions: instructions.unwrap_or_default(),
-            thread: key.clone(),
-            session: None,
-            round,
-            state: ReqState::Queued,
-            created_at: now,
-            dispatched_at: None,
-            compact_at: None,
-            run_dir: run_dir.to_string_lossy().to_string(),
-            snaps: Vec::new(),
-            result: None,
-            error: None,
-        };
-        st.requests.insert(id.clone(), req);
-        drop(st);
-        let _ = self.rq.save();
-        self.rq.kick();
-        Ok(json!({
-            "request": id,
-            "thread": key,
-            "round": round,
-            "state": "queued",
-        }))
-    }
-
-    /// `review_queue_status` — file + threads + requêtes récentes.
-    pub(super) async fn h_review_queue_status(self: &Arc<Self>) -> Result<Value> {
-        let mut v = self.rq.status_json();
-        v["config"] = rq_cfg::cfg_json(
-            &self.rq.cfg.read().unwrap(),
-            self.rq.is_enabled(),
-        );
-        Ok(v)
-    }
-
-    /// `review_queue_config` — get (`patch` absent) ou set validé +
-    /// persisté dans `[review_queue]` de config.toml (même mécanique
-    /// que `orchestrator_config`/`component_set_params`).
-    pub(super) async fn h_review_queue_config(
-        self: &Arc<Self>,
-        patch: Option<BTreeMap<String, Value>>,
-    ) -> Result<Value> {
-        match patch {
-            None => Ok(json!({
-                "config": rq_cfg::cfg_json(&self.rq.cfg.read().unwrap(), self.rq.is_enabled()),
-                "status": self.rq.status_json(),
-            })),
-            Some(p) => {
-                let applied = self.rq_patch(p)?;
-                info!("review-queue: config persisted ({applied:?})");
-                Ok(json!({
-                    "config": rq_cfg::cfg_json(&self.rq.cfg.read().unwrap(), self.rq.is_enabled()),
-                    "applied": applied,
-                    "persisted": true,
-                    "status": self.rq.status_json(),
-                }))
-            }
-        }
-    }
-
-    /// `component_set_params{name:"review-queue"}` / acctl comp set —
-    /// valeurs chaînes → même `apply_patch` que la RPC (un seul
-    /// chemin de validation).
-    pub(super) async fn h_rq_params_set(
-        self: &Arc<Self>,
-        params: std::collections::HashMap<String, String>,
-    ) -> Result<Value> {
-        let patch: BTreeMap<String, Value> = params
-            .iter()
-            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-            .collect();
-        let applied = self.rq_patch(patch)?;
-        info!("review-queue: params persisted ({applied:?})");
-        Ok(json!({
-            "name": rq_cfg::COMPONENT_NAME,
-            "state": self.rq.component_state(),
-            "params": rq_cfg::params_values(&self.rq.cfg.read().unwrap()),
-            "config_required": [],
-            "rendered": true,
-            "restarted": false,
-        }))
-    }
-
-    /// Patch commun : clone → apply_patch → persist → commit cfg
-    /// vivante → flip `enabled` si basculé (runtime + durable) sinon
-    /// kick. Synchronise les sets concurrents via le write-lock.
-    fn rq_patch(self: &Arc<Self>, patch: BTreeMap<String, Value>) -> Result<Vec<String>> {
-        if patch.is_empty() {
-            return Ok(Vec::new());
-        }
-        let (applied, flip, en) = {
-            let mut guard = self.rq.cfg.write().unwrap();
-            let mut next = guard.clone();
-            let applied = rq_cfg::apply_patch(&mut next, &patch)?;
-            rq_cfg::persist(&self.root, &next)?;
-            let flip = patch.contains_key("enabled") && next.enabled != self.rq.is_enabled();
-            let en = next.enabled;
-            *guard = next;
-            (applied, flip, en)
-        };
-        if flip {
-            self.rq.set_enabled(en);
-        }
-        self.rq.kick();
-        Ok(applied)
-    }
-
-    /// `review_queue_reap` — passe manuelle du reaper (le tick
-    /// périodique fait la même chose). → `{reaped, checked}`.
-    pub(super) async fn h_review_queue_reap(self: &Arc<Self>) -> Result<Value> {
-        let reaped = self.rq_reap_pass(true).await?;
-        Ok(json!({ "reaped": reaped, "checked": true }))
-    }
-
     /// Boucle de la file — tick à `poll_secs` (re-lu à chaque
     /// itération), réveil anticipé par `kick` après intake/patch.
     pub(crate) fn rq_boot(self: &Arc<Self>) {
@@ -712,310 +523,6 @@ impl Daemon {
     }
 
     // (le corps du tick est dans rq_settle_timeouts/poll/dispatch/reap)
-
-    // -- timeouts ----------------------------------------------------
-
-    /// Acquire/review timeouts — soldés hors verrou (les handlers
-    /// session sont await).
-    async fn rq_settle_timeouts(self: &Arc<Self>) {
-        let now = now_secs();
-        let (acquire_to, review_to) = {
-            let c = self.rq.cfg.read().unwrap();
-            (c.acquire_timeout_secs as f64, c.review_timeout_secs as f64)
-        };
-        let due: Vec<(String, String, ReqState)> = {
-            let st = self.rq.state.lock().unwrap();
-            st.requests
-                .iter()
-                .filter_map(|(id, r)| {
-                    let to = match r.state {
-                        ReqState::Queued => (now - r.created_at > acquire_to)
-                            .then_some(ReqState::AcquireTimeout),
-                        ReqState::Reviewing => r
-                            .dispatched_at
-                            .map(|d| (now - d > review_to).then_some(ReqState::Timeout))
-                            .flatten(),
-                        _ => None,
-                    };
-                    to.map(|s| (id.clone(), r.by.clone(), s))
-                })
-                .collect()
-        };
-        for (id, by, to) in due {
-            let sid = {
-                let mut st = self.rq.state.lock().unwrap();
-                if let Some(r) = st.requests.get_mut(&id) {
-                    r.state = to;
-                    r.error = Some(match to {
-                        ReqState::Timeout => "review timeout".into(),
-                        _ => "acquire timeout (no reviewer slot)".into(),
-                    });
-                }
-                let sid = st.requests.get(&id).and_then(|r| r.session.clone());
-                if let Some(r) = st.requests.get(&id) {
-                    let t = r.thread.clone();
-                    if let Some(th) = st.threads.get_mut(&t) {
-                        th.active = None;
-                    }
-                }
-                sid
-            };
-            let _ = self.rq.save();
-            if to == ReqState::Timeout {
-                // Cancel + sleep — la session est CONSERVÉE pour les
-                // rounds suivants (jamais supprimée ici).
-                if let Some(sid) = sid {
-                    let _ = self.h_cancel(sid.clone()).await;
-                    let _ = self.h_sleep_session(sid).await;
-                }
-            }
-            self.rq_notify(&by, &self.rq_result_text(&id, to)).await;
-        }
-    }
-
-    // -- completion --------------------------------------------------
-
-    /// Reviews en cours : session morte → failed ; outputs complets
-    /// et valides → done (anti-altération + sleep + steer) ; sinon
-    /// on attend (jamais « l'agent s'est tu » comme seul critère).
-    async fn rq_poll_completions(self: &Arc<Self>) {
-        let pending: Vec<String> = {
-            let st = self.rq.state.lock().unwrap();
-            st.requests
-                .iter()
-                .filter(|(_, r)| r.state == ReqState::Reviewing)
-                .map(|(id, _)| id.clone())
-                .collect()
-        };
-        for id in pending {
-            self.rq_check_completion(&id).await;
-        }
-        // Compact attend la fin du tour — son timeout borné et la
-        // bascule vers l'envoi du prompt sont dans rq_advance_compact.
-        self.rq_advance_compact().await;
-    }
-
-    async fn rq_check_completion(self: &Arc<Self>, id: &str) {
-        let (run_dir, by, sid, round) = {
-            let st = self.rq.state.lock().unwrap();
-            let Some(r) = st.requests.get(id) else { return };
-            if r.state != ReqState::Reviewing {
-                return;
-            }
-            (
-                r.run_dir.clone(),
-                r.by.clone(),
-                r.session.clone(),
-                r.round,
-            )
-        };
-        // Session morte en cours de review → failed explicite.
-        if let Some(sid) = &sid {
-            match self.get_session(sid).await {
-                Ok(s) if s.meta_snapshot().state == "dead" => {
-                    self.rq_fail(id, "reviewer session died").await;
-                    return;
-                }
-                Err(_) => {
-                    self.rq_fail(id, "reviewer session gone").await;
-                    return;
-                }
-                _ => {}
-            }
-        }
-        let dir = PathBuf::from(&run_dir);
-        let review = dir.join("review.md");
-        let findings = dir.join("findings.json");
-        let complete = dir.join("complete.json");
-        if !(review.is_file() && findings.is_file() && complete.is_file()) {
-            return; // pas encore — le timeout reste le filet.
-        }
-        // Validation schéma — jamais « l'agent s'est arrêté ».
-        let findings_v: Value = match std::fs::read_to_string(&findings)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        {
-            Some(v) if v.get("findings").and_then(Value::as_array).is_some() => v,
-            _ => {
-                self.rq_fail(id, "invalid findings.json (expected {\"findings\":[…]})")
-                    .await;
-                return;
-            }
-        };
-        let complete_v: Value = match std::fs::read_to_string(&complete)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        {
-            Some(v)
-                if matches!(
-                    v.get("verdict").and_then(Value::as_str),
-                    Some("approved" | "changes_requested" | "comment")
-                ) =>
-            {
-                v
-            }
-            _ => {
-                self.rq_fail(id, "invalid complete.json (expected verdict+summary)")
-                    .await;
-                return;
-            }
-        };
-        let verdict = complete_v["verdict"].as_str().unwrap_or("comment");
-        let summary = complete_v["summary"].as_str().unwrap_or("");
-        let nfind = findings_v["findings"].as_array().map(Vec::len).unwrap_or(0);
-        // Anti-altération : chaque dépôt revu doit être inchangé
-        // depuis le snapshot du dispatch.
-        let tainted = {
-            let st = self.rq.state.lock().unwrap();
-            let Some(r) = st.requests.get(id) else { return };
-            r.repos
-                .iter()
-                .zip(r.snaps.iter().cycle())
-                .any(|(repo, snap)| snap_changed(snap, repo))
-        };
-        {
-            let mut st = self.rq.state.lock().unwrap();
-            if let Some(r) = st.requests.get_mut(id) {
-                r.state = ReqState::Done;
-                r.result = Some(json!({
-                    "verdict": verdict,
-                    "summary": summary,
-                    "findings": nfind,
-                    "tainted": tainted,
-                    "run_dir": run_dir,
-                    "round": round,
-                }));
-            }
-            let tkey = st.requests.get(id).map(|r| r.thread.clone());
-            if let Some(t) = tkey.and_then(|t| st.threads.get_mut(&t)) {
-                t.active = None;
-                t.last_active = now_secs();
-            }
-        }
-        let _ = self.rq.save();
-        // Session endormie, CONSERVÉE — le prochain round la réveille.
-        if let Some(sid) = &sid {
-            let _ = self.h_sleep_session(sid.clone()).await;
-        }
-        let taint_note = if tainted {
-            " — TAINTED: a reviewed repo changed during the review"
-        } else {
-            ""
-        };
-        let thread_key = {
-            let st = self.rq.state.lock().unwrap();
-            st.requests.get(id).map(|r| r.thread.clone()).unwrap_or_default()
-        };
-        self.rq_notify(
-            &by,
-            &format!(
-                "[review-queue] review {id} round {round} {verdict}{taint_note}\n\
-                 {summary}\nfindings: {nfind} — full review: {run_dir}/review.md \
-                 (packet: {run_dir}/prompt.md)\nthread: {thread_key} — \
-                 reviewer session kept asleep for the next round."
-            ),
-        )
-        .await;
-    }
-
-    async fn rq_fail(self: &Arc<Self>, id: &str, why: &str) {
-        let (by, sid) = {
-            let mut st = self.rq.state.lock().unwrap();
-            let Some(r) = st.requests.get_mut(id) else { return };
-            r.state = ReqState::Failed;
-            r.error = Some(why.to_string());
-            let by = r.by.clone();
-            let sid = r.session.clone();
-            let tkey = r.thread.clone();
-            if let Some(t) = st.threads.get_mut(&tkey) {
-                t.active = None;
-            }
-            (by, sid)
-        };
-        let _ = self.rq.save();
-        if let Some(sid) = &sid {
-            let _ = self.h_sleep_session(sid.clone()).await;
-        }
-        self.rq_notify(&by, &self.rq_result_text(id, ReqState::Failed)).await;
-    }
-
-    fn rq_result_text(&self, id: &str, state: ReqState) -> String {
-        let st = self.rq.state.lock().unwrap();
-        let r = st.requests.get(id);
-        let err = r.and_then(|r| r.error.clone()).unwrap_or_default();
-        let round = r.map(|r| r.round).unwrap_or(0);
-        let run = r.map(|r| r.run_dir.clone()).unwrap_or_default();
-        format!(
-            "[review-queue] review {id} round {round} {} — {err}\nrun dir: {run}",
-            state.as_str()
-        )
-    }
-
-    /// Steer envelope au demandeur — même repli que
-    /// `pr_review_notify` (envoi direct, réveil d'une session
-    /// endormie). Best-effort : une session disparue ne casse pas la
-    /// file.
-    async fn rq_notify(self: &Arc<Self>, by: &str, text: &str) {
-        if by.is_empty() {
-            return;
-        }
-        if self.h_send(by.to_string(), text.to_string(), false, true).await.is_ok() {
-            return;
-        }
-        if self
-            .h_resume_session(by.to_string(), None, false)
-            .await
-            .is_ok()
-        {
-            let _ = self
-                .h_send(by.to_string(), text.to_string(), false, true)
-                .await;
-        }
-    }
-
-    // -- compact ------------------------------------------------------
-
-    /// Requêtes `Compacting` : la session a fini son tour de compact
-    /// (state `idle`) **ou** le timeout borné est passé → on envoie
-    /// le prompt du round. Session morte → `rq_fail` au send.
-    async fn rq_advance_compact(self: &Arc<Self>) {
-        let compact_to = self.rq.cfg.read().unwrap().compact_timeout_secs as f64;
-        let now = now_secs();
-        let due: Vec<String> = {
-            let st = self.rq.state.lock().unwrap();
-            st.requests
-                .iter()
-                .filter(|(_, r)| r.state == ReqState::Compacting)
-                .map(|(id, _)| id.clone())
-                .collect()
-        };
-        let mut to_send = Vec::new();
-        for id in due {
-            let (sid, compact_at) = {
-                let st = self.rq.state.lock().unwrap();
-                match st.requests.get(&id) {
-                    Some(r) => (r.session.clone(), r.compact_at),
-                    None => continue,
-                }
-            };
-            let timed_out = compact_at
-                .map(|c| now - c > compact_to)
-                .unwrap_or(true);
-            let Some(sid) = sid else { continue };
-            match self.get_session(&sid).await {
-                Ok(s) => {
-                    let m = s.meta_snapshot();
-                    if timed_out || matches!(m.state.as_str(), "idle" | "asleep") {
-                        to_send.push(id);
-                    }
-                }
-                Err(_) => to_send.push(id), // session partie → fail au send
-            }
-        }
-        for id in to_send {
-            self.rq_send_round(&id).await;
-        }
-    }
 
     // -- dispatch -----------------------------------------------------
 
@@ -1062,16 +569,30 @@ impl Daemon {
         id: &str,
         cfg: &cfg::ReviewQueueCfg,
     ) -> Result<bool> {
-        // Snapshot requête+thread.
-        let (thread_key, round, by) = {
+        // Snapshot requête — le round est (re)calculé au dispatch :
+        // plusieurs requêtes `Queued` du même thread reçoivent des
+        // numéros distincts (compteur monotone du thread).
+        let thread_key = {
             let st = self.rq.state.lock().unwrap();
             let Some(r) = st.requests.get(id) else { return Ok(false) };
             if r.state != ReqState::Queued {
                 return Ok(false);
             }
-            (r.thread.clone(), r.round, r.by.clone())
+            r.thread.clone()
         };
-        let _ = by;
+        let round = {
+            let mut st = self.rq.state.lock().unwrap();
+            let Some(t) = st.threads.get_mut(&thread_key) else {
+                return Ok(false); // thread soldé entre-temps
+            };
+            t.round += 1;
+            let round = t.round;
+            t.title = format!("{}{}-r{}", cfg.title_prefix, t.tid, round);
+            if let Some(r) = st.requests.get_mut(id) {
+                r.round = round;
+            }
+            round
+        };
         let (sid, reused) = match self.rq_ensure_session(&thread_key, id, round, cfg).await? {
             Some(v) => v,
             None => return Ok(false), // thread introuvable — soldé ailleurs
@@ -1102,8 +623,6 @@ impl Daemon {
             }
             if let Some(t) = st.threads.get_mut(&thread_key) {
                 t.session = Some(sid.clone());
-                t.round = round;
-                t.title = format!("{}{}-r{}", cfg.title_prefix, t.tid, round);
                 t.active = Some(id.to_string());
             }
             if let Some(r) = st.requests.get_mut(id) {
@@ -1238,7 +757,7 @@ impl Daemon {
     /// Écrit `prompt.md` dans le run_dir puis envoie l'instruction
     /// par référence — le packet ne voyage JAMAIS inline dans le
     /// prompt. Round ≥2 préfixe « NEW REVIEW ROUND ».
-    async fn rq_send_round(self: &Arc<Self>, req_id: &str) {
+    pub(crate) async fn rq_send_round(self: &Arc<Self>, req_id: &str) {
         let cfg = self.rq.cfg.read().unwrap().clone();
         // Packet + chemin + sid + round préparés sous verrou —
         // `fill_packet`/`repos_markdown` sont synchrones et courts.
@@ -1263,7 +782,7 @@ impl Daemon {
                         .prompt
                         .clone()
                         .unwrap_or_else(|| PACKET_TEMPLATE.to_string());
-                    let packet = fill_packet(&tpl, r, r.round, &repos_markdown(r, &cfg));
+                    let packet = fill_packet(&tpl, r, r.round, &repos_markdown(r));
                     let p = Path::new(&r.run_dir).join("prompt.md");
                     Prep::Send(sid, r.round, packet, p)
                 }
@@ -1307,179 +826,6 @@ impl Daemon {
         }
     }
 
-    // -- reaper --------------------------------------------------------
-
-    /// Passe reaper : threads sans review active ni tour vivant,
-    /// forge vérifiée au plus toutes les `reaper_interval_secs`
-    /// (sauf `force` — RPC manuelle). Verdicts calculés en
-    /// `spawn_blocking` (les `ForgeClient` sont synchrones) puis
-    /// décision pure `rq_forge::reap_reason` → suppression.
-    async fn rq_reap_pass(self: &Arc<Self>, force: bool) -> Result<Vec<String>> {
-        let cfg = self.rq.cfg.read().unwrap().clone();
-        if !cfg.reaper_enabled {
-            return Ok(Vec::new());
-        }
-        let now = now_secs();
-        // Candidats : threads sans requête active, session joignable
-        // ou déjà partie, et (force ou intervalle écoulé).
-        let candidates: Vec<(String, Vec<RqPair>, Option<String>, f64)> = {
-            let st = self.rq.state.lock().unwrap();
-            st.threads
-                .iter()
-                .filter(|(_, t)| {
-                    t.active.is_none()
-                        && (force
-                            || now - t.reap_checked_at > cfg.reaper_interval_secs as f64)
-                })
-                .map(|(k, t)| (k.clone(), t.pairs.clone(), t.session.clone(), t.last_active))
-                .collect()
-        };
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-        // Sessions vivantes = tour potentiellement en cours →
-        // intangibles (garde dure : JAMAIS pendant une review ou un
-        // tour vivant).
-        let mut busy_keys: Vec<String> = Vec::new();
-        let mut gone: Vec<String> = Vec::new();
-        for (key, _pairs, sid, _la) in &candidates {
-            let Some(sid) = sid else {
-                gone.push(key.clone()); // thread sans session → ménage
-                continue;
-            };
-            match self.get_session(sid).await {
-                Ok(s) => {
-                    let m = s.meta_snapshot();
-                    // Tour vivant ou spawn en cours → intouchable.
-                    let busy = matches!(
-                        m.state.as_str(),
-                        "working" | "compacting" | "starting" | "waiting_input"
-                    );
-                    if busy {
-                        busy_keys.push(key.clone());
-                    }
-                }
-                Err(_) => gone.push(key.clone()), // session disparue → ménage
-            }
-        }
-        // Threads « busy » : on ne touche pas reap_checked_at — le
-        // prochain tick re-teste (un tour long ne doit pas compter
-        // comme « vérifié »).
-        {
-            let mut st = self.rq.state.lock().unwrap();
-            for k in &gone {
-                st.threads.remove(k);
-                st.reaped += 1;
-            }
-            for (key, _p, _s, _la) in &candidates {
-                if !busy_keys.contains(key) && !gone.contains(key) {
-                    if let Some(t) = st.threads.get_mut(key) {
-                        t.reap_checked_at = now;
-                    }
-                }
-            }
-        }
-        let _ = self.rq.save();
-        // Verdicts forge — une passe blocking pour tous les
-        // candidats restants (les clients forge sont sync). Le set
-        // `Forges` est cloné : `remote_forge`/`forge_for_host` sont
-        // des lectures pures de la config déclarée.
-        let forge_cfg = cfg.clone();
-        let forges = self.forges.read().unwrap().set.clone();
-        let forge_set = self.forges.read().unwrap().set.list_json();
-        let forge_arr = forge_set.as_array().cloned().unwrap_or_default();
-        let jobs: Vec<(String, Vec<RqPair>)> = candidates
-            .iter()
-            .filter(|(k, _, _, _)| !busy_keys.contains(k) && !gone.contains(k))
-            .map(|(k, p, _, _)| (k.clone(), p.clone()))
-            .collect();
-        let verdicts = tokio::task::spawn_blocking(move || {
-            jobs.iter()
-                .map(|(key, pairs)| {
-                    let vs: Vec<rq_forge::RepoVerdict> = pairs
-                        .iter()
-                        .map(|p| pair_forge_verdict(&forge_cfg, &forges, &forge_arr, p))
-                        .collect();
-                    (key.clone(), vs)
-                })
-                .collect::<Vec<_>>()
-        })
-        .await
-        .unwrap_or_default();
-        let mut reaped = Vec::new();
-        for (key, vs) in verdicts {
-            let last_active = {
-                let st = self.rq.state.lock().unwrap();
-                st.threads.get(&key).map(|t| t.last_active).unwrap_or(now)
-            };
-            let reason = rq_forge::reap_reason(false, &vs, last_active, now, &cfg);
-            let Some(reason) = reason else { continue };
-            let sid = {
-                let st = self.rq.state.lock().unwrap();
-                st.threads.get(&key).and_then(|t| t.session.clone())
-            };
-            if let Some(sid) = sid {
-                // TOCTOU : les verdicts forge ont été calculés il y a
-                // quelques secondes — re-vérifier review active +
-                // tour vivant avant de supprimer.
-                let still_clear = {
-                    let st = self.rq.state.lock().unwrap();
-                    st.threads
-                        .get(&key)
-                        .map(|t| t.active.is_none())
-                        .unwrap_or(false)
-                };
-                if !still_clear {
-                    continue;
-                }
-                if let Ok(s) = self.get_session(&sid).await {
-                    let m = s.meta_snapshot();
-                    if matches!(
-                        m.state.as_str(),
-                        "working" | "compacting" | "starting" | "waiting_input"
-                    ) {
-                        continue;
-                    }
-                }
-                if let Err(e) = self.h_delete_session(sid.clone()).await {
-                    warn!("review-queue: reap {key}: delete {sid}: {e:#}");
-                    continue;
-                }
-            }
-            {
-                let mut st = self.rq.state.lock().unwrap();
-                st.threads.remove(&key);
-                st.reaped += 1;
-            }
-            info!("review-queue: reaped thread {key} ({reason})");
-            reaped.push(key);
-        }
-        let _ = self.rq.save();
-        Ok(reaped)
-    }
-}
-
-/// Verdict forge d'une paire `(path, branch)` — résolution
-/// `forge_target` + `client_for_target` + `list_changes` +
-/// `verdict_for_changes`. Toutes les erreurs → `Unknown` (jamais de
-/// suppression sur une preuve incomplète hors TTL).
-fn pair_forge_verdict(
-    cfg: &cfg::ReviewQueueCfg,
-    forges: &crate::forges::Forges,
-    forge_set: &[Value],
-    pair: &RqPair,
-) -> rq_forge::RepoVerdict {
-    let Some(target) = rq_forge::forge_target(cfg, forges, Path::new(&pair.path)) else {
-        return rq_forge::RepoVerdict::Unknown;
-    };
-    let Some(client) = rq_forge::client_for_target(forge_set, &target, Path::new(&pair.path))
-    else {
-        return rq_forge::RepoVerdict::Unknown;
-    };
-    match rq_forge::list_changes(&client, 200) {
-        Some(changes) => rq_forge::verdict_for_changes(&changes, &pair.branch),
-        None => rq_forge::RepoVerdict::Unknown,
-    }
 }
 
 #[cfg(test)]
@@ -1521,7 +867,7 @@ mod tests {
             result: None,
             error: None,
         };
-        let md = repos_markdown(&req, &cfg::ReviewQueueCfg::default());
+        let md = repos_markdown(&req);
         let p = fill_packet(PACKET_TEMPLATE, &req, 2, &md);
         assert!(p.contains("rq-test") && p.contains("round 2"));
         assert!(p.contains("/run/dir") && p.contains("check the diff"));
