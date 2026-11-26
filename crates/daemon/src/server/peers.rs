@@ -224,6 +224,7 @@ impl Daemon {
             context_size: None,
             last_error: None,
             wait: None,
+            state_since: Some(proto::now_unix()),
         };
         let dir = Session::create_dir(&self.root, &meta)?;
         let session2 = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;

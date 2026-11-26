@@ -665,6 +665,7 @@ fn rev_meta(state: &str, kind: Option<&str>) -> SessionMeta {
             retry_at: None,
         }),
         wait: None,
+        state_since: None,
     }
 }
 

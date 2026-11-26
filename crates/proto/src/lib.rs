@@ -606,6 +606,13 @@ pub struct SessionMeta {
     /// jamais persisté).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<WaitInfo>,
+    /// Horodatage (epoch secondes UTC) du dernier changement d'état
+    /// persisté — posé à la création puis par chaque transition
+    /// (`set_state`, reconcile au boot) ; le client en tire l'âge
+    /// « asleep depuis … » (#383). None sur les meta.json écrits
+    /// avant l'introduction du champ (additif — pas de bump (sync)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_since: Option<i64>,
 }
 
 /// Détail du waiter ac-wait vivant qui justifie l'état `wait` — le
@@ -1880,6 +1887,15 @@ pub struct Push {
 
 pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Secondes epoch UTC courantes — pour les champs d'horodatage
+/// numériques (state_since, retry_at…).
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// ID court type "s-a3f9c2d1".

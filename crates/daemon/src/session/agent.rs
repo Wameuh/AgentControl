@@ -1770,6 +1770,7 @@ impl Session {
             match m.state.as_str() {
                 "running" | "working" | "waiting_input" | "idle" | "starting" | "compacting" => {
                     m.state = "interrupted".into();
+                    m.state_since = Some(proto::now_unix());
                     true
                 }
                 "error" => {
@@ -1779,6 +1780,7 @@ impl Session {
                     // orch/acctl bloqueraient toute relance) alors que
                     // rien n'est réellement retenu.
                     m.state = "interrupted".into();
+                    m.state_since = Some(proto::now_unix());
                     m.last_error = None;
                     true
                 }

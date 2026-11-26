@@ -713,6 +713,7 @@ mod tests {
                 retry_at: None,
             }),
             wait: None,
+            state_since: None,
         }
     }
 

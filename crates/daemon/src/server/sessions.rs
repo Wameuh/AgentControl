@@ -142,6 +142,7 @@ impl Daemon {
             context_size: None,
             last_error: None,
             wait: None,
+            state_since: Some(proto::now_unix()),
         };
         let dir = Session::create_dir(&self.root, &meta)?;
         let session = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
@@ -233,6 +234,7 @@ impl Daemon {
             context_size: None,
             last_error: None,
             wait: None,
+            state_since: Some(proto::now_unix()),
         };
         let dir = Session::create_dir(&self.root, &meta)?;
         let session = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
@@ -386,6 +388,7 @@ impl Daemon {
         meta2.native_session_id = Some(new_native);
         meta2.created_at = proto::now_iso();
         meta2.state = "starting".into();
+        meta2.state_since = Some(proto::now_unix());
         meta2.pending_config.clear();
         meta2.context_used = None;
         meta2.context_size = None;

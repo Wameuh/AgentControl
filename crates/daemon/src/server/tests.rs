@@ -97,6 +97,7 @@ fn advisor_meta(advisor: Option<&str>) -> proto::SessionMeta {
         context_size: None,
         last_error: None,
         wait: None,
+        state_since: None,
     }
 }
 

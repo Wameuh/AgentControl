@@ -47,6 +47,34 @@ function waitTip(s: SessionMeta): string {
   return ` · ${age}${name}${max}`;
 }
 
+/** Âge dans l'état courant en secondes (meta.state_since, #383) —
+ *  null sur un vieux démon sans le champ : rien n'est affiché. */
+function stateAgeSecs(s: SessionMeta): number | null {
+  if (s.state_since == null) return null;
+  return Math.max(0, Date.now() / 1000 - s.state_since);
+}
+
+/** Segment « · depuis 3 h » de l'âge d'état — même formulation que
+ *  waitTip (#189), calculé côté client depuis state_since. */
+function stateAgeTip(s: SessionMeta): string {
+  const age = stateAgeSecs(s);
+  if (age == null) return "";
+  return ` · ${age < 1 ? t("just_now") : t("wait_for", { d: fmtDur(age) })}`;
+}
+
+/** Terme d'âge pour renderSig : le HTML des sessions endormies dépend
+ *  de l'âge écoulé (badge + tooltip), pas de state_since figé — sans
+ *  un terme variant la durée n'avancerait qu'au prochain changement
+ *  d'état. Granularité calée sur fmtDur : 5 s (<2 min), 30 s (<1 h),
+ *  60 s au-delà → un rebuild de liste au plus par minute tant
+ *  qu'au moins une session dort (#383). */
+function stateAgeBucket(s: SessionMeta): number {
+  if (s.state !== "asleep") return 0;
+  const age = stateAgeSecs(s);
+  if (age == null) return 0;
+  return Math.floor(age / (age < 120 ? 5 : age < 3600 ? 30 : 60));
+}
+
 /** Charge d'un drag interne à l'arbre : session (id) ou sous-arbre de
  *  groupe (path). `kind` absent = session (payloads antérieurs). */
 type DragPayload =
@@ -680,7 +708,7 @@ export class Sidebar {
     const sess = app.lastSessions.map((s) => [
       s.conn ?? "", s.id, s.title, s.agent, s.group ?? "", s.state,
       s.offline ? 1 : 0, s.origin ?? "", s.spawned_by ?? "",
-      s.last_error ?? null, s.wait ?? null,
+      s.last_error ?? null, s.wait ?? null, stateAgeBucket(s),
     ]);
     const connKeys = [
       ...new Set([
@@ -1274,13 +1302,20 @@ export class Sidebar {
             ? ` · retry ${new Date(s.last_error.retry_at * 1000).toLocaleTimeString()}`
             : "")
         : s.state === "asleep"
-          ? `asleep · ${t("dot_asleep_tip")}`
+          ? `asleep${stateAgeTip(s)} · ${t("dot_asleep_tip")}`
           : s.state === "wait-asleep"
             ? `asleep · wait${waitTip(s)} · ${t("dot_wait_tip")}`
             : s.state === "wait"
               ? `wait${waitTip(s)} · ${t("dot_wait_tip")}`
               : s.state;
-    div.innerHTML = `<span class="dot st-${dotCls(s.state, s.last_error)}" title="${q(esc(dotTip))}">${dotIcon(s.state, s.last_error)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
+    // Badge visible « 3 h » pour une session endormie (#383) —
+    // wait-asleep garde le rendu existant (l'âge du waiter fait déjà
+    // foi dans le tooltip, pas de double comptage).
+    const sleepAge = s.state === "asleep" ? stateAgeSecs(s) : null;
+    const sleepHtml = sleepAge != null
+      ? `<span class="sess-age" title="${q(esc(dotTip))}">${this.hl(fmtDur(sleepAge))}</span>`
+      : "";
+    div.innerHTML = `<span class="dot st-${dotCls(s.state, s.last_error)}" title="${q(esc(dotTip))}">${dotIcon(s.state, s.last_error)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span>${sleepHtml}<button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);
       // Mobile : l'écran Session glisse depuis la droite (retour ← /
