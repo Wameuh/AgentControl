@@ -919,8 +919,12 @@ export class ChatView {
     // config_option réellement bindée sur effort-select ce rendu (pensée
     // pour le saut dyn-opts — pas de doublon select générique dessous).
     let boundThought: (typeof copts)[number] | undefined;
-    const rawOpts = modelOpt
-      ? modelOpt.options.map((o) => ({ v: o.value, label: modelLabel(o.value, o.name) }))
+    const rawOpts: { v: string; name?: string; label: string }[] = modelOpt
+      ? modelOpt.options.map((o) => ({
+          v: o.value,
+          name: o.name,
+          label: modelLabel(o.value, o.name),
+        }))
       : app.current.available_models.map((m) => ({ v: m, label: modelLabel(m) }));
     // Catalogue complet du profil (model_catalog) : les variantes hors
     // annonce ACP rejoignent les options, badgées « catalogue » — leur
@@ -940,7 +944,10 @@ export class ChatView {
           // fusionnés à available_models) : le libellé catalogue
           // (« Fable 5.1 ») fait foi sur la valeur brute.
           const o = rawOpts.find((x) => x.v === e.value);
-          if (o && e.label) o.label = e.label;
+          if (o && e.label) {
+            o.name = e.label;
+            o.label = e.label;
+          }
         }
       }
     }

@@ -59,13 +59,20 @@ export class NewSessionDialog {
     );
     const caps: AgentCaps | undefined = agent?.caps;
     const co = caps?.config_options?.find((o) => o.id === kind || o.category === kind);
-    const vals = (co?.options ?? []).map((o) => ({
+    const vals: { v: string; name?: string; label: string }[] = (
+      co?.options ?? []
+    ).map((o) => ({
       v: o.value,
+      name: o.name,
       label: modelLabel(o.value, o.name),
     }));
     for (const o of (kind === "mode" ? caps?.modes : caps?.models) ?? []) {
       if (!vals.some((x) => x.v === o.value))
-        vals.push({ v: o.value, label: modelLabel(o.value, o.name) });
+        vals.push({
+          v: o.value,
+          name: o.name,
+          label: modelLabel(o.value, o.name),
+        });
     }
     // extra_models du profil (ex. opus de claude, hors annonce ACP) :
     // sélectionnables au spawn — le handshake les fusionne dans
@@ -77,7 +84,11 @@ export class NewSessionDialog {
     if (kind === "model") {
       for (const e of agent?.extra_models ?? []) {
         if (!vals.some((x) => x.v === e.value))
-          vals.push({ v: e.value, label: modelLabel(e.value, e.label) });
+          vals.push({
+            v: e.value,
+            name: e.label,
+            label: modelLabel(e.value, e.label),
+          });
       }
       // thought_level dédié annoncé : une entrée par modèle (base
       // dédupliquée) — le niveau de pensée ne se choisit plus que dans

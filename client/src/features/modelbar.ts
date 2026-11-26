@@ -28,16 +28,17 @@ export const splitModel = (v: string): [string, string] => {
 export const joinModel = (base: string, eff: string) =>
   !eff ? base : eff.startsWith("[") ? base + eff : `${base}-${eff}`;
 
-/** Libellé affichable d'une valeur modèle : jamais de crochets [params]
- *  bruts dans un label — repli « base · k=v, … » quand l'agent n'a pas
- *  fourni de nom. Les suffixes d'effort ne font pas partie du libellé
- *  (l'effort a son propre contrôle). */
+/** Libellé « plat » d'une valeur modèle — pour les listes SANS
+ *  contrôle d'effort dédié : jamais de crochets [params] bruts, et les
+ *  variantes d'effort RESTENT distinguables (ici le suffixe d'id ou
+ *  les params sont la seule information d'effort — les retirer
+ *  afficherait des options identiques envoyant des ids différents). */
 export function modelLabel(v: string, name?: string): string {
   if (v.startsWith("fusion-")) return name?.trim() || v;
   const n = name?.trim() ?? "";
-  if (n && n !== v && !n.includes("[")) return n;
+  if (n && !n.includes("[")) return n;
   const [b, e] = splitModel(v);
-  if (!e.startsWith("[")) return b;
+  if (!e.startsWith("[")) return v;
   const inner = e.slice(1, -1).trim();
   return inner ? `${b} · ${inner}` : b;
 }
@@ -58,17 +59,34 @@ export interface ModelGroup {
 /** Options modèle regroupées par base : une entrée par modèle quand
  *  l'effort a son propre contrôle (thought_level) ou pour la vue
  *  « base + select d'effort ». Les combos fusion-* traversent tels
- *  quels — leur effort fait partie de l'identifiant de combo. */
-export function groupModelOpts(opts: { v: string; label: string }[]): ModelGroup[] {
+ *  quels — leur effort fait partie de l'identifiant de combo.
+ *  `name`/`label` bruts de l'annonce servent au libellé de groupe :
+ *  nom informatif, sinon libellé fourni (catalogue badgé), sinon la
+ *  base nue — le suffixe/params d'effort ne doit pas fuir dans une
+ *  vue groupée (l'effort a son propre contrôle). */
+export function groupModelOpts(
+  opts: { v: string; name?: string; label?: string }[],
+): ModelGroup[] {
   const out = new Map<string, ModelGroup>();
   for (const o of opts) {
     if (o.v.startsWith("fusion-")) {
-      if (!out.has(o.v)) out.set(o.v, { base: o.v, id: o.v, label: o.label, effort: "" });
+      if (!out.has(o.v))
+        out.set(o.v, { base: o.v, id: o.v, label: o.name?.trim() || o.label || o.v, effort: "" });
       continue;
     }
     const [b, e] = splitModel(o.v);
     const g = out.get(b);
-    if (!g) out.set(b, { base: b, id: o.v, label: o.label, effort: e });
+    if (!g) {
+      const n = o.name?.trim() ?? "";
+      const l = o.label?.trim() ?? "";
+      const label =
+        n && n !== o.v && !n.includes("[")
+          ? n
+          : l && l !== o.v && !l.includes("[") && !l.includes("=")
+            ? l
+            : b;
+      out.set(b, { base: b, id: o.v, label, effort: e });
+    }
     // effort = première variante non vide de la base (lookup coût /
     // envoi historique) — un id nu annoncé en premier ne doit pas
     // masquer la variante effort du groupe.
