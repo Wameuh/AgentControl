@@ -21,7 +21,9 @@ import { msgMenuItems, openMsgCtx } from "../mobile/msg-actions";
 import {
   fillEfforts,
   fillThoughtLevels,
+  groupModelOpts,
   joinModel,
+  modelLabel,
   modelTransition,
   rememberedEffort,
   splitModel,
@@ -918,8 +920,8 @@ export class ChatView {
     // pour le saut dyn-opts — pas de doublon select générique dessous).
     let boundThought: (typeof copts)[number] | undefined;
     const rawOpts = modelOpt
-      ? modelOpt.options.map((o) => ({ v: o.value, label: o.name || o.value }))
-      : app.current.available_models.map((m) => ({ v: m, label: m }));
+      ? modelOpt.options.map((o) => ({ v: o.value, label: modelLabel(o.value, o.name) }))
+      : app.current.available_models.map((m) => ({ v: m, label: modelLabel(m) }));
     // Catalogue complet du profil (model_catalog) : les variantes hors
     // annonce ACP rejoignent les options, badgées « catalogue » — leur
     // application passe par le side-channel démon (close→override→load),
@@ -949,24 +951,13 @@ export class ChatView {
       md.hidden = false;
       mf.hidden = true;
       // Modèles de base dédupliqués (effort géré à part) + entrée Fusion
-      const bases = new Map<string, string>();
-      // Premier effort annoncé par base — c'est la variante que
-      // resolveModel applique par défaut : le coût affiché sur la base
-      // est celui de cette variante (ex. swe-2-high → -lightning payant).
-      const firstEff = new Map<string, string>();
-      for (const o of rawOpts) {
-        if (o.v.startsWith("fusion-")) continue;
-        const [b, e] = splitModel(o.v);
-        if (!bases.has(b)) bases.set(b, o.label);
-        if (e && !firstEff.has(b)) firstEff.set(b, e);
-      }
       md.innerHTML = "";
-      for (const [b, label] of bases) {
+      for (const g of groupModelOpts(rawOpts)) {
+        if (g.base.startsWith("fusion-")) continue;
         const o = document.createElement("option");
-        o.value = b;
-        const fe = firstEff.get(b);
-        const cost = costFor(fe ? joinModel(b, fe) : b);
-        o.textContent = label + (cost ? ` · ${cost.label}` : "");
+        o.value = g.base;
+        const cost = costFor(g.effort ? joinModel(g.base, g.effort) : g.base);
+        o.textContent = g.label + (cost ? ` · ${cost.label}` : "");
         if (cost?.detail) o.title = cost.detail;
         md.appendChild(o);
       }

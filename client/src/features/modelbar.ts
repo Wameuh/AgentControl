@@ -28,6 +28,55 @@ export const splitModel = (v: string): [string, string] => {
 export const joinModel = (base: string, eff: string) =>
   !eff ? base : eff.startsWith("[") ? base + eff : `${base}-${eff}`;
 
+/** Libellé affichable d'une valeur modèle : jamais de crochets [params]
+ *  bruts dans un label — repli « base · k=v, … » quand l'agent n'a pas
+ *  fourni de nom. Les suffixes d'effort ne font pas partie du libellé
+ *  (l'effort a son propre contrôle). */
+export function modelLabel(v: string, name?: string): string {
+  if (v.startsWith("fusion-")) return name?.trim() || v;
+  const n = name?.trim() ?? "";
+  if (n && n !== v && !n.includes("[")) return n;
+  const [b, e] = splitModel(v);
+  if (!e.startsWith("[")) return n || b;
+  const inner = e.slice(1, -1).trim();
+  return inner ? `${b} · ${inner}` : b;
+}
+
+export interface ModelGroup {
+  /** Base dédupliquée (splitModel) — clé de regroupement. */
+  base: string;
+  /** Premier id complet annoncé pour cette base — valeur canonique à
+   *  envoyer : les agents à résolution stricte refusent une base nue
+   *  ambiguë (ex. devin « glm-5-3 » → glm-5-3-max | glm-5-3-flash-max). */
+  id: string;
+  label: string;
+  /** Variante effort/[params] du premier id — sert aux lookups coût et
+   *  à l'envoi historique quand pas de contrôle d'effort dédié. */
+  effort: string;
+}
+
+/** Options modèle regroupées par base : une entrée par modèle quand
+ *  l'effort a son propre contrôle (thought_level) ou pour la vue
+ *  « base + select d'effort ». Les combos fusion-* traversent tels
+ *  quels — leur effort fait partie de l'identifiant de combo. */
+export function groupModelOpts(opts: { v: string; label: string }[]): ModelGroup[] {
+  const out = new Map<string, ModelGroup>();
+  for (const o of opts) {
+    if (o.v.startsWith("fusion-")) {
+      if (!out.has(o.v)) out.set(o.v, { base: o.v, id: o.v, label: o.label, effort: "" });
+      continue;
+    }
+    const [b, e] = splitModel(o.v);
+    const g = out.get(b);
+    if (!g) out.set(b, { base: b, id: o.v, label: o.label, effort: e });
+    // effort = première variante non vide de la base (lookup coût /
+    // envoi historique) — un id nu annoncé en premier ne doit pas
+    // masquer la variante effort du groupe.
+    else if (!g.effort && e) g.effort = e;
+  }
+  return [...out.values()];
+}
+
 /** Décompose "fusion-<prim>-<eff>-sidekick-<side>-<eff>" → [pb, pe, sb, se]. */
 export function fusionParts(v: string): [string, string, string, string] | null {
   if (!v.startsWith("fusion-")) return null;

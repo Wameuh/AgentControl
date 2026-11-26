@@ -13,7 +13,7 @@ import { isAndroid } from "../core/chrome";
 import { engineCaps, debugNoFs } from "../core/engine";
 import type { CmdInfo, SendMode } from "../core/types";
 import { t } from "../i18n";
-import { cmdDesc, cmdHint, cmdName } from "./modelbar";
+import { cmdDesc, cmdHint, cmdName, modelLabel } from "./modelbar";
 import { sendPref } from "./settings";
 import { Attachments } from "./attachments";
 import { SttMic } from "./stt-mic";
@@ -468,11 +468,11 @@ export class Composer {
           );
           const items = (opt?.options ?? []).map((o) => ({
             v: o.value,
-            label: o.name || o.value,
+            label: modelLabel(o.value, o.name),
           }));
           // Merge : available_models complète les options déjà annoncées.
           for (const v of app.current.available_models) {
-            if (!items.some((i) => i.v === v)) items.push({ v, label: v });
+            if (!items.some((i) => i.v === v)) items.push({ v, label: modelLabel(v) });
           }
           const cur = opt?.currentValue || app.current.model || "";
           this.chat.sysline(
