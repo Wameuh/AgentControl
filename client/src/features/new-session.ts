@@ -10,6 +10,7 @@ import type { AgentCaps, AgentOpt, SessionMeta } from "../core/types";
 import { t } from "../i18n";
 import { costFor, ensureCosts } from "./modelcosts";
 import { catalogFor, ensureCatalog } from "./modelcatalog";
+import { groupModelOpts, modelLabel, splitModel } from "./modelbar";
 import type { GroupStore } from "./groups";
 
 /** Valeur sentinelle des selects mode/modèle : saisie libre. */
@@ -58,26 +59,62 @@ export class NewSessionDialog {
     );
     const caps: AgentCaps | undefined = agent?.caps;
     const co = caps?.config_options?.find((o) => o.id === kind || o.category === kind);
-    const vals = (co?.options ?? []).map((o) => ({ v: o.value, label: o.name || o.value }));
+    const vals: { v: string; name?: string; label: string }[] = (
+      co?.options ?? []
+    ).map((o) => ({
+      v: o.value,
+      name: o.name,
+      label: modelLabel(o.value, o.name),
+    }));
     for (const o of (kind === "mode" ? caps?.modes : caps?.models) ?? []) {
-      if (!vals.some((x) => x.v === o.value)) vals.push({ v: o.value, label: o.name || o.value });
+      if (!vals.some((x) => x.v === o.value))
+        vals.push({
+          v: o.value,
+          name: o.name,
+          label: modelLabel(o.value, o.name),
+        });
     }
     // extra_models du profil (ex. opus de claude, hors annonce ACP) :
     // sélectionnables au spawn — le handshake les fusionne dans
     // available_models et session/set_model les accepte tels quels.
+    let cur =
+      co?.currentValue ||
+      (kind === "mode" ? caps?.current_mode : caps?.current_model) ||
+      undefined;
     if (kind === "model") {
       for (const e of agent?.extra_models ?? []) {
         if (!vals.some((x) => x.v === e.value))
-          vals.push({ v: e.value, label: e.label || e.value });
+          vals.push({
+            v: e.value,
+            name: e.label,
+            label: modelLabel(e.value, e.label),
+          });
+      }
+      // thought_level dédié annoncé : une entrée par modèle (base
+      // dédupliquée) — le niveau de pensée ne se choisit plus que dans
+      // le select « Thinking », jamais en variante d'effort du modèle.
+      // Les combos fusion-* portent leurs efforts dans l'id (deux
+      // selects d'effort à la création = le doublon rapporté) : ils
+      // sortent du picker — la fusion se configure via son dialogue
+      // dédié après création, ou en saisie libre. Valeur = variante
+      // annoncée canonique : une base nue peut être ambiguë côté
+      // agent (« glm-5-3 » → glm-5-3-max | glm-5-3-flash-max).
+      const thought = caps?.config_options?.some(
+        (o) => o.id === "thought_level" || o.category === "thought_level",
+      );
+      if (thought && vals.length) {
+        const groups = groupModelOpts(vals.filter((x) => !x.v.startsWith("fusion-")));
+        vals.splice(0, vals.length, ...groups.map((g) => ({ v: g.id, label: g.label })));
+        if (cur) {
+          const cur0 = cur;
+          const g =
+            groups.find((x) => x.id === cur0) ??
+            groups.find((x) => x.base === splitModel(cur0)[0]);
+          if (g) cur = g.id;
+        }
       }
     }
-    return {
-      vals,
-      cur:
-        co?.currentValue ||
-        (kind === "mode" ? caps?.current_mode : caps?.current_model) ||
-        undefined,
-    };
+    return { vals, cur };
   }
 
   /** Valeur effective d'un champ mode/model : le select quand il est
@@ -318,7 +355,7 @@ export class NewSessionDialog {
           const cost = costFor(o.value, s.conn ?? "", s.agent);
           const el = document.createElement("option");
           el.value = o.value;
-          el.label = (o.name || o.value) + (cost ? ` · ${cost.label}` : "");
+          el.label = modelLabel(o.value, o.name) + (cost ? ` · ${cost.label}` : "");
           if (cost?.detail) el.title = cost.detail;
           dl.appendChild(el);
         }
