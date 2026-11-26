@@ -1210,6 +1210,8 @@ async fn main() -> Result<()> {
                     // --repo <path[@branch[@base]]>… (répétable),
                     // --spec <json [ReviewRepoSpec]> (forme complète,
                     // prime sur --repo), --instructions <texte>.
+                    // ⚠ `@` dans le PATH n'est pas gérable en forme
+                    // courte → utiliser --spec dans ce cas.
                     // La session demandeuse = $AGENTCONTROL_SESSION
                     // (injectée par le démon dans les sessions agent)
                     // — absente → review sans steer du résultat.

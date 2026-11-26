@@ -45,6 +45,11 @@ instructions}` (proto — additive extension).
    the round prompt — `NEW REVIEW ROUND <id>: disregard state from
    earlier rounds; the packet at <abs path> is the only authoritative
    input. Read <abs path> and follow it exactly.`
+   Ordering note: a reused session is `asleep` between rounds, so the
+   prompt may be sent while the `/compact` turn has not visibly
+   started — ordering is guaranteed by the session's own prompt
+   queue (`/compact` was posted first); `compact_timeout_secs` only
+   bounds the wait when the session stays busy.
 2. **Packet by reference**: the full review packet (repos snapshot:
    path, branch, base, head sha, diff instructions, output protocol)
    is written to `<state_dir>/runs/<request_id>/prompt.md`; the

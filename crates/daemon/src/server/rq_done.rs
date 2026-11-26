@@ -86,9 +86,20 @@ impl Daemon {
         self.rq_advance_compact().await;
     }
 
-    /// Requêtes `Compacting` : la session a fini son tour de compact
-    /// (state `idle`) **ou** le timeout borné est passé → on envoie
-    /// le prompt du round. Session morte → `rq_fail` au send.
+    /// Requêtes `Compacting` : le prompt du round part dès que la
+    /// session est de nouveau `idle`/`asleep` **ou** que le timeout
+    /// borné `compact_timeout_secs` est passé. Session morte →
+    /// `rq_fail` au send.
+    ///
+    /// ⚠ Ordre : la session reviewer est endormie entre deux rounds —
+    /// juste après l'envoi de `/compact` elle peut encore être
+    /// `asleep`/`idle` (le tour de compact n'a pas encore démarré).
+    /// Dans ce cas le prompt est envoyé tout de suite et l'ORDRE est
+    /// garanti par la file de prompts de la session (le `/compact`
+    /// a été posté en premier) — on ne peut pas distinguer « compact
+    /// fini » de « compact pas encore commencé » sans état dédié.
+    /// C'est voulu : attendre un `working` observé rendrait le
+    /// compact_timeout inefficace sur les agents rapides.
     async fn rq_advance_compact(self: &Arc<Self>) {
         let compact_to = self.rq.cfg.read().unwrap().compact_timeout_secs as f64;
         let now = now_secs();

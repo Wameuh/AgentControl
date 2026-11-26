@@ -62,9 +62,9 @@ packet exactly — it is the only authoritative input for this round.
 Write into `{RUN_DIR}`:
 
 1. `review.md` — the full review, markdown.
-2. `findings.json` — `{{"findings":[{{"severity":"blocker|major|minor|nit","file":"…","line":123,"message":"…"}}]}}`
+2. `findings.json` — `{"findings":[{"severity":"blocker|major|minor|nit","file":"…","line":123,"message":"…"}]}`
    (an empty array is valid).
-3. `complete.json` — `{{"verdict":"approved|changes_requested|comment","summary":"one line"}}`
+3. `complete.json` — `{"verdict":"approved|changes_requested|comment","summary":"one line"}`
    — write it LAST: it is the completion signal.
 
 Then stop. Do NOT modify any reviewed repository — the queue flags
@@ -432,7 +432,24 @@ impl RqProbe {
     pub(crate) fn save(&self) -> Result<()> {
         let sdir = self.state_dir();
         std::fs::create_dir_all(&sdir)?;
-        let st = self.state.lock().unwrap().clone();
+        // Rétention : les requêtes soldées (Done/Failed/Timeout/
+        // AcquireTimeout) de plus de 7 jours sont purgées — le
+        // fichier d'état reste borné même sur une file très
+        // utilisée. Les requêtes non soldées ne sont JAMAIS purgées.
+        let cutoff = now_secs() - 7.0 * 24.0 * 3600.0;
+        let st = {
+            let mut g = self.state.lock().unwrap();
+            g.requests.retain(|_, r| {
+                !matches!(
+                    r.state,
+                    ReqState::Done
+                        | ReqState::Failed
+                        | ReqState::Timeout
+                        | ReqState::AcquireTimeout
+                ) || r.created_at > cutoff
+            });
+            g.clone()
+        };
         let tmp = sdir.join("review-queue-state.json.part");
         let finalp = sdir.join("review-queue-state.json");
         std::fs::write(&tmp, serde_json::to_string_pretty(&st)?)?;
@@ -470,6 +487,32 @@ impl RqProbe {
             "recent": recent,
         })
     }
+}
+
+/// Prochaine requête éligible au dispatch : la plus vieille `Queued`
+/// **dont le thread n'a pas déjà une review en cours** — les rounds
+/// d'un même thread sont SÉQUENTIELS sur la session reviewer (une
+/// review à la fois par thread, quel que soit `max_parallel`).
+/// « Occupé » = `t.active` posé (dispatch en cours) ou une requête
+/// du thread en `Compacting`/`Reviewing`.
+fn pick_next(st: &RqState) -> Option<String> {
+    let busy: std::collections::BTreeSet<&str> = st
+        .requests
+        .values()
+        .filter(|r| r.state.active())
+        .map(|r| r.thread.as_str())
+        .chain(
+            st.threads
+                .values()
+                .filter(|t| t.active.is_some())
+                .map(|t| t.key.as_str()),
+        )
+        .collect();
+    st.requests
+        .values()
+        .filter(|r| r.state == ReqState::Queued && !busy.contains(r.thread.as_str()))
+        .min_by(|a, b| a.created_at.partial_cmp(&b.created_at).unwrap())
+        .map(|r| r.id.clone())
 }
 
 fn load_state(sdir: &Path) -> RqState {
@@ -541,14 +584,11 @@ impl Daemon {
             if active as u32 >= cfg.max_parallel.max(1) {
                 return;
             }
-            // Prochaine requête en file (FIFO).
+            // Prochaine requête en file (FIFO) — `pick_next` saute
+            // les threads déjà occupés (voir son doc).
             let next = {
                 let st = self.rq.state.lock().unwrap();
-                st.requests
-                    .iter()
-                    .filter(|(_, r)| r.state == ReqState::Queued)
-                    .min_by(|a, b| a.1.created_at.partial_cmp(&b.1.created_at).unwrap())
-                    .map(|(id, _)| id.clone())
+                pick_next(&st)
             };
             let Some(id) = next else { return };
             match self.rq_dispatch_one(&id, &cfg).await {
@@ -580,11 +620,21 @@ impl Daemon {
             }
             r.thread.clone()
         };
+        // Thread disparu entre ingest et dispatch — échec explicite
+        // plutôt que `Queued` muet jusqu'à acquire_timeout.
+        // Ok(true) = « progrès » : la boucle continue sur la
+        // requête suivante.
+        let thread_gone = {
+            let st = self.rq.state.lock().unwrap();
+            !st.threads.contains_key(&thread_key)
+        };
+        if thread_gone {
+            self.rq_fail(id, "thread state lost").await;
+            return Ok(true);
+        }
         let round = {
             let mut st = self.rq.state.lock().unwrap();
-            let Some(t) = st.threads.get_mut(&thread_key) else {
-                return Ok(false); // thread soldé entre-temps
-            };
+            let t = st.threads.get_mut(&thread_key).unwrap();
             t.round += 1;
             let round = t.round;
             t.title = format!("{}{}-r{}", cfg.title_prefix, t.tid, round);
@@ -873,6 +923,68 @@ mod tests {
         assert!(p.contains("/run/dir") && p.contains("check the diff"));
         assert!(p.contains("/repo") && p.contains("`feat`"));
         assert!(!p.contains("{REQUEST}") && !p.contains("{RUN_DIR}"));
+        // Le template est rempli par str::replace (pas format!) —
+        // les accolades JSON doivent être SIMPLES, jamais doublées.
+        assert!(!p.contains("{{") && !p.contains("}}"));
+        assert!(p.contains(r#"{"findings":[{"severity""#));
+    }
+
+    fn req(id: &str, thread: &str, state: ReqState, created_at: f64) -> RqRequest {
+        RqRequest {
+            id: id.into(),
+            by: String::new(),
+            repos: vec![],
+            instructions: String::new(),
+            thread: thread.into(),
+            session: None,
+            round: 1,
+            state,
+            created_at,
+            dispatched_at: None,
+            compact_at: None,
+            run_dir: String::new(),
+            snaps: vec![],
+            result: None,
+            error: None,
+        }
+    }
+
+    fn thread(key: &str, active: Option<String>) -> RqThread {
+        RqThread {
+            key: key.into(),
+            tid: "tid".into(),
+            pairs: vec![],
+            session: None,
+            title: String::new(),
+            round: 0,
+            active,
+            last_active: 0.0,
+            reap_checked_at: 0.0,
+            created_at: 0.0,
+        }
+    }
+
+    #[test]
+    fn pick_next_sauts_les_threads_occupees() {
+        // Deux requêtes en file sur le MÊME thread + une sur un
+        // autre : la plus vieille du thread libre part, celle du
+        // thread occupé attend — même avec des slots disponibles.
+        let mut st = RqState::default();
+        st.threads.insert("T1".into(), thread("T1", None));
+        st.threads.insert("T2".into(), thread("T2", Some("rq-a".into())));
+        st.requests.insert("rq-1".into(), req("rq-1", "T1", ReqState::Queued, 1.0));
+        st.requests.insert("rq-2".into(), req("rq-2", "T2", ReqState::Queued, 2.0));
+        st.requests.insert("rq-3".into(), req("rq-3", "T1", ReqState::Queued, 3.0));
+        // rq-2 est plus vieille mais son thread T2 est occupé → rq-1.
+        assert_eq!(pick_next(&st).as_deref(), Some("rq-1"));
+        // rq-1 passe en review → T1 occupé à son tour : plus rien
+        // d'éligible (rq-3 attend la fin de rq-1).
+        st.requests.get_mut("rq-1").unwrap().state = ReqState::Reviewing;
+        assert_eq!(pick_next(&st), None);
+        // T2 libéré → rq-2 (plus vieille que rq-3) redevient
+        // éligible, T1 restant occupé → rq-2 gagne.
+        st.threads.get_mut("T2").unwrap().active = None;
+        assert_eq!(pick_next(&st).as_deref(), Some("rq-2"));
     }
 
     #[test]

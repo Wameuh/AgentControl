@@ -215,7 +215,7 @@ pub(crate) fn params_schema(agents: &[String]) -> Vec<ParamSpec> {
             "prompt",
             "Packet template",
             "review packet template — placeholders {REQUEST} {ROUND} \
-             {RUN_DIR} {REPOS} {INSTRUCTIONS} {COMPACT}; empty = \
+             {RUN_DIR} {REPOS} {INSTRUCTIONS}; empty = \
              built-in template",
             ParamKind::String,
             None,
