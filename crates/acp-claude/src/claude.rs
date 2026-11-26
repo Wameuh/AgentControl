@@ -969,8 +969,7 @@ fn result_with_context(msg: String, v: &Value) -> String {
     if let Some(n) = v.get("num_turns").and_then(Value::as_u64) {
         ctx.push(format!("turns={n}"));
     }
-    if v
-        .get("stopped_by_permission_check")
+    if v.get("stopped_by_permission_check")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
