@@ -628,6 +628,107 @@ async fn fetch_pr_head_erreur_reseau_reste_transitoire() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+// ---- Erreur session reviewer kind-aware (item #381).
+
+fn rev_meta(state: &str, kind: Option<&str>) -> SessionMeta {
+    SessionMeta {
+        id: "s-r".into(),
+        agent: "claude".into(),
+        title: "PRReview-1".into(),
+        cwd: String::new(),
+        created_at: String::new(),
+        native_session_id: None,
+        mode: None,
+        model: None,
+        model_source: None,
+        model_override_sid: None,
+        supports_load: None,
+        available_modes: vec![],
+        available_commands: vec![],
+        available_models: vec![],
+        advisor: None,
+        advisor_models: vec![],
+        config_options: vec![],
+        pending_config: Default::default(),
+        desired_config: Default::default(),
+        state: state.into(),
+        group: None,
+        spawned_by: None,
+        origin: Some(PR_REVIEW_ORIGIN.into()),
+        context_used: None,
+        context_size: None,
+        last_error: kind.map(|k| proto::LastError {
+            message: "boom".into(),
+            kind: k.into(),
+            at: String::new(),
+            count: 1,
+            retry_at: None,
+        }),
+        wait: None,
+    }
+}
+
+/// rate_limit/quota = backoff provider → `Wait` : le timeout est
+/// suspendu (rate_limit attend son timer, quota est soldé par sa
+/// branche d'échec définitif plus bas dans la passe).
+#[test]
+fn err_verdict_backoff_attend() {
+    for k in ["rate_limit", "quota"] {
+        assert_eq!(
+            review_err_verdict(&rev_meta("error", Some(k)), None, 1000.0),
+            ReviewErrVerdict::Wait,
+            "{k}"
+        );
+    }
+}
+
+/// model/auth/other : aucune reprise automatique (pas de timer, pas
+/// de failover) — la passe arme `err_since` à la première vue puis
+/// produit `Retry("error:<kind>")` une fois la grâce écoulée → la
+/// session part en `transient_fail` borné, comme une interruption.
+#[test]
+fn err_verdict_sans_reprise_grace_puis_retry() {
+    for k in ["model", "auth", "other"] {
+        let m = rev_meta("error", Some(k));
+        // Premier tick : grâce armée, pas de retry.
+        assert_eq!(
+            review_err_verdict(&m, None, 1000.0),
+            ReviewErrVerdict::Grace,
+            "{k} arm"
+        );
+        // Dans la grâce : toujours Grace.
+        assert_eq!(
+            review_err_verdict(&m, Some(1000.0), 1000.0 + REVIEW_ERR_GRACE_SECS - 1.0),
+            ReviewErrVerdict::Grace,
+            "{k} in-grace"
+        );
+        // Grâce écoulée : retry borné avec le kind explicite.
+        assert_eq!(
+            review_err_verdict(&m, Some(1000.0), 1000.0 + REVIEW_ERR_GRACE_SECS),
+            ReviewErrVerdict::Retry(format!("error:{k}")),
+            "{k} retry"
+        );
+    }
+}
+
+/// Hors `error`, ou `error` sans `last_error` : rien à classer — le
+/// flux normal continue (et le timeout seul borne le cas sans kind).
+#[test]
+fn err_verdict_hors_error() {
+    assert_eq!(
+        review_err_verdict(&rev_meta("idle", None), None, 0.0),
+        ReviewErrVerdict::None
+    );
+    assert_eq!(
+        review_err_verdict(&rev_meta("working", Some("other")), None, 0.0),
+        ReviewErrVerdict::None
+    );
+    assert_eq!(
+        review_err_verdict(&rev_meta("error", None), None, 0.0),
+        ReviewErrVerdict::None
+    );
+}
+
 // Mini regex maison pour les tests de format (évite une dépendance).
 struct RegexLite;
 fn regex_lite(_p: &'static str) -> RegexLite {
