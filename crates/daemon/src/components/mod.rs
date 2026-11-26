@@ -480,9 +480,7 @@ impl Components {
                 queries: HashMap::new(),
                 catalog: None,
                 params_schema: crate::server::rq_cfg::params_schema(&agent_ids),
-                params: crate::server::rq_cfg::params_values(
-                    &self.rq.cfg.read().unwrap(),
-                ),
+                params: crate::server::rq_cfg::params_values(&self.rq.cfg.read().unwrap()),
                 render: None,
                 view_dir: None,
             };

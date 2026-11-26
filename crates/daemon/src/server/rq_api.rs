@@ -22,7 +22,10 @@ impl Daemon {
         instructions: Option<String>,
     ) -> Result<Value> {
         anyhow::ensure!(!repos.is_empty(), "review_queue_request: no repos");
-        anyhow::ensure!(repos.len() <= 16, "review_queue_request: too many repos (>16)");
+        anyhow::ensure!(
+            repos.len() <= 16,
+            "review_queue_request: too many repos (>16)"
+        );
         let mut resolved = Vec::with_capacity(repos.len());
         let mut pairs = Vec::with_capacity(repos.len());
         for spec in &repos {
@@ -48,11 +51,7 @@ impl Daemon {
                 .with_context(|| format!("unknown requester session « {by} »"))?;
         }
         let id = proto::new_id("rq");
-        let run_dir = self
-            .rq
-            .state_dir()
-            .join("runs")
-            .join(&id);
+        let run_dir = self.rq.state_dir().join("runs").join(&id);
         std::fs::create_dir_all(&run_dir)
             .with_context(|| format!("creating run dir {}", run_dir.display()))?;
         let now = now_secs();
@@ -61,11 +60,7 @@ impl Daemon {
         // Round optimiste = dernier round dispatché + 1 — le numéro
         // définitif est recalculé au dispatch (deux requêtes en file
         // sur le même thread ne doivent pas partager le même round).
-        let round = st
-            .threads
-            .get(&key)
-            .map(|t| t.round + 1)
-            .unwrap_or(1);
+        let round = st.threads.get(&key).map(|t| t.round + 1).unwrap_or(1);
         let tid = thread_tid(&key);
         let title = format!("{}{}-r{}", title_prefix, tid, round);
         st.threads.entry(key.clone()).or_insert_with(|| RqThread {
@@ -125,10 +120,7 @@ impl Daemon {
     /// `review_queue_status` — file + threads + requêtes récentes.
     pub(super) async fn h_review_queue_status(self: &Arc<Self>) -> Result<Value> {
         let mut v = self.rq.status_json();
-        v["config"] = rq_cfg::cfg_json(
-            &self.rq.cfg.read().unwrap(),
-            self.rq.is_enabled(),
-        );
+        v["config"] = rq_cfg::cfg_json(&self.rq.cfg.read().unwrap(), self.rq.is_enabled());
         Ok(v)
     }
 

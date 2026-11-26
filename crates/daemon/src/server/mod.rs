@@ -52,26 +52,26 @@ pub(crate) mod orch_plan;
 /// Review de PR servie par le démon (`pr_review`) — passe séparée
 /// d'`orch_plan`, garde-fous propres (allowlist base, pool dédié).
 pub(crate) mod orch_review;
+mod peers;
+mod prs;
 /// File de revue LOCALE générique (`review_queue*`) — sessions
 /// reviewer réutilisables par thread [repo,branche], slots,
 /// compact-first, reaper forge ; indépendante du pipeline `/mr review`.
 pub(crate) mod rq;
 /// Handlers RPC `review_queue_*` de la file de revue.
 pub(crate) mod rq_api;
-/// Settlement de la file : timeouts, completion, notifications.
-pub(crate) mod rq_done;
 /// Surface de config éditable à chaud de la file de revue (schéma
 /// params, validation de patch, persistance `[review_queue]`) —
 /// même mécanique que `orch_cfg.rs`.
 pub(crate) mod rq_cfg;
+/// Settlement de la file : timeouts, completion, notifications.
+pub(crate) mod rq_done;
 /// Verdicts forge du reaper review-queue (fonctions pures — tests
 /// sans forge réelle).
 pub(crate) mod rq_forge;
 /// Reaper review-queue : décision + suppression des sessions
 /// reviewer de threads terminés.
 pub(crate) mod rq_reap;
-mod peers;
-mod prs;
 mod sessions;
 mod term;
 
@@ -1226,9 +1226,7 @@ impl Daemon {
                     .await
             }
             ReqKind::ReviewQueueStatus {} => self.h_review_queue_status().await,
-            ReqKind::ReviewQueueConfig { patch } => {
-                self.h_review_queue_config(patch).await
-            }
+            ReqKind::ReviewQueueConfig { patch } => self.h_review_queue_config(patch).await,
             ReqKind::ReviewQueueReap {} => self.h_review_queue_reap().await,
             // Interceptés par la couche connexion (ordre des inputs +
             // cycle de vie borné à la connexion) — jamais atteint ici.

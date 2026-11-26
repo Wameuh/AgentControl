@@ -22,8 +22,9 @@ impl Daemon {
                 .iter()
                 .filter_map(|(id, r)| {
                     let to = match r.state {
-                        ReqState::Queued => (now - r.created_at > acquire_to)
-                            .then_some(ReqState::AcquireTimeout),
+                        ReqState::Queued => {
+                            (now - r.created_at > acquire_to).then_some(ReqState::AcquireTimeout)
+                        }
                         ReqState::Reviewing => r
                             .dispatched_at
                             .map(|d| (now - d > review_to).then_some(ReqState::Timeout))
@@ -120,9 +121,7 @@ impl Daemon {
                     None => continue,
                 }
             };
-            let timed_out = compact_at
-                .map(|c| now - c > compact_to)
-                .unwrap_or(true);
+            let timed_out = compact_at.map(|c| now - c > compact_to).unwrap_or(true);
             let Some(sid) = sid else { continue };
             match self.get_session(&sid).await {
                 Ok(s) => {
@@ -146,12 +145,7 @@ impl Daemon {
             if r.state != ReqState::Reviewing {
                 return;
             }
-            (
-                r.run_dir.clone(),
-                r.by.clone(),
-                r.session.clone(),
-                r.round,
-            )
+            (r.run_dir.clone(), r.by.clone(), r.session.clone(), r.round)
         };
         // Session morte en cours de review → failed explicite.
         if let Some(sid) = &sid {
@@ -188,7 +182,8 @@ impl Daemon {
         let nfind = match validate_findings(&findings_v) {
             Ok(n) => n,
             Err(why) => {
-                self.rq_fail(id, &format!("invalid findings.json: {why}")).await;
+                self.rq_fail(id, &format!("invalid findings.json: {why}"))
+                    .await;
                 return;
             }
         };
@@ -205,7 +200,8 @@ impl Daemon {
         let (verdict, summary) = match validate_complete(&complete_v) {
             Ok(v) => v,
             Err(why) => {
-                self.rq_fail(id, &format!("invalid complete.json: {why}")).await;
+                self.rq_fail(id, &format!("invalid complete.json: {why}"))
+                    .await;
                 return;
             }
         };
@@ -250,7 +246,10 @@ impl Daemon {
         };
         let thread_key = {
             let st = self.rq.state.lock().unwrap();
-            st.requests.get(id).map(|r| r.thread.clone()).unwrap_or_default()
+            st.requests
+                .get(id)
+                .map(|r| r.thread.clone())
+                .unwrap_or_default()
         };
         self.rq_notify(
             &by,
@@ -267,7 +266,9 @@ impl Daemon {
     pub(crate) async fn rq_fail(self: &Arc<Self>, id: &str, why: &str) {
         let (by, sid) = {
             let mut st = self.rq.state.lock().unwrap();
-            let Some(r) = st.requests.get_mut(id) else { return };
+            let Some(r) = st.requests.get_mut(id) else {
+                return;
+            };
             r.state = ReqState::Failed;
             r.error = Some(why.to_string());
             let by = r.by.clone();
@@ -282,7 +283,8 @@ impl Daemon {
         if let Some(sid) = &sid {
             let _ = self.h_sleep_session(sid.clone()).await;
         }
-        self.rq_notify(&by, &self.rq_result_text(id, ReqState::Failed)).await;
+        self.rq_notify(&by, &self.rq_result_text(id, ReqState::Failed))
+            .await;
     }
 
     fn rq_result_text(&self, id: &str, state: ReqState) -> String {
@@ -305,7 +307,11 @@ impl Daemon {
         if by.is_empty() {
             return;
         }
-        if self.h_send(by.to_string(), text.to_string(), false, true).await.is_ok() {
+        if self
+            .h_send(by.to_string(), text.to_string(), false, true)
+            .await
+            .is_ok()
+        {
             return;
         }
         if self
@@ -392,10 +398,7 @@ mod tests {
 
     #[test]
     fn findings_valide() {
-        assert_eq!(
-            validate_findings(&json!({"findings": []})).unwrap(),
-            0
-        );
+        assert_eq!(validate_findings(&json!({"findings": []})).unwrap(), 0);
         assert_eq!(
             validate_findings(&json!({"findings": [
                 {"severity":"blocker","file":"a.rs","line":3,"message":"x"},
@@ -430,10 +433,10 @@ mod tests {
             ("approved".to_string(), "ok".to_string())
         );
         for bad in [
-            json!({"verdict":"approved"}),                    // summary manquant
-            json!({"verdict":"approved","summary":42}),       // summary non string
-            json!({"verdict":"maybe","summary":"x"}),         // verdict hors allowlist
-            json!({"summary":"x"}),                           // verdict manquant
+            json!({"verdict":"approved"}),              // summary manquant
+            json!({"verdict":"approved","summary":42}), // summary non string
+            json!({"verdict":"maybe","summary":"x"}),   // verdict hors allowlist
+            json!({"summary":"x"}),                     // verdict manquant
         ] {
             assert!(validate_complete(&bad).is_err(), "accepted {bad}");
         }

@@ -50,8 +50,7 @@ impl Daemon {
                 .filter(|(k, t)| {
                     t.active.is_none()
                         && !claimed.contains(*k)
-                        && (force
-                            || now - t.reap_checked_at > cfg.reaper_interval_secs as f64)
+                        && (force || now - t.reap_checked_at > cfg.reaper_interval_secs as f64)
                 })
                 .map(|(k, t)| (k.clone(), t.pairs.clone(), t.session.clone(), t.last_active))
                 .collect()

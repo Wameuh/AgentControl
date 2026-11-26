@@ -276,7 +276,10 @@ pub(crate) fn resolve_repo(spec: &ReviewRepoSpec) -> Result<RqRepo> {
     let expanded = crate::server::expand_cwd(raw).unwrap_or_else(|_| raw.to_string());
     let canon = std::fs::canonicalize(&expanded)
         .with_context(|| format!("repo path « {expanded} » not found"))?;
-    anyhow::ensure!(canon.is_dir(), "repo path « {expanded} » is not a directory");
+    anyhow::ensure!(
+        canon.is_dir(),
+        "repo path « {expanded} » is not a directory"
+    );
     let path = canon.to_string_lossy().to_string();
     let branch = match spec.branch.as_deref().map(str::trim) {
         Some(b) if !b.is_empty() => b.to_string(),
@@ -343,9 +346,7 @@ pub(crate) fn repo_snap(repo: &RqRepo) -> RqSnap {
             .as_bytes(),
     );
     h = fnv_feed(h, b"\x00untracked\x00");
-    if let Some(list) =
-        git_out(path, &["ls-files", "--others", "--exclude-standard", "-z"])
-    {
+    if let Some(list) = git_out(path, &["ls-files", "--others", "--exclude-standard", "-z"]) {
         use std::io::Read;
         for rel in list.split('\0').filter(|s| !s.is_empty()) {
             h = fnv_feed(h, rel.as_bytes());
@@ -425,7 +426,11 @@ fn repos_markdown(req: &RqRequest) -> String {
             if head.is_empty() { "?" } else { head },
             base,
             r.path,
-            if r.base.is_empty() { "origin/HEAD" } else { r.base.as_str() },
+            if r.base.is_empty() {
+                "origin/HEAD"
+            } else {
+                r.base.as_str()
+            },
             r.branch,
             r.path,
         ));
@@ -640,7 +645,7 @@ impl Daemon {
             };
             let Some(id) = next else { return };
             match self.rq_dispatch_one(&id, &cfg).await {
-                Ok(true) => {} // slot pris — reboucle pour le suivant
+                Ok(true) => {}       // slot pris — reboucle pour le suivant
                 Ok(false) => return, // plus de slot / plus rien à faire
                 Err(e) => {
                     warn!("review-queue: dispatch {id}: {e:#}");
@@ -662,7 +667,9 @@ impl Daemon {
         // numéros distincts (compteur monotone du thread).
         let thread_key = {
             let st = self.rq.state.lock().unwrap();
-            let Some(r) = st.requests.get(id) else { return Ok(false) };
+            let Some(r) = st.requests.get(id) else {
+                return Ok(false);
+            };
             if r.state != ReqState::Queued {
                 return Ok(false);
             }
@@ -714,7 +721,9 @@ impl Daemon {
         {
             let mut st = self.rq.state.lock().unwrap();
             {
-                let Some(r) = st.requests.get_mut(id) else { return Ok(false) };
+                let Some(r) = st.requests.get_mut(id) else {
+                    return Ok(false);
+                };
                 r.session = Some(sid.clone());
                 r.snaps = r.repos.iter().map(repo_snap).collect();
                 r.run_dir = run_dir.to_string_lossy().to_string();
@@ -786,7 +795,10 @@ impl Daemon {
                 .map(|t| t.pairs.clone())
                 .unwrap_or_default()
         };
-        let cwd = pairs.first().map(|p| p.path.clone()).unwrap_or_else(|| "/".into());
+        let cwd = pairs
+            .first()
+            .map(|p| p.path.clone())
+            .unwrap_or_else(|| "/".into());
         self.warn_spawn_cfg(&agent, &cfg.model, &cfg.mode).await;
         let title = {
             let st = self.rq.state.lock().unwrap();
@@ -822,7 +834,10 @@ impl Daemon {
             }
         }
         let _ = self.rq.save();
-        info!("review-queue: thread {} round {round} → reviewer {sid}", thread_tid(thread_key));
+        info!(
+            "review-queue: thread {} round {round} → reviewer {sid}",
+            thread_tid(thread_key)
+        );
         Ok(Some((sid, false)))
     }
 
@@ -868,9 +883,7 @@ impl Daemon {
             let st = self.rq.state.lock().unwrap();
             match st.requests.get(req_id) {
                 None => Prep::Skip,
-                Some(r)
-                    if r.state == ReqState::Reviewing && r.dispatched_at.is_some() =>
-                {
+                Some(r) if r.state == ReqState::Reviewing && r.dispatched_at.is_some() => {
                     Prep::Skip // déjà envoyée — pas de double envoi
                 }
                 Some(r) if r.session.is_none() => Prep::Fail("no reviewer session"),
@@ -920,10 +933,10 @@ impl Daemon {
         let _ = self.rq.save();
         if let Err(e) = self.h_send(sid, text, false, false).await {
             warn!("review-queue: send round {req_id}: {e:#}");
-            self.rq_fail(req_id, &format!("deliver prompt: {e:#}")).await;
+            self.rq_fail(req_id, &format!("deliver prompt: {e:#}"))
+                .await;
         }
     }
-
 }
 
 #[cfg(test)]
@@ -932,8 +945,14 @@ mod tests {
 
     #[test]
     fn thread_key_trie_et_stable() {
-        let a = RqPair { path: "/b".into(), branch: "x".into() };
-        let b = RqPair { path: "/a".into(), branch: "y".into() };
+        let a = RqPair {
+            path: "/b".into(),
+            branch: "x".into(),
+        };
+        let b = RqPair {
+            path: "/a".into(),
+            branch: "y".into(),
+        };
         let k1 = thread_key(&[a.clone(), b.clone()]);
         let k2 = thread_key(&[b, a]);
         assert_eq!(k1, k2, "l'ordre des paires ne change pas la clé");
@@ -1019,10 +1038,14 @@ mod tests {
         // thread occupé attend — même avec des slots disponibles.
         let mut st = RqState::default();
         st.threads.insert("T1".into(), thread("T1", None));
-        st.threads.insert("T2".into(), thread("T2", Some("rq-a".into())));
-        st.requests.insert("rq-1".into(), req("rq-1", "T1", ReqState::Queued, 1.0));
-        st.requests.insert("rq-2".into(), req("rq-2", "T2", ReqState::Queued, 2.0));
-        st.requests.insert("rq-3".into(), req("rq-3", "T1", ReqState::Queued, 3.0));
+        st.threads
+            .insert("T2".into(), thread("T2", Some("rq-a".into())));
+        st.requests
+            .insert("rq-1".into(), req("rq-1", "T1", ReqState::Queued, 1.0));
+        st.requests
+            .insert("rq-2".into(), req("rq-2", "T2", ReqState::Queued, 2.0));
+        st.requests
+            .insert("rq-3".into(), req("rq-3", "T1", ReqState::Queued, 3.0));
         // rq-2 est plus vieille mais son thread T2 est occupé → rq-1.
         assert_eq!(pick_next(&st).as_deref(), Some("rq-1"));
         // rq-1 passe en review → T1 occupé à son tour : plus rien
@@ -1071,8 +1094,15 @@ mod tests {
         // Snapshot manuel : HEAD bidon + hash forcé — un repo factice
         // ne peut pas être comparé (git muet → before vide → pas de
         // verdict). On vérifie la porte « snapshot vide = muet ».
-        let repo = RqRepo { path: "/nonexistent".into(), branch: "b".into(), base: String::new() };
-        let before = RqSnap { head: String::new(), status_hash: 0 };
+        let repo = RqRepo {
+            path: "/nonexistent".into(),
+            branch: "b".into(),
+            base: String::new(),
+        };
+        let before = RqSnap {
+            head: String::new(),
+            status_hash: 0,
+        };
         assert!(!snap_changed(&before, &repo));
     }
 }

@@ -247,15 +247,27 @@ pub(crate) fn params_values(cfg: &super::cfg::ReviewQueueCfg) -> HashMap<String,
     m.insert("thought_level".into(), cfg.thought_level.clone());
     m.insert("group".into(), cfg.group.clone());
     m.insert("title_prefix".into(), cfg.title_prefix.clone());
-    m.insert("review_timeout_secs".into(), cfg.review_timeout_secs.to_string());
-    m.insert("acquire_timeout_secs".into(), cfg.acquire_timeout_secs.to_string());
-    m.insert("compact_timeout_secs".into(), cfg.compact_timeout_secs.to_string());
+    m.insert(
+        "review_timeout_secs".into(),
+        cfg.review_timeout_secs.to_string(),
+    );
+    m.insert(
+        "acquire_timeout_secs".into(),
+        cfg.acquire_timeout_secs.to_string(),
+    );
+    m.insert(
+        "compact_timeout_secs".into(),
+        cfg.compact_timeout_secs.to_string(),
+    );
     m.insert("idle_ttl_secs".into(), cfg.idle_ttl_secs.to_string());
     m.insert("reaper_enabled".into(), cfg.reaper_enabled.to_string());
     m.insert("reaper_forge".into(), cfg.reaper_forge.clone());
     m.insert("reaper_github_host".into(), cfg.reaper_github_host.clone());
     m.insert("reaper_gitlab_host".into(), cfg.reaper_gitlab_host.clone());
-    m.insert("reaper_interval_secs".into(), cfg.reaper_interval_secs.to_string());
+    m.insert(
+        "reaper_interval_secs".into(),
+        cfg.reaper_interval_secs.to_string(),
+    );
     m.insert("state_dir".into(), cfg.state_dir.clone());
     m.insert("prompt".into(), cfg.prompt.clone().unwrap_or_default());
     m
@@ -313,7 +325,10 @@ pub(crate) fn apply_patch(
             "reaper_forge" => {
                 let s = orch_cfg::val_string(v)?;
                 anyhow::ensure!(
-                    matches!(s.trim().to_ascii_lowercase().as_str(), "auto" | "github" | "gitlab"),
+                    matches!(
+                        s.trim().to_ascii_lowercase().as_str(),
+                        "auto" | "github" | "gitlab"
+                    ),
                     "reaper_forge « {s} » — expected auto|github|gitlab"
                 );
                 cfg.reaper_forge = s;
