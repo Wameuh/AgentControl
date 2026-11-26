@@ -16,7 +16,7 @@ export const cmdHint = (c: CmdInfo) => (typeof c === "string" ? "" : (c.hint ?? 
 
 // Devin : les modèles portent l'effort en suffixe (-medium/-high/...) ;
 // Cursor/Codex : variantes `base[param=v,…]` (ex. gpt-6.1-sol[medium]).
-const EFF_RE = /-(low|minimal|medium|high|max|lightning)$/;
+const EFF_RE = /-(low|minimal|medium|high|max|xhigh|none|lightning)$/;
 const BRACKET_RE = /(\[[^\]]*\])$/;
 export const splitModel = (v: string): [string, string] => {
   const b = BRACKET_RE.exec(v);
@@ -37,7 +37,7 @@ export function modelLabel(v: string, name?: string): string {
   const n = name?.trim() ?? "";
   if (n && n !== v && !n.includes("[")) return n;
   const [b, e] = splitModel(v);
-  if (!e.startsWith("[")) return n || b;
+  if (!e.startsWith("[")) return b;
   const inner = e.slice(1, -1).trim();
   return inner ? `${b} · ${inner}` : b;
 }
