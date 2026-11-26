@@ -1439,5 +1439,196 @@ pub struct CatalogPatch {
     pub params: HashMap<String, String>,
 }
 
+/// File de revue LOCALE générique (section `[review_queue]` de
+/// config.toml, composant interne `review-queue` — server/rq.rs) :
+/// n'importe quelle session peut demander la revue d'une branche ou
+/// d'un diff multi-dépôts locaux ; une session reviewer dédiée par
+/// thread (paire `[repo, branche]` canonique) exécute la revue et le
+/// résultat est renvoyé au demandeur. Indépendante du pipeline
+/// `/mr review` (PR GitHub) — les deux coexistent sans se partager de
+/// sessions.
+///
+/// **Désactivé par défaut** (opt-in) ; bascule à chaud via
+/// `ReviewQueueSet`-like `ReviewQueueConfig{patch}` (persistée dans
+/// config.toml) ou le composant (`component_set_params` → même
+/// chemin de validation).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReviewQueueCfg {
+    /// Activé — défaut false : aucune session reviewer sans opt-in.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Reviews simultanées max — sémaphore de slots (une review = une
+    /// requête `running`). Défaut 2.
+    #[serde(default = "d2")]
+    pub max_parallel: u32,
+    /// Période de la boucle de la file en secondes (défaut 30).
+    #[serde(default = "d30u64")]
+    pub poll_secs: u64,
+    /// Profil agent des reviewers : vide = premier profil disponible
+    /// résolu au dispatch (agent-agnostique — devin/claude/cursor…).
+    #[serde(default)]
+    pub agent: String,
+    /// Mode demandé au spawn du reviewer — vide = défaut du profil.
+    #[serde(default)]
+    pub mode: String,
+    /// Modèle demandé au spawn — vide = défaut du profil.
+    #[serde(default)]
+    pub model: String,
+    /// `thought_level` posé post-spawn — vide = rien.
+    #[serde(default)]
+    pub thought_level: String,
+    /// Groupe sidebar des sessions reviewer (défaut "Reviews").
+    /// Vide = pas de groupe.
+    #[serde(default = "drqgroup")]
+    pub group: String,
+    /// Préfixe de titre des sessions reviewer (défaut "RQ-") —
+    /// distinct de `PRReview-`/`Backlog-*` : jamais confondu avec les
+    /// reviewers des autres pipelines.
+    #[serde(default = "drqprefix")]
+    pub title_prefix: String,
+    /// Timeout d'une review en secondes : au-delà, le tour est annulé,
+    /// la session endormie (conservée pour les rounds suivants) et la
+    /// requête soldée `timeout`. Défaut 5400 (90 min).
+    #[serde(default = "d5400")]
+    pub review_timeout_secs: u64,
+    /// Timeout d'attente d'un slot en secondes : une requête
+    /// `queued` plus vieille que ça est soldée `acquire_timeout` —
+    /// SAUF si son thread a déjà une review en cours (attente
+    /// séquentielle par design, pas une famine de slot ; le chrono
+    /// repart à zéro à la libération du thread). Défaut 3600.
+    #[serde(default = "d3600")]
+    pub acquire_timeout_secs: u64,
+    /// Timeout du `/compact` pré-round en secondes — au-delà on envoie
+    /// quand même le prompt du round (borné, jamais de blocage).
+    /// Défaut 180.
+    #[serde(default = "d180u64")]
+    pub compact_timeout_secs: u64,
+    /// Durée d'inactivité (secondes depuis la dernière review soldée)
+    /// au-delà de laquelle le reaper peut supprimer la session
+    /// reviewer — UNIQUEMENT quand les MR/PR du thread sont déjà tous
+    /// clos/fusionnés ou introuvables. 0 = jamais par TTL. Défaut
+    /// 432000 (5 jours).
+    #[serde(default = "d432000")]
+    pub idle_ttl_secs: u64,
+    /// Reaper actif : suppression des sessions reviewer dont les
+    /// MR/PR du thread sont clos/fusionnés ou dont l'idle dépasse
+    /// `idle_ttl_secs` — jamais pendant une review ou un tour vivant.
+    /// Défaut true.
+    #[serde(default = "dtrue")]
+    pub reaper_enabled: bool,
+    /// Forge du reaper : `auto` (détectée du remote de chaque dépôt —
+    /// github/gitlab/auto-hébergé déclaré dans `[[forges]]`),
+    /// `github` ou `gitlab` (forcées — pour GHE/self-hosted,
+    /// `reaper_github_host`/`reaper_gitlab_host` lève l'ambiguïté).
+    /// Tokens lus depuis l'env par les transports (`GITHUB_TOKEN`/
+    /// `GH_TOKEN`, `GITLAB_TOKEN`). Défaut "auto".
+    #[serde(default = "drauto")]
+    pub reaper_forge: String,
+    /// Hôte GitHub/GHE du reaper quand `reaper_forge` = `github` —
+    /// vide = hôte du remote du dépôt s'il est github-compatible,
+    /// sinon github.com.
+    #[serde(default)]
+    pub reaper_github_host: String,
+    /// Hôte GitLab self-hosted du reaper quand `reaper_forge` =
+    /// `gitlab` — vide = hôte du remote du dépôt, sinon gitlab.com.
+    #[serde(default)]
+    pub reaper_gitlab_host: String,
+    /// Intervalle minimal entre deux vérifications forge d'un même
+    /// thread (secondes — le reaper ne pollue pas l'API à chaque
+    /// tick). Défaut 300.
+    #[serde(default = "d300u64")]
+    pub reaper_interval_secs: u64,
+    /// Dossier d'état de la file : `review-queue-state.json` +
+    /// `runs/<request_id>/` (packet `prompt.md`, sorties
+    /// `review.md`/`findings.json`/`complete.json`). Vide =
+    /// `<root>/review-queue` (root = AGENTCONTROL_HOME).
+    #[serde(default)]
+    pub state_dir: String,
+    /// Template du packet de revue — None = template intégré
+    /// (`rq::PACKET_TEMPLATE`). Placeholders `{REQUEST}` `{ROUND}`
+    /// `{RUN_DIR}` `{REPOS}` `{INSTRUCTIONS}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
+fn d30u64() -> u64 {
+    30
+}
+fn d180u64() -> u64 {
+    180
+}
+fn d300u64() -> u64 {
+    300
+}
+fn d3600() -> u64 {
+    3600
+}
+fn d432000() -> u64 {
+    5 * 24 * 3600
+}
+fn d5400() -> u64 {
+    5400
+}
+fn drqgroup() -> String {
+    "Reviews".into()
+}
+fn drqprefix() -> String {
+    "RQ-".into()
+}
+fn drauto() -> String {
+    "auto".into()
+}
+
+impl Default for ReviewQueueCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_parallel: 2,
+            poll_secs: 30,
+            agent: String::new(),
+            mode: String::new(),
+            model: String::new(),
+            thought_level: String::new(),
+            group: drqgroup(),
+            title_prefix: drqprefix(),
+            review_timeout_secs: 5400,
+            acquire_timeout_secs: 3600,
+            compact_timeout_secs: 180,
+            idle_ttl_secs: 432000,
+            reaper_enabled: true,
+            reaper_forge: drauto(),
+            reaper_github_host: String::new(),
+            reaper_gitlab_host: String::new(),
+            reaper_interval_secs: 300,
+            state_dir: String::new(),
+            prompt: None,
+        }
+    }
+}
+
+impl ReviewQueueCfg {
+    /// Dossier d'état résolu : `state_dir` expandé (`~`/`$VAR` comme
+    /// les cwd de session) ou `<root>/review-queue` — `root` passé par
+    /// l'appelant (le cfg ne connaît pas AGENTCONTROL_HOME).
+    pub fn state_dir(&self, root: &std::path::Path) -> std::path::PathBuf {
+        let raw = self.state_dir.trim();
+        if raw.is_empty() {
+            return root.join("review-queue");
+        }
+        std::path::PathBuf::from(crate::server::expand_cwd(raw).unwrap_or_else(|_| raw.to_string()))
+    }
+    /// Forge du reaper normalisée : `auto` pour vide/inconnu.
+    pub fn reaper_forge_kind(&self) -> &'static str {
+        let f = self.reaper_forge.trim();
+        if f.eq_ignore_ascii_case("github") {
+            "github"
+        } else if f.eq_ignore_ascii_case("gitlab") {
+            "gitlab"
+        } else {
+            "auto"
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -143,6 +143,7 @@ async fn daemon_test(tag: &str) -> Arc<Daemon> {
         Vec::new(),
         "127.0.0.1:0".into(),
         super::OrchCfg::default(),
+        super::ReviewQueueCfg::default(),
         super::CompactCfg::default(),
         super::WatchdogCfg::default(),
         false,

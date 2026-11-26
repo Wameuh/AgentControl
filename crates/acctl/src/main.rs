@@ -45,6 +45,13 @@
 //!                                     (on|off : bascule runtime ;
 //!                                     config/set : édition persistée ;
 //!                                     metrics : série + agrégats)
+//!   acctl review request --repo <path[@branch[@base]]>…
+//!       [--instructions <texte>] | status | on|off | config
+//!       | set <clé> <val>… | reap
+//!                                     — file de revue locale :
+//!                                     reviewer dédié par thread,
+//!                                     résultat steeré à la session
+//!                                     $AGENTCONTROL_SESSION
 //!
 //!   acctl token rotate                    — régénère daemon.token et
 //!       révoque les connexions TCP ouvertes (ré-auth au reconnect ;
@@ -1190,6 +1197,109 @@ async fn main() -> Result<()> {
         }
         "pr" => pr::run(&args, &mut c).await?,
         "comp" | "components" => comp::run(&args, &mut c).await?,
+        // `acctl review` — file de revue locale (review_queue du
+        // démon) : `request` = une session demandeuse fait reviewer
+        // une branche/diff (session reviewer dédiée par thread,
+        // résultat steeré en retour) ; `status`/`config`/`reap` =
+        // lecture, édition persistée [review_queue], passe manuelle
+        // du reaper.
+        "review" => {
+            let sub = args.get(1).map(String::as_str).unwrap_or("status");
+            match sub {
+                "request" => {
+                    // --repo <path[@branch[@base]]>… (répétable),
+                    // --spec <json [ReviewRepoSpec]> (forme complète,
+                    // prime sur --repo), --instructions <texte>.
+                    // ⚠ `@` dans le PATH n'est pas gérable en forme
+                    // courte → utiliser --spec dans ce cas.
+                    // La session demandeuse = $AGENTCONTROL_SESSION
+                    // (injectée par le démon dans les sessions agent)
+                    // — absente → review sans steer du résultat.
+                    let mut specs: Vec<proto::ReviewRepoSpec> = Vec::new();
+                    let mut instructions: Option<String> = None;
+                    let mut i = 2;
+                    while i < args.len() {
+                        match args[i].as_str() {
+                            "--repo" | "-r" => {
+                                i += 1;
+                                let v = args.get(i).context("--repo <path[@branch[@base]]>")?;
+                                let parts: Vec<&str> = v.split('@').collect();
+                                specs.push(proto::ReviewRepoSpec {
+                                    path: parts[0].to_string(),
+                                    branch: parts.get(1).map(|s| s.to_string()),
+                                    base: parts.get(2).map(|s| s.to_string()),
+                                });
+                            }
+                            "--spec" => {
+                                i += 1;
+                                let v = args.get(i).context("--spec <json>")?;
+                                specs = serde_json::from_str(v)
+                                    .context("--spec: expected [ReviewRepoSpec]")?;
+                            }
+                            "--instructions" | "-m" => {
+                                i += 1;
+                                instructions = Some(
+                                    args.get(i).context("--instructions <text>")?.clone(),
+                                );
+                            }
+                            other => bail!("unknown option: {other}"),
+                        }
+                        i += 1;
+                    }
+                    anyhow::ensure!(!specs.is_empty(), "acctl review request: no --repo/--spec");
+                    let session = std::env::var("AGENTCONTROL_SESSION").ok();
+                    let v = c
+                        .call(proto::ReqKind::ReviewQueueRequest {
+                            session,
+                            repos: specs,
+                            instructions,
+                        })
+                        .await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                "status" | "ls" => {
+                    let v = c.call(proto::ReqKind::ReviewQueueStatus {}).await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                "on" | "enable" => {
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("enabled".into(), Value::Bool(true));
+                    let v = c.call(proto::ReqKind::ReviewQueueConfig { patch: Some(p) }).await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                "off" | "disable" => {
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("enabled".into(), Value::Bool(false));
+                    let v = c.call(proto::ReqKind::ReviewQueueConfig { patch: Some(p) }).await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                "config" | "get" => {
+                    let v = c.call(proto::ReqKind::ReviewQueueConfig { patch: None }).await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                "set" => {
+                    let pairs = &args[2..];
+                    if pairs.is_empty() || !pairs.len().is_multiple_of(2) {
+                        bail!("usage: acctl review set <key> <value> [<key> <value>…]");
+                    }
+                    let mut patch = std::collections::BTreeMap::new();
+                    for kv in pairs.as_chunks::<2>().0 {
+                        let v = serde_json::from_str::<Value>(&kv[1])
+                            .unwrap_or_else(|_| Value::String(kv[1].clone()));
+                        patch.insert(kv[0].clone(), v);
+                    }
+                    let v = c.call(proto::ReqKind::ReviewQueueConfig { patch: Some(patch) }).await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                "reap" => {
+                    let v = c.call(proto::ReqKind::ReviewQueueReap {}).await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                other => bail!(
+                    "usage: acctl review [request --repo <path[@branch[@base]]>…|status|on|off|config|set <k> <v>…|reap] (unknown: {other})"
+                ),
+            }
+        }
         // `acctl orch` — orchestrateur backlog natif : bascule runtime
         // on|off (orchestrator_set), `status` = component_info de
         // l'interne (phase, ledger workers, gardes), `config` = lecture

@@ -55,6 +55,11 @@ struct Config {
     /// `enabled = true`, bascule à chaud par RPC OrchestratorSet.
     #[serde(default)]
     backlog_orchestrator: server::OrchCfg,
+    /// File de revue locale générique (server/rq.rs) — opt-in via
+    /// `enabled = true`, section `[review_queue]`, bascule à chaud
+    /// par RPC ReviewQueueConfig / composant `review-queue`.
+    #[serde(default)]
+    review_queue: server::ReviewQueueCfg,
     /// Compact automatique au seuil de contexte : `[compact]` global,
     /// override par agent `[agents.<id>.compact]`, override par session
     /// via setcfg `ac.compact_*` (compact.json).
@@ -105,6 +110,7 @@ impl Default for Config {
             retention: server::RetentionCfg::default(),
             a2a: server::A2aCfg::default(),
             backlog_orchestrator: server::OrchCfg::default(),
+            review_queue: server::ReviewQueueCfg::default(),
             compact: server::CompactCfg::default(),
             watchdog: server::WatchdogCfg::default(),
             provision_skills: true,
@@ -488,6 +494,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         cfg.forges.clone(),
         cfg.bind_tcp.clone(),
         cfg.backlog_orchestrator.clone(),
+        cfg.review_queue.clone(),
         cfg.compact.clone(),
         cfg.watchdog.clone(),
         cfg.provision_skills,
@@ -620,6 +627,10 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // Orchestrateur backlog natif : la boucle tourne toujours — la phase
     // porte l'activation (opt-in config ou bascule RPC à chaud).
     daemon.orch_boot();
+
+    // File de revue locale : même mécanique — la boucle tourne
+    // toujours, l'activation est portée par la phase du composant.
+    daemon.rq_boot();
 
     // Re-scan périodique des `[agents.*]` de config.toml : profils
     // déclarés/modifiés/supprimés à la main pris en compte à chaud.

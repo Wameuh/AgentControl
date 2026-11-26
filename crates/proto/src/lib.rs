@@ -1592,6 +1592,64 @@ pub enum ReqKind {
         repo: String,
         pr: u64,
     },
+    /// Demande de revue LOCALE générique (file `review-queue` du
+    /// démon — indépendante du pipeline `/mr review`/PR) : un agent
+    /// (ou l'utilisateur via `acctl review request`) demande la revue
+    /// d'une branche ou d'un diff à cheval sur plusieurs dépôts
+    /// locaux. `session` = demandeur A2A (None = utilisateur/acctl →
+    /// pas de notification du résultat) ; `repos` = checkout(s)
+    /// locaux `{path, branch?, base?}` — `branch` vide = branche
+    /// courante du checkout, `base` vide = base par défaut du
+    /// reviewer. La file gère session-par-thread (réutilisée entre
+    /// rounds), compact-first, slot sémaphore et reaper forge.
+    /// Extension additive : démons anciens → erreur « req inconnue ».
+    ReviewQueueRequest {
+        #[serde(default)]
+        session: Option<String>,
+        repos: Vec<ReviewRepoSpec>,
+        #[serde(default)]
+        instructions: Option<String>,
+    },
+    /// État de la file de reviews locales : threads (session reviewer
+    /// par couple [repo,branche] canonique), requêtes et configuration
+    /// effective — lecture seule, pour `acctl review status` et le
+    /// futur panneau client. Extension additive : démons anciens →
+    /// erreur « req inconnue ».
+    ReviewQueueStatus {},
+    /// Lecture/édition à chaud de la config `review_queue`
+    /// (section `[review_queue]` de config.toml — même mécanique que
+    /// `OrchestratorConfig`) : `patch` absent = get → `{config,
+    /// status}` ; `patch` présent = merge validé puis section
+    /// réécrite (survit aux redémarrages) → `{config, applied,
+    /// persisted, status}`. Extension additive : démons anciens →
+    /// erreur « req inconnue ».
+    ReviewQueueConfig {
+        #[serde(default)]
+        patch: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    },
+    /// Force une passe du reaper de la file de reviews locales
+    /// (suppression des sessions reviewer dont les MR/PR sont clos
+    /// ou dont l'idle dépasse le TTL) — le tick périodique fait la
+    /// même chose ; RPC = déclenchement manuel / test. Réponse :
+    /// `{reaped: [thread_id…], checked}`.
+    ReviewQueueReap {},
+}
+
+/// Un dépôt local visé par une revue de la file `review-queue` :
+/// checkout + branche relue + base de diff optionnelle.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReviewRepoSpec {
+    /// Chemin absolu (ou `~`/`$VAR` — expansé côté démon) du
+    /// checkout git à reviewer.
+    pub path: String,
+    /// Branche à reviewer — vide/absent = branche courante du
+    /// checkout (`git rev-parse --abbrev-ref HEAD`).
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Base du diff — vide/absent = base par défaut du reviewer
+    /// (`origin/HEAD` quand il résout).
+    #[serde(default)]
+    pub base: Option<String>,
 }
 
 impl ReqKind {
@@ -1685,6 +1743,10 @@ impl ReqKind {
             Self::InstallAgentAdapter { .. } => "install_agent_adapter",
             Self::ReviewReport { .. } => "review_report",
             Self::PrReviewRequest { .. } => "pr_review_request",
+            Self::ReviewQueueRequest { .. } => "review_queue_request",
+            Self::ReviewQueueStatus {} => "review_queue_status",
+            Self::ReviewQueueConfig { .. } => "review_queue_config",
+            Self::ReviewQueueReap {} => "review_queue_reap",
         }
     }
 }

@@ -39,6 +39,12 @@ impl Daemon {
             info!("orchestrator: started via component_start");
             return Ok(json!({ "name": name, "state": self.orch.component_state() }));
         }
+        if name == crate::server::rq::COMPONENT_NAME {
+            self.rq.set_enabled(true);
+            self.rq.kick();
+            info!("review-queue: started via component_start");
+            return Ok(json!({ "name": name, "state": self.rq.component_state() }));
+        }
         let st = self.components.start(&name).await?;
         Ok(json!({ "name": name, "state": st.state }))
     }
@@ -51,6 +57,11 @@ impl Daemon {
             info!("orchestrator: stopped via component_stop");
             return Ok(json!({ "name": name, "state": self.orch.component_state() }));
         }
+        if name == crate::server::rq::COMPONENT_NAME {
+            self.rq.set_enabled(false);
+            info!("review-queue: stopped via component_stop");
+            return Ok(json!({ "name": name, "state": self.rq.component_state() }));
+        }
         let st = self.components.stop(&name).await?;
         Ok(json!({ "name": name, "state": st.state }))
     }
@@ -62,6 +73,12 @@ impl Daemon {
             self.orch.set_enabled(true);
             info!("orchestrator: restarted via component_restart");
             return Ok(json!({ "name": name, "state": self.orch.component_state() }));
+        }
+        if name == crate::server::rq::COMPONENT_NAME {
+            self.rq.set_enabled(true);
+            self.rq.kick();
+            info!("review-queue: restarted via component_restart");
+            return Ok(json!({ "name": name, "state": self.rq.component_state() }));
         }
         let st = self.components.restart(&name).await?;
         Ok(json!({ "name": name, "state": st.state }))
@@ -148,6 +165,9 @@ impl Daemon {
         }
         if name == crate::server::forges_cfg::COMPONENT_NAME {
             return self.h_forges_params_set(params).await;
+        }
+        if name == crate::server::rq::COMPONENT_NAME {
+            return self.h_rq_params_set(params).await;
         }
         self.components.set_params(&name, &params).await
     }
