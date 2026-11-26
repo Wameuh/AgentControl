@@ -15,7 +15,8 @@
 //! Completion déterministe : le reviewer écrit `review.md` +
 //! `findings.json` + `complete.json` (le signal, en dernier) dans le
 //! run_dir ; la file valide le schéma, vérifie la non-altération des
-//! dépôts revus (HEAD + `status --porcelain` figés au dispatch),
+//! dépôts revus (HEAD effectif + empreinte de contenu figés au
+//! dispatch),
 //! endort la session (conservée pour les rounds suivants) et steer
 //! le résultat au demandeur. Timeout → cancel + sleep + `timeout`.
 //!
@@ -131,13 +132,16 @@ pub(crate) struct RqRepo {
     pub base: String,
 }
 
-/// Instantané d'anti-altération pris au dispatch : HEAD de la
-/// branche reviewée + hash du `status --porcelain` — revérifié à la
-/// completion (un reviewer qui écrit dans le dépôt revu fait
-/// basculer la review en `tainted`).
+/// Instantané d'anti-altération pris au dispatch : HEAD effectif du
+/// checkout + empreinte de CONTENU (status porcelain + diff HEAD +
+/// fichiers non suivis) — revérifié à la completion (un reviewer
+/// qui écrit dans le dépôt revu fait basculer la review en
+/// `tainted`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RqSnap {
     pub head: String,
+    /// Empreinte FNV combinée : `status --porcelain` + `diff HEAD`
+    /// (index+worktree) + contenu des fichiers non suivis.
     pub status_hash: u64,
 }
 
@@ -217,6 +221,11 @@ pub struct RqProbe {
     pub cfg: std::sync::RwLock<cfg::ReviewQueueCfg>,
     root: PathBuf,
     pub(crate) state: std::sync::Mutex<RqState>,
+    /// Sérialise snapshot → écriture → rename de `save()` : deux
+    /// saves concurrents ne peuvent ni partager le `.part` ni
+    /// réordonner les snapshots (un état ancien n'écrase plus un
+    /// plus récent).
+    persist: std::sync::Mutex<()>,
     wake: tokio::sync::Notify,
     /// Bascule runtime — initialisée depuis `cfg.enabled` (boot),
     /// pilotée par component_start/stop et `enabled` du patch.
@@ -296,39 +305,72 @@ fn git_out(cwd: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// Hash FNV-1a d'un texte — fingerprint du `status --porcelain`
-/// pour la détection d'altération (pas de sécurité, juste stable).
-fn fnv(text: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in text.as_bytes() {
+/// Base FNV-1a 64 — même offset que `thread_tid`.
+const FNV_BASIS: u64 = 0xcbf29ce484222325;
+
+/// FNV-1a incrémental — enchaîne des fragments dans la même empreinte.
+fn fnv_feed(mut h: u64, bytes: &[u8]) -> u64 {
+    for b in bytes {
         h ^= *b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
     h
 }
 
-/// Instantané anti-altération d'un dépôt : HEAD de la branche
-/// reviewée + empreinte du working tree. `None` champs = git muet
-/// (dépôt sans rapport) — le check est alors sauté pour ce dépôt.
+/// Instantané anti-altération d'un dépôt : HEAD effectif du
+/// checkout (`rev-parse HEAD` — un changement de branche propre
+/// est détecté) + empreinte de CONTENU : `status --porcelain`
+/// (noms/statuts) + `diff HEAD` complet (contenu index+worktree des
+/// fichiers suivis — un fichier déjà ` M` dont seul le contenu
+/// change est détecté) + contenu des fichiers non suivis.
+/// HEAD vide = git muet au dispatch → le check est sauté.
 pub(crate) fn repo_snap(repo: &RqRepo) -> RqSnap {
-    let head = git_out(
-        Path::new(&repo.path),
-        &["rev-parse", &format!("{}^{{commit}}", repo.branch)],
-    )
-    .map(|s| s.trim().to_string())
-    .unwrap_or_default();
-    let status = git_out(Path::new(&repo.path), &["status", "--porcelain"])
-        .map(|s| fnv(&s))
-        .unwrap_or(0);
+    let path = Path::new(&repo.path);
+    let head = git_out(path, &["rev-parse", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let mut h = fnv_feed(
+        FNV_BASIS,
+        git_out(path, &["status", "--porcelain"])
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    h = fnv_feed(h, b"\x00diff\x00");
+    h = fnv_feed(
+        h,
+        git_out(path, &["diff", "HEAD", "--"])
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    h = fnv_feed(h, b"\x00untracked\x00");
+    if let Some(list) =
+        git_out(path, &["ls-files", "--others", "--exclude-standard", "-z"])
+    {
+        use std::io::Read;
+        for rel in list.split('\0').filter(|s| !s.is_empty()) {
+            h = fnv_feed(h, rel.as_bytes());
+            h = fnv_feed(h, b"\x00");
+            if let Ok(mut f) = std::fs::File::open(path.join(rel)) {
+                let mut buf = [0u8; 65536];
+                loop {
+                    match f.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => h = fnv_feed(h, &buf[..n]),
+                    }
+                }
+            }
+            h = fnv_feed(h, b"\x00");
+        }
+    }
     RqSnap {
         head,
-        status_hash: status,
+        status_hash: h,
     }
 }
 
-/// Le checkout a-t-il bougé depuis le snapshot ? HEAD différent ou
-/// status porcelain différent → altéré. Snapshot vide (git muet au
-/// dispatch) → pas de verdict (on ne peut pas comparer).
+/// Le checkout a-t-il bougé depuis le snapshot ? HEAD effectif
+/// différent ou empreinte de contenu différente → altéré.
+/// Snapshot vide (git muet au dispatch) → pas de verdict.
 pub(crate) fn snap_changed(before: &RqSnap, repo: &RqRepo) -> bool {
     if before.head.is_empty() && before.status_hash == 0 {
         return false;
@@ -404,6 +446,7 @@ impl RqProbe {
             cfg: std::sync::RwLock::new(cfg),
             root,
             state: std::sync::Mutex::new(state),
+            persist: std::sync::Mutex::new(()),
             wake: tokio::sync::Notify::new(),
             enabled: AtomicBool::new(enabled),
         }
@@ -430,6 +473,11 @@ impl RqProbe {
     }
 
     pub(crate) fn save(&self) -> Result<()> {
+        // Toute la séquence snapshot → écriture → rename sous le
+        // verrou de persistance : le snapshot est TOUJOURS frais au
+        // moment où il est pris (dernier save = dernier état) et le
+        // `.part` n'est jamais partagé entre writers.
+        let _persist = self.persist.lock().unwrap();
         let sdir = self.state_dir();
         std::fs::create_dir_all(&sdir)?;
         // Rétention : les requêtes soldées (Done/Failed/Timeout/
@@ -985,6 +1033,37 @@ mod tests {
         // éligible, T1 restant occupé → rq-2 gagne.
         st.threads.get_mut("T2").unwrap().active = None;
         assert_eq!(pick_next(&st).as_deref(), Some("rq-2"));
+    }
+
+    #[test]
+    fn save_concurrent_reste_coherent() {
+        // 8 threads × 5 (increment + save) : le verrou de
+        // persistance sérialise snapshot→écriture→rename — le
+        // fichier final est un JSON valide portant le DERNIER état
+        // (reaped = 40), jamais un snapshot réordonné ni un `.part`
+        // partagé.
+        let dir = std::env::temp_dir().join(format!("rq-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut c = cfg::ReviewQueueCfg::default();
+        c.state_dir = dir.to_string_lossy().to_string();
+        let probe = std::sync::Arc::new(RqProbe::open(c, dir.clone()));
+        let mut hs = Vec::new();
+        for _ in 0..8 {
+            let p = std::sync::Arc::clone(&probe);
+            hs.push(std::thread::spawn(move || {
+                for _ in 0..5 {
+                    p.state.lock().unwrap().reaped += 1;
+                    p.save().unwrap();
+                }
+            }));
+        }
+        for h in hs {
+            h.join().unwrap();
+        }
+        let text = std::fs::read_to_string(dir.join("review-queue-state.json")).unwrap();
+        let st: RqState = serde_json::from_str(&text).unwrap();
+        assert_eq!(st.reaped, 40);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

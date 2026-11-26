@@ -61,9 +61,10 @@ instructions}` (proto — additive extension).
    (`{"verdict":"approved|changes_requested|comment","summary"}` —
    written LAST, it is the completion signal). The queue validates
    the schema — "the agent stopped" alone never completes a review.
-   The reviewed checkouts are fingerprinted at dispatch (HEAD +
-   `status --porcelain`) and re-checked at completion: a change
-   flags the review `tainted`.
+   The reviewed checkouts are fingerprinted at dispatch (effective
+   HEAD + content hash of `status --porcelain`, `diff HEAD` and
+   untracked files) and re-checked at completion: a change flags
+   the review `tainted`.
 4. **Result**: the requester receives a steer envelope — verdict,
    summary, findings count, paths to `review.md`/`prompt.md`.
    Failures (`failed`, `timeout`, `acquire_timeout`) are notified

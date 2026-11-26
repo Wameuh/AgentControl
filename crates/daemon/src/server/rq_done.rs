@@ -174,15 +174,21 @@ impl Daemon {
         if !(review.is_file() && findings.is_file() && complete.is_file()) {
             return; // pas encore — le timeout reste le filet.
         }
-        // Validation schéma — jamais « l'agent s'est arrêté ».
+        // Validation schéma STRICTE — jamais « l'agent s'est arrêté ».
         let findings_v: Value = match std::fs::read_to_string(&findings)
             .ok()
             .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         {
-            Some(v) if v.get("findings").and_then(Value::as_array).is_some() => v,
+            Some(v) => v,
             _ => {
-                self.rq_fail(id, "invalid findings.json (expected {\"findings\":[…]})")
-                    .await;
+                self.rq_fail(id, "invalid findings.json (not JSON)").await;
+                return;
+            }
+        };
+        let nfind = match validate_findings(&findings_v) {
+            Ok(n) => n,
+            Err(why) => {
+                self.rq_fail(id, &format!("invalid findings.json: {why}")).await;
                 return;
             }
         };
@@ -190,23 +196,19 @@ impl Daemon {
             .ok()
             .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         {
-            Some(v)
-                if matches!(
-                    v.get("verdict").and_then(Value::as_str),
-                    Some("approved" | "changes_requested" | "comment")
-                ) =>
-            {
-                v
-            }
+            Some(v) => v,
             _ => {
-                self.rq_fail(id, "invalid complete.json (expected verdict+summary)")
-                    .await;
+                self.rq_fail(id, "invalid complete.json (not JSON)").await;
                 return;
             }
         };
-        let verdict = complete_v["verdict"].as_str().unwrap_or("comment");
-        let summary = complete_v["summary"].as_str().unwrap_or("");
-        let nfind = findings_v["findings"].as_array().map(Vec::len).unwrap_or(0);
+        let (verdict, summary) = match validate_complete(&complete_v) {
+            Ok(v) => v,
+            Err(why) => {
+                self.rq_fail(id, &format!("invalid complete.json: {why}")).await;
+                return;
+            }
+        };
         // Anti-altération : chaque dépôt revu doit être inchangé
         // depuis le snapshot du dispatch.
         let tainted = {
@@ -314,6 +316,126 @@ impl Daemon {
             let _ = self
                 .h_send(by.to_string(), text.to_string(), false, true)
                 .await;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Validation stricte des sorties — contrat déterministe de la file.
+// ---------------------------------------------------------------------------
+
+const FINDING_SEVERITIES: &[&str] = &["blocker", "major", "minor", "nit"];
+const VERDICTS: &[&str] = &["approved", "changes_requested", "comment"];
+
+/// Valide `findings.json` : `{"findings":[{severity,file,line,message}]}`.
+/// Chaque entrée DOIT être un objet avec sévérité autorisée, `file`
+/// et `message` textuels non vides ; `line` entier si présent.
+/// → Ok(nombre de findings) ou Err(raison).
+fn validate_findings(v: &Value) -> Result<usize> {
+    let arr = v
+        .get("findings")
+        .and_then(Value::as_array)
+        .context("missing \"findings\" array")?;
+    for (i, f) in arr.iter().enumerate() {
+        let obj = f
+            .as_object()
+            .with_context(|| format!("findings[{i}] is not an object"))?;
+        let sev = obj
+            .get("severity")
+            .and_then(Value::as_str)
+            .with_context(|| format!("findings[{i}].severity missing/not a string"))?;
+        anyhow::ensure!(
+            FINDING_SEVERITIES.contains(&sev),
+            "findings[{i}].severity « {sev} » not in {FINDING_SEVERITIES:?}"
+        );
+        for k in ["file", "message"] {
+            let s = obj
+                .get(k)
+                .and_then(Value::as_str)
+                .with_context(|| format!("findings[{i}].{k} missing/not a string"))?;
+            anyhow::ensure!(!s.trim().is_empty(), "findings[{i}].{k} is empty");
+        }
+        if let Some(l) = obj.get("line") {
+            if !l.is_null() {
+                anyhow::ensure!(
+                    l.as_u64().is_some(),
+                    "findings[{i}].line must be an unsigned integer"
+                );
+            }
+        }
+    }
+    Ok(arr.len())
+}
+
+/// Valide `complete.json` : `verdict` ∈ allowlist + `summary`
+/// string obligatoire → Ok((verdict, summary)).
+fn validate_complete(v: &Value) -> Result<(String, String)> {
+    let verdict = v
+        .get("verdict")
+        .and_then(Value::as_str)
+        .context("missing \"verdict\"")?;
+    anyhow::ensure!(
+        VERDICTS.contains(&verdict),
+        "verdict « {verdict} » not in {VERDICTS:?}"
+    );
+    let summary = v
+        .get("summary")
+        .and_then(Value::as_str)
+        .context("missing \"summary\" (must be a string)")?;
+    Ok((verdict.to_string(), summary.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn findings_valide() {
+        assert_eq!(
+            validate_findings(&json!({"findings": []})).unwrap(),
+            0
+        );
+        assert_eq!(
+            validate_findings(&json!({"findings": [
+                {"severity":"blocker","file":"a.rs","line":3,"message":"x"},
+                {"severity":"nit","file":"b.rs","message":"y"}
+            ]}))
+            .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn findings_rejettes() {
+        // Tableaux non-objets, sévérité inconnue, champs manquants
+        // ou mal typés — tous rejetés.
+        for bad in [
+            json!({"findings": [null, 42]}),
+            json!({"findings": [{"severity":"bogus","file":"a","message":"m"}]}),
+            json!({"findings": [{"severity":"minor","file":"a"}]}),
+            json!({"findings": [{"severity":"minor","file":"","message":"m"}]}),
+            json!({"findings": [{"severity":"minor","file":"a","line":"x","message":"m"}]}),
+            json!({"findings": "nope"}),
+            json!({}),
+        ] {
+            assert!(validate_findings(&bad).is_err(), "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn complete_valide() {
+        assert_eq!(
+            validate_complete(&json!({"verdict":"approved","summary":"ok"})).unwrap(),
+            ("approved".to_string(), "ok".to_string())
+        );
+        for bad in [
+            json!({"verdict":"approved"}),                    // summary manquant
+            json!({"verdict":"approved","summary":42}),       // summary non string
+            json!({"verdict":"maybe","summary":"x"}),         // verdict hors allowlist
+            json!({"summary":"x"}),                           // verdict manquant
+        ] {
+            assert!(validate_complete(&bad).is_err(), "accepted {bad}");
         }
     }
 }

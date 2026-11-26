@@ -99,7 +99,20 @@ impl Daemon {
         };
         st.requests.insert(id.clone(), req);
         drop(st);
-        let _ = self.rq.save();
+        // Persistance remontée à l'intake : si l'écriture échoue, la
+        // requête est retirée de l'état mémoire (sinon elle serait
+        // dispatchée puis perdue au redémarrage — acquittée mais
+        // jamais revue) et l'appelant voit l'erreur.
+        if let Err(e) = self.rq.save() {
+            let mut st = self.rq.state.lock().unwrap();
+            st.requests.remove(&id);
+            let orphan = !st.requests.values().any(|r| r.thread == key);
+            if orphan {
+                st.threads.remove(&key);
+            }
+            drop(st);
+            return Err(e.context("persisting review request"));
+        }
         self.rq.kick();
         Ok(json!({
             "request": id,

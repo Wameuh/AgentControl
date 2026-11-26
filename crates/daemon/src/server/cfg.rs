@@ -1544,7 +1544,7 @@ pub struct ReviewQueueCfg {
     pub state_dir: String,
     /// Template du packet de revue — None = template intégré
     /// (`rq::PACKET_TEMPLATE`). Placeholders `{REQUEST}` `{ROUND}`
-    /// `{RUN_DIR}` `{REPOS}` `{INSTRUCTIONS}` `{COMPACT}`.
+    /// `{RUN_DIR}` `{REPOS}` `{INSTRUCTIONS}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
 }
