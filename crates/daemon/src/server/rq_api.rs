@@ -137,15 +137,23 @@ impl Daemon {
         patch: Option<BTreeMap<String, Value>>,
     ) -> Result<Value> {
         match patch {
-            None => Ok(json!({
-                "config": rq_cfg::cfg_json(&self.rq.cfg.read().unwrap(), self.rq.is_enabled()),
-                "status": self.rq.status_json(),
-            })),
+            None => {
+                // cfg_json est matérialisé AVANT status_json : le
+                // garde cfg.read() du one-shot ne doit pas vivre
+                // pendant status_json (qui relit cfg via
+                // state_dir) — read-read récursif = panic/deadlock.
+                let cfg_json = rq_cfg::cfg_json(&self.rq.cfg.read().unwrap(), self.rq.is_enabled());
+                Ok(json!({
+                    "config": cfg_json,
+                    "status": self.rq.status_json(),
+                }))
+            }
             Some(p) => {
                 let applied = self.rq_patch(p)?;
                 info!("review-queue: config persisted ({applied:?})");
+                let cfg_json = rq_cfg::cfg_json(&self.rq.cfg.read().unwrap(), self.rq.is_enabled());
                 Ok(json!({
-                    "config": rq_cfg::cfg_json(&self.rq.cfg.read().unwrap(), self.rq.is_enabled()),
+                    "config": cfg_json,
                     "applied": applied,
                     "persisted": true,
                     "status": self.rq.status_json(),

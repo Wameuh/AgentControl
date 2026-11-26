@@ -45,7 +45,7 @@ pub(crate) const ORIGIN: &str = "component:review-queue";
 /// Template intégré du packet — placeholders `{REQUEST}` `{ROUND}`
 /// `{RUN_DIR}` `{REPOS}` `{INSTRUCTIONS}` (cfg.prompt l'override en
 /// entier).
-const PACKET_TEMPLATE: &str = r#"# Review request {REQUEST} — round {ROUND}
+pub(crate) const PACKET_TEMPLATE: &str = r#"# Review request {REQUEST} — round {ROUND}
 
 You are the dedicated reviewer session for this thread. Follow this
 packet exactly — it is the only authoritative input for this round.
@@ -400,7 +400,7 @@ pub(crate) fn snap_changed(before: &RqSnap, repo: &RqRepo) -> bool {
     now.head != before.head || now.status_hash != before.status_hash
 }
 
-fn fill_packet(tpl: &str, req: &RqRequest, round: u64, repos_md: &str) -> String {
+pub(crate) fn fill_packet(tpl: &str, req: &RqRequest, round: u64, repos_md: &str) -> String {
     let instr = {
         let i = req.instructions.trim();
         if i.is_empty() {
@@ -421,7 +421,7 @@ fn fill_packet(tpl: &str, req: &RqRequest, round: u64, repos_md: &str) -> String
 /// Bloc markdown « Repositories » du packet — un sous-bloc par
 /// dépôt : chemin, branche, base, head figé, état du tree au
 /// dispatch, commandes de lecture du diff.
-fn repos_markdown(req: &RqRequest) -> String {
+pub(crate) fn repos_markdown(req: &RqRequest) -> String {
     let mut out = String::new();
     for (i, r) in req.repos.iter().enumerate() {
         let snap = req.snaps.get(i);
@@ -436,8 +436,8 @@ fn repos_markdown(req: &RqRequest) -> String {
              - path: `{}`\n\
              - branch: `{}` (head `{}`)\n\
              - base: {}\n\
-             - diff: `git -C {} diff {}...{}` — inspect with \
-             `git -C {} show|log|diff`; do NOT checkout, commit or \
+             - diff: `git -C \"{}\" diff {}...{}` — inspect with \
+             `git -C \"{}\" show|log|diff`; do NOT checkout, commit or \
              modify this repository.\n\n",
             i + 1,
             r.path,
@@ -481,7 +481,25 @@ impl RqProbe {
         self.enabled.load(Ordering::SeqCst)
     }
     pub fn set_enabled(&self, on: bool) {
-        self.enabled.store(on, Ordering::SeqCst);
+        let was = self.enabled.swap(on, Ordering::SeqCst);
+        if on && !was {
+            // Réveil : les requêtes `Queued` accumulées pendant la
+            // pause (le tick retourne tôt, « requests stay queued
+            // until re-enabled ») ne doivent PAS être soldées
+            // `acquire_timeout` au premier tick — la file désactivée
+            // n'est pas une famine de slot. Leur chrono repart de
+            // zéro et la remise à zéro est persistée.
+            let now = now_secs();
+            {
+                let mut st = self.state.lock().unwrap();
+                for r in st.requests.values_mut() {
+                    if r.state == ReqState::Queued {
+                        r.acquire_at = Some(now);
+                    }
+                }
+            }
+            let _ = self.save();
+        }
     }
     pub fn kick(&self) {
         self.wake.notify_one();
@@ -628,7 +646,7 @@ pub(crate) fn free_thread(st: &mut RqState, key: &str, now: f64) {
 /// « Occupé » = `t.active` posé (dispatch en cours), une requête
 /// du thread en `Compacting`/`Reviewing`, ou thread en cours de
 /// moisson (`reaping`).
-fn pick_next(st: &RqState) -> Option<String> {
+pub(crate) fn pick_next(st: &RqState) -> Option<String> {
     let busy: std::collections::BTreeSet<&str> = st
         .requests
         .values()
@@ -652,7 +670,7 @@ fn pick_next(st: &RqState) -> Option<String> {
 /// Requêtes `Reviewing` persistées sans `dispatched_at` — dispatch
 /// jamais arrivé au send (crash entre état et envoi). Voir
 /// `rq_reconcile_dispatches`.
-fn undispatched(st: &RqState) -> Vec<String> {
+pub(crate) fn undispatched(st: &RqState) -> Vec<String> {
     st.requests
         .iter()
         .filter(|(_, r)| r.state == ReqState::Reviewing && r.dispatched_at.is_none())
@@ -855,10 +873,7 @@ impl Daemon {
             }
             round
         };
-        let (sid, reused) = match self.rq_ensure_session(&thread_key, id, round, cfg).await? {
-            Some(v) => v,
-            None => return Ok(false), // thread introuvable — soldé ailleurs
-        };
+        let (sid, reused) = self.rq_ensure_session(&thread_key, id, round, cfg).await?;
         // Round ≥2 + session réutilisée → /compact borné d'abord
         // (sauté quand l'agent n'annonce pas la commande).
         let want_compact = round >= 2 && reused;
@@ -924,7 +939,7 @@ impl Daemon {
         req_id: &str,
         round: u64,
         cfg: &cfg::ReviewQueueCfg,
-    ) -> Result<Option<(String, bool)>> {
+    ) -> Result<(String, bool)> {
         let existing = {
             let st = self.rq.state.lock().unwrap();
             st.threads.get(thread_key).and_then(|t| t.session.clone())
@@ -935,7 +950,7 @@ impl Daemon {
             // idem, on recrée.
             if let Ok(s) = self.get_session(&sid).await {
                 if s.meta_snapshot().state != "dead" {
-                    return Ok(Some((sid, true)));
+                    return Ok((sid, true));
                 }
             }
             // Session morte : le thread repart sur une session fraîche
@@ -995,7 +1010,7 @@ impl Daemon {
             "review-queue: thread {} round {round} → reviewer {sid}",
             thread_tid(thread_key)
         );
-        Ok(Some((sid, false)))
+        Ok((sid, false))
     }
 
     /// Profil agent du reviewer : `cfg.agent` explicite (validé
@@ -1098,324 +1113,5 @@ impl Daemon {
             self.rq_fail(req_id, &format!("deliver prompt: {e:#}"))
                 .await;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn thread_key_trie_et_stable() {
-        let a = RqPair {
-            path: "/b".into(),
-            branch: "x".into(),
-        };
-        let b = RqPair {
-            path: "/a".into(),
-            branch: "y".into(),
-        };
-        let k1 = thread_key(&[a.clone(), b.clone()]);
-        let k2 = thread_key(&[b, a]);
-        assert_eq!(k1, k2, "l'ordre des paires ne change pas la clé");
-        let tid = thread_tid(&k1);
-        assert_eq!(tid.len(), 8);
-        assert!(tid.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn packet_placeholders() {
-        let req = RqRequest {
-            id: "rq-test".into(),
-            by: String::new(),
-            repos: vec![RqRepo {
-                path: "/repo".into(),
-                branch: "feat".into(),
-                base: "main".into(),
-            }],
-            instructions: "check the diff".into(),
-            thread: "t".into(),
-            session: None,
-            round: 2,
-            state: ReqState::Queued,
-            created_at: 0.0,
-            acquire_at: None,
-            dispatched_at: None,
-            compact_at: None,
-            run_dir: "/run/dir".into(),
-            snaps: vec![],
-            result: None,
-            error: None,
-        };
-        let md = repos_markdown(&req);
-        let p = fill_packet(PACKET_TEMPLATE, &req, 2, &md);
-        assert!(p.contains("rq-test") && p.contains("round 2"));
-        assert!(p.contains("/run/dir") && p.contains("check the diff"));
-        assert!(p.contains("/repo") && p.contains("`feat`"));
-        assert!(!p.contains("{REQUEST}") && !p.contains("{RUN_DIR}"));
-        // Le template est rempli par str::replace (pas format!) —
-        // les accolades JSON doivent être SIMPLES, jamais doublées.
-        assert!(!p.contains("{{") && !p.contains("}}"));
-        assert!(p.contains(r#"{"findings":[{"severity""#));
-    }
-
-    fn req(id: &str, thread: &str, state: ReqState, created_at: f64) -> RqRequest {
-        RqRequest {
-            id: id.into(),
-            by: String::new(),
-            repos: vec![],
-            instructions: String::new(),
-            thread: thread.into(),
-            session: None,
-            round: 1,
-            state,
-            created_at,
-            acquire_at: None,
-            dispatched_at: None,
-            compact_at: None,
-            run_dir: String::new(),
-            snaps: vec![],
-            result: None,
-            error: None,
-        }
-    }
-
-    fn thread(key: &str, active: Option<String>) -> RqThread {
-        RqThread {
-            key: key.into(),
-            tid: "tid".into(),
-            pairs: vec![],
-            session: None,
-            title: String::new(),
-            round: 0,
-            active,
-            last_active: 0.0,
-            reap_checked_at: 0.0,
-            created_at: 0.0,
-        }
-    }
-
-    #[test]
-    fn pick_next_sauts_les_threads_occupees() {
-        // Deux requêtes en file sur le MÊME thread + une sur un
-        // autre : la plus vieille du thread libre part, celle du
-        // thread occupé attend — même avec des slots disponibles.
-        let mut st = RqState::default();
-        st.threads.insert("T1".into(), thread("T1", None));
-        st.threads
-            .insert("T2".into(), thread("T2", Some("rq-a".into())));
-        st.requests
-            .insert("rq-1".into(), req("rq-1", "T1", ReqState::Queued, 1.0));
-        st.requests
-            .insert("rq-2".into(), req("rq-2", "T2", ReqState::Queued, 2.0));
-        st.requests
-            .insert("rq-3".into(), req("rq-3", "T1", ReqState::Queued, 3.0));
-        // rq-2 est plus vieille mais son thread T2 est occupé → rq-1.
-        assert_eq!(pick_next(&st).as_deref(), Some("rq-1"));
-        // rq-1 passe en review → T1 occupé à son tour : plus rien
-        // d'éligible (rq-3 attend la fin de rq-1).
-        st.requests.get_mut("rq-1").unwrap().state = ReqState::Reviewing;
-        assert_eq!(pick_next(&st), None);
-        // T2 libéré → rq-2 (plus vieille que rq-3) redevient
-        // éligible, T1 restant occupé → rq-2 gagne.
-        st.threads.get_mut("T2").unwrap().active = None;
-        assert_eq!(pick_next(&st).as_deref(), Some("rq-2"));
-    }
-
-    #[test]
-    fn pick_next_et_busy_respectent_la_reservation_reaper() {
-        // Thread réservé par le reaper (`reaping`) = occupé : sa
-        // requête `Queued` n'est JAMAIS dispatchée pendant la
-        // suppression de sa session — intake pendant le delete ne
-        // peut plus voir son thread disparaître sous elle.
-        let mut st = RqState::default();
-        st.threads.insert("T".into(), thread("T", None));
-        st.requests
-            .insert("rq-1".into(), req("rq-1", "T", ReqState::Queued, 1.0));
-        st.requests
-            .insert("rq-2".into(), req("rq-2", "U", ReqState::Queued, 2.0));
-        assert_eq!(pick_next(&st).as_deref(), Some("rq-1"));
-        st.reaping.insert("T".into());
-        assert_eq!(pick_next(&st).as_deref(), Some("rq-2"));
-        assert!(thread_busy(&st, "T"));
-        // Réservation levée (thread conservé pour la requête
-        // pending ou supprimé) → rq-1 redevient éligible si le
-        // thread existe encore.
-        st.reaping.remove("T");
-        assert_eq!(pick_next(&st).as_deref(), Some("rq-1"));
-    }
-
-    #[test]
-    fn status_json_et_patch_cfg_state_ne_deadloquent_pas() {
-        // Régression lock-order : status_json lisait `state_dir`
-        // (donc cfg.read) PENDANT que le garde `state` était tenu,
-        // alors que rq_patch tient cfg.write → state — inversion
-        // mortelle. Ici on reproduit les deux ordres en concurrence
-        // sur une sonde réelle : le patch simule rq_patch
-        // (cfg.write PUIS state), status_json doit rester fluide.
-        let dir = std::env::temp_dir().join(format!("rq-lock-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let probe = std::sync::Arc::new(RqProbe::open(cfg::ReviewQueueCfg::default(), dir.clone()));
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
-        {
-            let p = std::sync::Arc::clone(&probe);
-            let stop = std::sync::Arc::clone(&stop);
-            std::thread::spawn(move || {
-                while !stop.load(Ordering::SeqCst) {
-                    // Ordre rq_patch : cfg.write D'ABORD, state ensuite.
-                    let mut g = p.cfg.write().unwrap();
-                    let _s = p.state.lock().unwrap();
-                    drop(_s);
-                    drop(g);
-                }
-            });
-        }
-        let (tx, rx) = std::sync::mpsc::channel();
-        {
-            let p = std::sync::Arc::clone(&probe);
-            std::thread::spawn(move || {
-                for _ in 0..500 {
-                    let _ = p.status_json();
-                }
-                let _ = tx.send(());
-            });
-        }
-        // Si l'ordre est inversé quelque part, status_json bloque
-        // indéfiniment → recv_timeout échoue (le thread fuité ne
-        // empêche pas le process de sortir).
-        rx.recv_timeout(Duration::from_secs(15))
-            .expect("status_json deadlocked vs cfg.write→state order");
-        stop.store(true, Ordering::SeqCst);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn free_thread_libere_et_relance_l_acquire() {
-        // Thread occupé par une review → ses Queued ne timeout pas
-        // (thread_busy) ; à la libération, acquire_at repart de
-        // zéro pour les followers du même thread seulement.
-        let mut st = RqState::default();
-        st.threads.insert("T".into(), thread("T", None));
-        st.requests
-            .insert("rq-a".into(), req("rq-a", "T", ReqState::Reviewing, 1.0));
-        st.requests
-            .insert("rq-b".into(), req("rq-b", "T", ReqState::Queued, 1.0));
-        st.requests
-            .insert("rq-c".into(), req("rq-c", "U", ReqState::Queued, 1.0));
-        assert!(thread_busy(&st, "T"));
-        assert!(!thread_busy(&st, "U"));
-        // Libération : rq-a soldée → T libre, rq-b reçoit une
-        // fenêtre acquire fraîche ; rq-c (autre thread) inchangée.
-        st.requests.get_mut("rq-a").unwrap().state = ReqState::Done;
-        free_thread(&mut st, "T", 500.0);
-        assert!(!thread_busy(&st, "T"));
-        assert_eq!(st.requests.get("rq-b").unwrap().acquire_at, Some(500.0));
-        assert_eq!(st.requests.get("rq-c").unwrap().acquire_at, None);
-    }
-
-    #[test]
-    fn save_concurrent_reste_coherent() {
-        // 8 threads × 5 (increment + save) : le verrou de
-        // persistance sérialise snapshot→écriture→rename — le
-        // fichier final est un JSON valide portant le DERNIER état
-        // (reaped = 40), jamais un snapshot réordonné ni un `.part`
-        // partagé.
-        let dir = std::env::temp_dir().join(format!("rq-save-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut c = cfg::ReviewQueueCfg::default();
-        c.state_dir = dir.to_string_lossy().to_string();
-        let probe = std::sync::Arc::new(RqProbe::open(c, dir.clone()));
-        let mut hs = Vec::new();
-        for _ in 0..8 {
-            let p = std::sync::Arc::clone(&probe);
-            hs.push(std::thread::spawn(move || {
-                for _ in 0..5 {
-                    p.state.lock().unwrap().reaped += 1;
-                    p.save().unwrap();
-                }
-            }));
-        }
-        for h in hs {
-            h.join().unwrap();
-        }
-        let text = std::fs::read_to_string(dir.join("review-queue-state.json")).unwrap();
-        let st: RqState = serde_json::from_str(&text).unwrap();
-        assert_eq!(st.reaped, 40);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn undispatched_ne_prend_que_reviewing_sans_envoi() {
-        // Reprise post-restart : seule une requête persistée
-        // `Reviewing` SANS `dispatched_at` doit être renvoyée —
-        // tout le reste (autres états, déjà envoyées) est ignoré.
-        let mut st = RqState::default();
-        let mut r = req("rq-a", "T", ReqState::Reviewing, 1.0);
-        r.dispatched_at = None;
-        st.requests.insert("rq-a".into(), r);
-        let mut r = req("rq-b", "T", ReqState::Reviewing, 1.0);
-        r.dispatched_at = Some(1.0);
-        st.requests.insert("rq-b".into(), r);
-        st.requests
-            .insert("rq-c".into(), req("rq-c", "T", ReqState::Queued, 1.0));
-        st.requests
-            .insert("rq-d".into(), req("rq-d", "T", ReqState::Compacting, 1.0));
-        assert_eq!(undispatched(&st), vec!["rq-a".to_string()]);
-    }
-
-    #[test]
-    fn unsettled_compte_le_vivant_seulement() {
-        let mut st = RqState::default();
-        assert_eq!(unsettled(&st), 0);
-        for (id, s) in [
-            ("q", ReqState::Queued),
-            ("c", ReqState::Compacting),
-            ("r", ReqState::Reviewing),
-            ("d", ReqState::Done),
-            ("f", ReqState::Failed),
-            ("t", ReqState::Timeout),
-            ("a", ReqState::AcquireTimeout),
-        ] {
-            st.requests.insert(id.into(), req(id, "T", s, 1.0));
-        }
-        assert_eq!(unsettled(&st), 3);
-    }
-
-    #[test]
-    fn migrate_state_file_preserve_l_historique() {
-        // Changement de state_dir à file vide : le JSON d'état est
-        // copié vers le nouveau dossier — un restart avant le
-        // prochain save() ne perd rien. Source absente = no-op.
-        let base = std::env::temp_dir().join(format!("rq-mig-{}", std::process::id()));
-        let old = base.join("old");
-        let new = base.join("new");
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&old).unwrap();
-        migrate_state_file(&old, &new).unwrap(); // rien à copier
-        assert!(!new.join("review-queue-state.json").exists());
-        std::fs::write(old.join("review-queue-state.json"), "{}").unwrap();
-        migrate_state_file(&old, &new).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(new.join("review-queue-state.json")).unwrap(),
-            "{}"
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn snap_detecte_les_changements() {
-        // Snapshot manuel : HEAD bidon + hash forcé — un repo factice
-        // ne peut pas être comparé (git muet → before vide → pas de
-        // verdict). On vérifie la porte « snapshot vide = muet ».
-        let repo = RqRepo {
-            path: "/nonexistent".into(),
-            branch: "b".into(),
-            base: String::new(),
-        };
-        let before = RqSnap {
-            head: String::new(),
-            status_hash: 0,
-        };
-        assert!(!snap_changed(&before, &repo));
     }
 }

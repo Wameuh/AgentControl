@@ -128,9 +128,15 @@ impl Daemon {
         // `Forges` est cloné : `remote_forge`/`forge_for_host` sont
         // des lectures pures de la config déclarée.
         let forge_cfg = cfg.clone();
-        let forges = self.forges.read().unwrap().set.clone();
-        let forge_set = self.forges.read().unwrap().set.list_json();
-        let forge_arr = forge_set.as_array().cloned().unwrap_or_default();
+        // Garde `forges` strictement borné au bloc : le read guard
+        // n'est PAS Send — il ne doit jamais vivre jusqu'à l'await.
+        let (forges, forge_arr) = {
+            let g = self.forges.read().unwrap();
+            (
+                g.set.clone(),
+                g.set.list_json().as_array().cloned().unwrap_or_default(),
+            )
+        };
         let jobs: Vec<(String, Vec<RqPair>)> = candidates
             .iter()
             .filter(|(k, _, _, _)| !busy_keys.contains(k) && !gone.contains(k))

@@ -1970,6 +1970,8 @@ fn home_of(_user: &str) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+mod rq_tests;
+#[cfg(test)]
 mod tests;
 
 /// Première ligne d'une requête HTTP (`^(GET|POST|…|TRACE) \S+ HTTP/\d`).
