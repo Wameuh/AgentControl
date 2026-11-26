@@ -163,6 +163,12 @@ pub(crate) struct RqRequest {
     pub round: u64,
     pub state: ReqState,
     pub created_at: f64,
+    /// Départ du budget `acquire_timeout_secs` — None = `created_at`.
+    /// Repositionné à `now` quand le thread se libère : l'attente
+    /// derrière une review du même thread n'est PAS une famine de
+    /// slot, le chrono repart à zéro à chaque libération.
+    #[serde(default)]
+    pub acquire_at: Option<f64>,
     #[serde(default)]
     pub dispatched_at: Option<f64>,
     /// Horodatage du `/compact` — borne `compact_timeout_secs`.
@@ -281,6 +287,12 @@ pub(crate) fn resolve_repo(spec: &ReviewRepoSpec) -> Result<RqRepo> {
         "repo path « {expanded} » is not a directory"
     );
     let path = canon.to_string_lossy().to_string();
+    // Sonde git : un dossier non-checkout passerait sinon avec
+    // HEAD="HEAD", snapshots vides et taint-check muet.
+    anyhow::ensure!(
+        git_out(Path::new(&path), &["rev-parse", "--git-dir"]).is_some(),
+        "repo path « {expanded} » is not a git checkout"
+    );
     let branch = match spec.branch.as_deref().map(str::trim) {
         Some(b) if !b.is_empty() => b.to_string(),
         _ => git_out(Path::new(&path), &["rev-parse", "--abbrev-ref", "HEAD"])
@@ -501,6 +513,25 @@ impl RqProbe {
                         | ReqState::AcquireTimeout
                 ) || r.created_at > cutoff
             });
+            // Threads : un thread sans session reviewer ET sans
+            // requête non soldée est une coque vide (jamais dispatché
+            // ou tout soldé puis purgé) — on le retire pour borner
+            // le fichier même reaper désactivé. Un thread AVEC
+            // session est conservé : c'est le reaper (ou une
+            // réactivation) qui décide de sa session.
+            let live: std::collections::BTreeSet<String> = g
+                .requests
+                .values()
+                .filter(|r| {
+                    matches!(
+                        r.state,
+                        ReqState::Queued | ReqState::Compacting | ReqState::Reviewing
+                    )
+                })
+                .map(|r| r.thread.clone())
+                .collect();
+            g.threads
+                .retain(|key, t| t.session.is_some() || live.contains(key));
             g.clone()
         };
         let tmp = sdir.join("review-queue-state.json.part");
@@ -539,6 +570,37 @@ impl RqProbe {
             "reaped": st.reaped,
             "recent": recent,
         })
+    }
+}
+
+/// Thread occupé = review active (`Compacting`/`Reviewing`) ou
+/// dispatch en cours (`t.active` posé) — même définition que
+/// `pick_next`. Une requête `Queued` d'un thread occupé attend son
+/// tour SÉQUENTIEL : ce n'est pas une famine de slot.
+pub(crate) fn thread_busy(st: &RqState, key: &str) -> bool {
+    st.requests
+        .values()
+        .any(|r| r.thread == key && r.state.active())
+        || st
+            .threads
+            .get(key)
+            .map(|t| t.active.is_some())
+            .unwrap_or(false)
+}
+
+/// Thread libéré (sa requête active vient d'être soldée) :
+/// `t.active` retombe et l'horloge `acquire_at` des requêtes
+/// `Queued` du thread repart de zéro — le prochain slot leur est
+/// acquis sur une fenêtre fraîche, pas sur le temps passé derrière
+/// la review précédente.
+pub(crate) fn free_thread(st: &mut RqState, key: &str, now: f64) {
+    if let Some(t) = st.threads.get_mut(key) {
+        t.active = None;
+    }
+    for r in st.requests.values_mut() {
+        if r.thread == key && r.state == ReqState::Queued {
+            r.acquire_at = Some(now);
+        }
     }
 }
 
@@ -800,6 +862,7 @@ impl Daemon {
             if let Some(t) = st.threads.get_mut(&thread_key) {
                 t.session = Some(sid.clone());
                 t.active = Some(id.to_string());
+                t.last_active = now_secs();
             }
             if let Some(r) = st.requests.get_mut(id) {
                 if has_compact {
@@ -1048,6 +1111,7 @@ mod tests {
             round: 2,
             state: ReqState::Queued,
             created_at: 0.0,
+            acquire_at: None,
             dispatched_at: None,
             compact_at: None,
             run_dir: "/run/dir".into(),
@@ -1078,6 +1142,7 @@ mod tests {
             round: 1,
             state,
             created_at,
+            acquire_at: None,
             dispatched_at: None,
             compact_at: None,
             run_dir: String::new(),
@@ -1127,6 +1192,30 @@ mod tests {
         // éligible, T1 restant occupé → rq-2 gagne.
         st.threads.get_mut("T2").unwrap().active = None;
         assert_eq!(pick_next(&st).as_deref(), Some("rq-2"));
+    }
+
+    #[test]
+    fn free_thread_libere_et_relance_l_acquire() {
+        // Thread occupé par une review → ses Queued ne timeout pas
+        // (thread_busy) ; à la libération, acquire_at repart de
+        // zéro pour les followers du même thread seulement.
+        let mut st = RqState::default();
+        st.threads.insert("T".into(), thread("T", None));
+        st.requests
+            .insert("rq-a".into(), req("rq-a", "T", ReqState::Reviewing, 1.0));
+        st.requests
+            .insert("rq-b".into(), req("rq-b", "T", ReqState::Queued, 1.0));
+        st.requests
+            .insert("rq-c".into(), req("rq-c", "U", ReqState::Queued, 1.0));
+        assert!(thread_busy(&st, "T"));
+        assert!(!thread_busy(&st, "U"));
+        // Libération : rq-a soldée → T libre, rq-b reçoit une
+        // fenêtre acquire fraîche ; rq-c (autre thread) inchangée.
+        st.requests.get_mut("rq-a").unwrap().state = ReqState::Done;
+        free_thread(&mut st, "T", 500.0);
+        assert!(!thread_busy(&st, "T"));
+        assert_eq!(st.requests.get("rq-b").unwrap().acquire_at, Some(500.0));
+        assert_eq!(st.requests.get("rq-c").unwrap().acquire_at, None);
     }
 
     #[test]

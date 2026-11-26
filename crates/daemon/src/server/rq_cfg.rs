@@ -138,7 +138,9 @@ pub(crate) fn params_schema(agents: &[String]) -> Vec<ParamSpec> {
             "acquire_timeout_secs",
             "Acquire timeout (s)",
             "a request still `queued` (no free reviewer slot) past \
-             this is settled `acquire_timeout`",
+             this is settled `acquire_timeout` — a request waiting \
+             behind a review on the SAME thread is sequential, not \
+             starved: its clock pauses while the thread is busy",
             ParamKind::Int,
             Some("3600"),
         ),

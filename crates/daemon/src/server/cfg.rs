@@ -1491,9 +1491,11 @@ pub struct ReviewQueueCfg {
     /// requête soldée `timeout`. Défaut 5400 (90 min).
     #[serde(default = "d5400")]
     pub review_timeout_secs: u64,
-    /// Timeout d'attente d'un slot en file en secondes : une requête
-    /// `queued` plus vieille que ça est soldée `acquire_timeout`.
-    /// Défaut 3600.
+    /// Timeout d'attente d'un slot en secondes : une requête
+    /// `queued` plus vieille que ça est soldée `acquire_timeout` —
+    /// SAUF si son thread a déjà une review en cours (attente
+    /// séquentielle par design, pas une famine de slot ; le chrono
+    /// repart à zéro à la libération du thread). Défaut 3600.
     #[serde(default = "d3600")]
     pub acquire_timeout_secs: u64,
     /// Timeout du `/compact` pré-round en secondes — au-delà on envoie

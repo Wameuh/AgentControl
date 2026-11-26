@@ -19,7 +19,9 @@ impl Daemon {
     /// déjà spawnée), ou tour vivant de la session.
     pub(crate) async fn rq_reap_pass(self: &Arc<Self>, force: bool) -> Result<Vec<String>> {
         let cfg = self.rq.cfg.read().unwrap().clone();
-        if !cfg.reaper_enabled {
+        // `force` (RPC manuelle) outrepasse `reaper_enabled` — le
+        // tick périodique reste le seul chemin gated.
+        if !cfg.reaper_enabled && !force {
             return Ok(Vec::new());
         }
         let now = now_secs();

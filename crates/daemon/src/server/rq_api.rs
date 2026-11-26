@@ -38,9 +38,12 @@ impl Daemon {
             resolved.push(r);
         }
         // Déduplique les paires identiques (même checkout+branche
-        // demandé deux fois = une seule entrée de thread).
+        // demandé deux fois = une seule entrée de thread) — `resolved`
+        // aussi : sinon le packet/snapshots portent le dépôt en double.
         pairs.sort_by(|a, b| (&a.path, &a.branch).cmp(&(&b.path, &b.branch)));
         pairs.dedup();
+        resolved.sort_by(|a, b| (&a.path, &a.branch).cmp(&(&b.path, &b.branch)));
+        resolved.dedup_by(|a, b| a.path == b.path && a.branch == b.branch);
         let key = thread_key(&pairs);
         let by = by.unwrap_or_default();
         if !by.is_empty() {
@@ -86,6 +89,7 @@ impl Daemon {
             round,
             state: ReqState::Queued,
             created_at: now,
+            acquire_at: None,
             dispatched_at: None,
             compact_at: None,
             run_dir: run_dir.to_string_lossy().to_string(),

@@ -92,8 +92,12 @@ pub(crate) fn forge_clear(verdicts: &[RepoVerdict]) -> bool {
 /// Décision du reaper pour un thread : `None` = conserver.
 /// `busy` = review active ou tour vivant sur la session reviewer —
 /// intangible par construction (garde dure, testée). `verdicts` =
-/// un verdict par dépôt du thread (ordre `pairs`). TTL : idle depuis
-/// `last_active` > `idle_ttl_secs` (0 = TTL désactivé).
+/// un verdict par dépôt du thread (ordre `pairs`). Forge d'abord :
+/// tous clos → suppression immédiate ; un `Open` = preuve
+/// concluante que le thread est VIVANT → jamais de TTL non plus.
+/// TTL : idle depuis `last_active` > `idle_ttl_secs` (0 = désactivé)
+/// et seulement sur des verdicts clos/introuvables — jamais sur un
+/// `Open`.
 pub(crate) fn reap_reason(
     busy: bool,
     verdicts: &[RepoVerdict],
@@ -106,6 +110,9 @@ pub(crate) fn reap_reason(
     }
     if forge_clear(verdicts) {
         return Some("forge_closed");
+    }
+    if verdicts.contains(&RepoVerdict::Open) {
+        return None;
     }
     if cfg.idle_ttl_secs > 0 && now - last_active > cfg.idle_ttl_secs as f64 {
         return Some("idle_ttl");
@@ -216,6 +223,30 @@ mod tests {
                 &cfg
             ),
             Some("idle_ttl")
+        );
+        // Open + idle > TTL → CONSERVÉ : un MR/PR ouvert est une
+        // preuve concluante que le thread est vivant — le TTL ne
+        // s'applique qu'aux verdicts clos/introuvables.
+        assert_eq!(
+            reap_reason(
+                false,
+                &[RepoVerdict::Open],
+                now - cfg.idle_ttl_secs as f64 - 1.0,
+                now,
+                &cfg
+            ),
+            None
+        );
+        // Mixte Open+Closed → pareil, jamais de TTL.
+        assert_eq!(
+            reap_reason(
+                false,
+                &[RepoVerdict::Open, RepoVerdict::Closed],
+                now - cfg.idle_ttl_secs as f64 - 1.0,
+                now,
+                &cfg
+            ),
+            None
         );
         // TTL désactivé (0) → jamais par TTL.
         let mut c2 = cfg.clone();

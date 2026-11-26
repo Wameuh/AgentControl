@@ -72,7 +72,10 @@ instructions}` (proto — additive extension).
 5. **After completion** the reviewer session is put to **sleep and
    kept** — never deleted while its thread may get another round.
    `review_timeout_secs` → cancel + sleep + `timeout`;
-   `acquire_timeout_secs` queued without a slot → `acquire_timeout`.
+   `acquire_timeout_secs` queued without a slot → `acquire_timeout`
+   (a request waiting behind an active review *on the same thread*
+   is sequential by design — the acquire clock pauses while the
+   thread is busy and restarts when it frees).
 
 ### Status / config / reaper
 
@@ -97,7 +100,9 @@ same surface via `component_set_params` (client "Configurer" form).
   forge transport; one `open`/`draft` or one inconclusive repo
   blocks deletion, **or**
 - its idle time exceeds `idle_ttl_secs` (default 5 days, `0` disables
-  TTL reaping).
+  TTL reaping) — **only** when no MR/PR of the thread is still open:
+  an `open`/`draft` change is conclusive proof the thread is alive
+  and blocks both forge and TTL reaping.
 
 It **never** touches a thread with an active review or a live turn.
 Forge resolution per repo: `reaper_forge = auto` detects kind/host

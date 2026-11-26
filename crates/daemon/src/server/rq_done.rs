@@ -2,7 +2,7 @@
 //! déterministe des reviews, notification du demandeur — voir `rq`
 //! pour l'état et `rq_reap` pour le reaper.
 
-use super::rq::{now_secs, snap_changed, ReqState};
+use super::rq::{free_thread, now_secs, snap_changed, thread_busy, ReqState};
 use super::*;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -22,8 +22,16 @@ impl Daemon {
                 .iter()
                 .filter_map(|(id, r)| {
                     let to = match r.state {
+                        // Acquire timeout = « pas de slot ». Une
+                        // requête dont le thread est occupé attend
+                        // son tour SÉQUENTIEL (pick_next) — pas une
+                        // famine : on saute le timeout tant que le
+                        // thread est busy, et free_thread lui offre
+                        // une fenêtre fraîche à la libération.
+                        ReqState::Queued if thread_busy(&st, &r.thread) => None,
                         ReqState::Queued => {
-                            (now - r.created_at > acquire_to).then_some(ReqState::AcquireTimeout)
+                            let start = r.acquire_at.unwrap_or(r.created_at);
+                            (now - start > acquire_to).then_some(ReqState::AcquireTimeout)
                         }
                         ReqState::Reviewing => r
                             .dispatched_at
@@ -45,11 +53,9 @@ impl Daemon {
                     });
                 }
                 let sid = st.requests.get(&id).and_then(|r| r.session.clone());
-                if let Some(r) = st.requests.get(&id) {
-                    let t = r.thread.clone();
-                    if let Some(th) = st.threads.get_mut(&t) {
-                        th.active = None;
-                    }
+                let tkey = st.requests.get(&id).map(|r| r.thread.clone());
+                if let Some(t) = tkey {
+                    free_thread(&mut st, &t, now);
                 }
                 sid
             };
@@ -228,9 +234,11 @@ impl Daemon {
                 }));
             }
             let tkey = st.requests.get(id).map(|r| r.thread.clone());
-            if let Some(t) = tkey.and_then(|t| st.threads.get_mut(&t)) {
-                t.active = None;
-                t.last_active = now_secs();
+            if let Some(t) = tkey {
+                if let Some(th) = st.threads.get_mut(&t) {
+                    th.last_active = now_secs();
+                }
+                free_thread(&mut st, &t, now_secs());
             }
         }
         let _ = self.rq.save();
@@ -273,9 +281,7 @@ impl Daemon {
             let by = r.by.clone();
             let sid = r.session.clone();
             let tkey = r.thread.clone();
-            if let Some(t) = st.threads.get_mut(&tkey) {
-                t.active = None;
-            }
+            free_thread(&mut st, &tkey, now_secs());
             (by, sid)
         };
         let _ = self.rq.save();
