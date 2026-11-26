@@ -569,11 +569,7 @@ enum ReviewErrVerdict {
     Retry(String),
 }
 
-fn review_err_verdict(
-    meta: &SessionMeta,
-    err_since: Option<f64>,
-    now: f64,
-) -> ReviewErrVerdict {
+fn review_err_verdict(meta: &SessionMeta, err_since: Option<f64>, now: f64) -> ReviewErrVerdict {
     if meta.state != "error" {
         return ReviewErrVerdict::None;
     }
@@ -932,8 +928,7 @@ impl Daemon {
                     // Premier tick de l'erreur : armer la grâce — le
                     // prochain tick sans changement produit Retry.
                     if err_since.is_none() {
-                        if let Some(e) =
-                            st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut)
+                        if let Some(e) = st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut)
                         {
                             e.insert("err_since".into(), json!(now));
                         }
@@ -945,8 +940,7 @@ impl Daemon {
                     // la grâce repart à zéro si un autre kind d'erreur
                     // survient plus tard.
                     if err_since.is_some() {
-                        if let Some(e) =
-                            st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut)
+                        if let Some(e) = st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut)
                         {
                             e.remove("err_since");
                         }
