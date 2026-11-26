@@ -46,6 +46,8 @@ pub(super) fn classify_error(msg: &str) -> &'static str {
         || has_code("401")
         || has_code("403")
         || m.contains("authentication")
+        || m.contains("authenticate")
+        || m.contains("oauth")
         || m.contains("credentials")
         || m.contains("login")
         || m.contains("api key")
@@ -86,6 +88,10 @@ pub(super) fn classify_error(msg: &str) -> &'static str {
         || m.contains("ratelimit")
         || m.contains("rate_limit")
         || has_code("429")
+        || has_code("529")
+        // acp-claude : api_error_type=overloaded_error / HTTP 529 —
+        // surcharge transitoire du provider, le retry borné a un sens.
+        || m.contains("overloaded")
         || m.contains("quota")
         || m.contains("too many requests")
         || m.contains("resource exhausted")
