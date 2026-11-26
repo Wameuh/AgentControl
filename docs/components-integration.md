@@ -412,6 +412,7 @@ generic selection logic: `internal` for what is already compiled in,
 | janitor | `internal` | internal task |
 | backlog-orchestrator | **`internal`** | the managed-`process` plan was superseded: the loop was ported into the daemon (better: direct session calls, `AGENTCONTROL_*` env unnecessary, no process to lose) |
 | agents | `internal` | agent profiles (`[agents.*]`) are daemon config, not a process — the component only exposes their editable surface: one `list` param per profile (argv CSV), persisted as the full `[agents.<id>]` section of config.toml and hot-reloaded (`component_set_params` / `acctl comp set agents <id> <argv-csv>`) |
+| review-queue | `internal` | generic local review queue — opt-in loop in the daemon (`[review_queue]`), reviewer sessions reused per `[repo,branch]` thread, results steered back to the requester; independent of the GitHub-PR `/mr review` pipeline (see docs/review-queue.md) |
 | agentbacklog | `tool` | stateless CLI — passive node + version + catalog install |
 | acctl | `tool` | same |
 | a host supervisor (supervisord/systemd/cron) | `external` | container/host infra — never managed (the daemon doesn't touch its own supervisor) |

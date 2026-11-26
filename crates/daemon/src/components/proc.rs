@@ -971,6 +971,10 @@ mod tests {
             Arc::new(crate::server::OrchProbe::open(
                 crate::server::OrchCfg::default(),
             )),
+            Arc::new(crate::server::RqProbe::open(
+                crate::server::ReviewQueueCfg::default(),
+                std::env::temp_dir(),
+            )),
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
                 vec![],
@@ -1010,6 +1014,10 @@ mod tests {
             web,
             Arc::new(crate::server::OrchProbe::open(
                 crate::server::OrchCfg::default(),
+            )),
+            Arc::new(crate::server::RqProbe::open(
+                crate::server::ReviewQueueCfg::default(),
+                std::env::temp_dir(),
             )),
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
@@ -1052,6 +1060,10 @@ mod tests {
             web,
             Arc::new(crate::server::OrchProbe::open(
                 crate::server::OrchCfg::default(),
+            )),
+            Arc::new(crate::server::RqProbe::open(
+                crate::server::ReviewQueueCfg::default(),
+                std::env::temp_dir(),
             )),
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(

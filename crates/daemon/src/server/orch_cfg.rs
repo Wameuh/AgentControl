@@ -1078,7 +1078,7 @@ pub(crate) fn cfg_json(cfg: &super::cfg::OrchCfg, enabled: bool) -> Value {
 // chaîne (component_set_params / `acctl orch set` envoient des strings).
 // ---------------------------------------------------------------------------
 
-fn val_bool(v: &Value) -> Result<bool> {
+pub(crate) fn val_bool(v: &Value) -> Result<bool> {
     match v {
         Value::Bool(b) => Ok(*b),
         Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
@@ -1091,7 +1091,7 @@ fn val_bool(v: &Value) -> Result<bool> {
     }
 }
 
-fn val_u64(v: &Value) -> Result<u64> {
+pub(crate) fn val_u64(v: &Value) -> Result<u64> {
     match v {
         Value::Number(n) => n
             .as_u64()
@@ -1107,7 +1107,7 @@ fn val_u64(v: &Value) -> Result<u64> {
 /// Chaîne — les formes natives non chaînes sont rendues en texte
 /// (un `prompt` envoyé `42` devient "42" plutôt qu'erreur : le formulaire
 /// et acctl peuvent passer de l'auto-JSON).
-fn val_string(v: &Value) -> Result<String> {
+pub(crate) fn val_string(v: &Value) -> Result<String> {
     Ok(match v {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
@@ -1368,7 +1368,7 @@ fn val_review_overrides(
 
 /// `true` si `v` est une chaîne vide — « champ vidé = défaut/vide »
 /// (le formulaire envoie `""` pour un champ effacé).
-fn is_empty(v: &Value) -> bool {
+pub(crate) fn is_empty(v: &Value) -> bool {
     matches!(v, Value::String(s) if s.trim().is_empty()) || v.is_null()
 }
 

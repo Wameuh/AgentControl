@@ -52,6 +52,17 @@ pub(crate) mod orch_plan;
 /// Review de PR servie par le démon (`pr_review`) — passe séparée
 /// d'`orch_plan`, garde-fous propres (allowlist base, pool dédié).
 pub(crate) mod orch_review;
+/// File de revue LOCALE générique (`review_queue*`) — sessions
+/// reviewer réutilisables par thread [repo,branche], slots,
+/// compact-first, reaper forge ; indépendante du pipeline `/mr review`.
+pub(crate) mod rq;
+/// Surface de config éditable à chaud de la file de revue (schéma
+/// params, validation de patch, persistance `[review_queue]`) —
+/// même mécanique que `orch_cfg.rs`.
+pub(crate) mod rq_cfg;
+/// Verdicts forge du reaper review-queue (fonctions pures — tests
+/// sans forge réelle).
+pub(crate) mod rq_forge;
 mod peers;
 mod prs;
 mod sessions;
@@ -59,9 +70,11 @@ mod term;
 
 pub use cfg::{
     A2aCfg, AgentConf, AgentProfile, AgentVia, CatalogPatch, CompactCfg, CompactPartial,
-    CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES,
+    CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, ReviewQueueCfg, WatchdogCfg,
+    DEFAULT_MAX_INSTANCES,
 };
 pub(crate) use orch::OrchProbe;
+pub(crate) use rq::RqProbe;
 
 use anyhow::{Context, Result};
 use proto::{Push, ReqKind, Request, Response};
@@ -315,6 +328,9 @@ pub struct Daemon {
     /// opt-in, statut exposé via le composant interne
     /// `backlog-orchestrator`.
     pub orch: Arc<OrchProbe>,
+    /// File de revue locale générique (server/rq.rs) — boucle interne
+    /// opt-in, statut exposé via le composant interne `review-queue`.
+    pub rq: Arc<RqProbe>,
     /// Seuils du compact forcé automatique : global `[compact]` +
     /// overrides `[agents.<id>.compact]` — résolution par session à
     /// l'open (le sidecar `compact.json` complète par-dessus).
@@ -369,6 +385,7 @@ impl Daemon {
         forge_cfgs: Vec<ForgeCfg>,
         bind_tcp: String,
         orch: OrchCfg,
+        rq: cfg::ReviewQueueCfg,
         compact: CompactCfg,
         watchdog: WatchdogCfg,
         provision_skills: bool,
@@ -377,6 +394,7 @@ impl Daemon {
     ) -> Result<(Arc<Self>, Vec<String>)> {
         let web = Arc::new(RwLock::new(None));
         let orch = Arc::new(OrchProbe::open(orch));
+        let rq = Arc::new(RqProbe::open(rq, root.clone()));
         let compact = CompactSrc {
             global: compact,
             by_agent: agents
@@ -448,6 +466,7 @@ impl Daemon {
                 a2a.enabled,
                 Arc::clone(&web),
                 Arc::clone(&orch),
+                Arc::clone(&rq),
                 Arc::clone(&agents),
                 Arc::clone(&forges),
                 Arc::clone(&caps),
@@ -455,6 +474,7 @@ impl Daemon {
                 catalog,
             ),
             orch,
+            rq,
             a2a,
             compact,
             watchdog,
@@ -1190,6 +1210,19 @@ impl Daemon {
             ReqKind::PrReviewRequest { session, repo, pr } => {
                 self.h_pr_review_request(session, repo, pr).await
             }
+            ReqKind::ReviewQueueRequest {
+                session,
+                repos,
+                instructions,
+            } => {
+                self.h_review_queue_request(session, repos, instructions)
+                    .await
+            }
+            ReqKind::ReviewQueueStatus {} => self.h_review_queue_status().await,
+            ReqKind::ReviewQueueConfig { patch } => {
+                self.h_review_queue_config(patch).await
+            }
+            ReqKind::ReviewQueueReap {} => self.h_review_queue_reap().await,
             // Interceptés par la couche connexion (ordre des inputs +
             // cycle de vie borné à la connexion) — jamais atteint ici.
             ReqKind::Auth { .. }

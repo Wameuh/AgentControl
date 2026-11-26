@@ -12,7 +12,7 @@ mod proc;
 mod render;
 mod version;
 
-use crate::server::{orch, OrchProbe};
+use crate::server::{orch, rq, OrchProbe, RqProbe};
 use anyhow::{Context, Result};
 use proto::{
     ComponentKind, ComponentSpec, ComponentState, ComponentStatus, ComponentsFile, Healthcheck,
@@ -88,6 +88,13 @@ const INTERNALS: &[Internal] = &[
         description: "ACP agent profiles — per-profile [agents.*] command \
                       editable (persisted in config.toml, hot-reload)",
     },
+    Internal {
+        name: "review-queue",
+        description: "Generic local review queue — reviewer sessions \
+                      reused per [repo,branch] thread, steer results \
+                      back to the requester, forge-configurable reaper \
+                      (opt-in, [review_queue] section)",
+    },
 ];
 
 pub struct Components {
@@ -120,6 +127,9 @@ pub struct Components {
     /// Orchestrateur backlog natif — l'état du composant interne
     /// `backlog-orchestrator` suit sa phase (server/orch.rs).
     orch: Arc<OrchProbe>,
+    /// File de revue locale — l'état du composant interne
+    /// `review-queue` suit son activation (server/rq.rs).
+    rq: Arc<RqProbe>,
     /// Profils agents vivants (partagé avec `Daemon.agents`) — alimente
     /// le schéma/valeurs du composant interne `agents` ET les dropdowns
     /// `*_agent` du schéma orchestrateur (lus à live : un profil
@@ -164,6 +174,7 @@ impl Components {
         a2a_enabled: bool,
         web: Arc<RwLock<Option<Value>>>,
         orch: Arc<OrchProbe>,
+        rq: Arc<RqProbe>,
         agents: Arc<RwLock<HashMap<String, crate::server::AgentProfile>>>,
         forges: Arc<std::sync::RwLock<crate::forges::ForgeLive>>,
         caps: Arc<crate::caps::CapsRegistry>,
@@ -230,6 +241,7 @@ impl Components {
             web,
             down: Arc::new(AtomicBool::new(false)),
             orch,
+            rq,
             agents,
             forges,
             caps,
@@ -438,6 +450,49 @@ impl Components {
                 ..Default::default()
             };
             return Some(item_json(&spec, &st, "internal"));
+        }
+        if name == rq::COMPONENT_NAME {
+            // File de revue locale : params_schema/params de la
+            // section `[review_queue]` — le formulaire « Configurer »
+            // envoie `component_set_params` (intercepté → rq_patch,
+            // persiste config.toml + hot-reload). État déduit de
+            // l'activation runtime ; file/threads dans `review_queue`.
+            let i = INTERNALS.iter().find(|i| i.name == name)?;
+            let agent_ids = {
+                let agents = self.agents.read().await;
+                let mut v: Vec<String> = agents.keys().cloned().collect();
+                v.sort();
+                v
+            };
+            let spec = ComponentSpec {
+                name: name.to_string(),
+                kind: ComponentKind::Internal,
+                command: Vec::new(),
+                version_argv: None,
+                min_version: None,
+                env: HashMap::new(),
+                cwd: None,
+                autostart: self.rq.is_enabled(),
+                restart: RestartPolicy::Never,
+                restart_sec: 0,
+                healthcheck: Healthcheck::None,
+                description: Some(i.description.to_string()),
+                queries: HashMap::new(),
+                catalog: None,
+                params_schema: crate::server::rq_cfg::params_schema(&agent_ids),
+                params: crate::server::rq_cfg::params_values(
+                    &self.rq.cfg.read().unwrap(),
+                ),
+                render: None,
+                view_dir: None,
+            };
+            let st = ComponentStatus {
+                state: self.rq.component_state(),
+                ..Default::default()
+            };
+            let mut item = item_json(&spec, &st, "internal");
+            item["review_queue"] = self.rq.status_json();
+            return Some(item);
         }
         if name == crate::server::forges_cfg::COMPONENT_NAME {
             // Forges `[[forges]]` : un param `json` `forges` (tableau
