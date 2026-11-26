@@ -588,6 +588,34 @@ fn error_classify() {
     assert_eq!(classify_error("error: rate_limit_error"), "rate_limit");
     // Codes nus = mot entier : timestamps/ids/ports ne matchent pas.
     assert_eq!(classify_error("ts=1704290000 port=4031"), "other");
+    // acp-claude #380 : `result` subtype=success + is_error — le tour
+    // s'est clos sur une erreur (API/auth), message explicite de
+    // l'adaptateur. Auth et surcharge transitoire restent classés
+    // pour le retry borné ; le reste → other, pas de retry auto.
+    assert_eq!(
+        classify_error(
+            "acp session/prompt: claude reported error despite success subtype: Failed to authenticate: OAuth session expired and could not be refreshed [stop_reason=stop_sequence terminal_reason=api_error turns=1]"
+        ),
+        "auth"
+    );
+    assert_eq!(
+        classify_error(
+            "acp session/prompt: claude result error_during_execution (type=overloaded_error http=529 code=overloaded): Overloaded [terminal_reason=api_error turns=2]"
+        ),
+        "rate_limit"
+    );
+    assert_eq!(
+        classify_error(
+            "acp session/prompt: claude result error_during_execution (type=rate_limit_error http=429): Rate limit [terminal_reason=api_error]"
+        ),
+        "rate_limit"
+    );
+    assert_eq!(
+        classify_error(
+            "acp session/prompt: claude reported error despite success subtype (api_error=safety_monitor_blocked): blocked [terminal_reason=api_error]"
+        ),
+        "other"
+    );
     // « upgrade » seul n'est pas une limite de débit.
     assert_eq!(
         classify_error("please upgrade your daemon to continue"),

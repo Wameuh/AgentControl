@@ -716,6 +716,97 @@ async fn duplicate_new_and_stdin_close() {
     let _ = status;
 }
 
+/// Envoie un session/prompt et rend la réponse JSON-RPC complète
+/// (result OU error) — pour les tours qui échouent.
+async fn send_prompt(c: &mut Client, sid: &str, text: &str) -> Value {
+    let id = c.next_id;
+    c.next_id += 1;
+    c.send(
+        json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{
+        "sessionId":sid,"prompt":[{"type":"text","text":text}]}}),
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let v = c.recv(deadline).await;
+        if v.get("id") == Some(&json!(id)) {
+            return v;
+        }
+    }
+}
+
+#[tokio::test]
+async fn result_failures_have_honest_messages_and_keep_session() {
+    // #380 : les combos `result` en échec doivent produire un message
+    // explicite — jamais le nu « claude result success » — et ne pas
+    // tuer le process claude : le prompt suivant répond normalement.
+    let turns = json!([
+        // 1. subtype=success + is_error : tour clos sur erreur
+        //    (auth ici — forme réelle observée headless).
+        [
+            {"type":"result","subtype":"success","is_error":true,
+             "stop_reason":"stop_sequence","terminal_reason":"api_error",
+             "num_turns":1,"duration_ms":200,
+             "result":"Failed to authenticate: OAuth session expired and could not be refreshed",
+             "api_error_status":null,
+             "usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":0.0}
+        ],
+        // 2. error_max_turns avec errors[] rempli.
+        [
+            {"type":"result","subtype":"error_max_turns","is_error":true,
+             "stop_reason":"max_turn_requests","num_turns":50,
+             "errors":["Reached maximum number of turns (50)"],
+             "usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":0.0}
+        ],
+        // 3. error_during_execution + champs api_error_* (surcharge).
+        [
+            {"type":"result","subtype":"error_during_execution","is_error":true,
+             "terminal_reason":"api_error","num_turns":2,
+             "api_error_type":"overloaded_error","api_error_status":529,
+             "api_error_code":"overloaded","result":"",
+             "usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":0.0}
+        ],
+        // 4. cancel → stopReason cancelled, pas une erreur.
+        [
+            {"type":"result","subtype":"success","is_error":false,
+             "stop_reason":"cancelled","num_turns":1,
+             "usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":0.0}
+        ]
+    ]);
+    let mut scen = init_scenario(turns);
+    scen["default_turn"] = json!([]);
+    let (mut c, _d) = start(scen).await;
+    let r = handshake(&mut c).await;
+    let sid = r["sessionId"].as_str().unwrap().to_string();
+
+    // 1. success + is_error → erreur explicite, contexte complet.
+    let v = send_prompt(&mut c, &sid, "one").await;
+    let msg = v["error"]["message"].as_str().unwrap_or("").to_string();
+    assert!(msg.contains("despite success subtype"), "{msg}");
+    assert!(msg.contains("Failed to authenticate"), "{msg}");
+    assert!(msg.contains("terminal_reason=api_error"), "{msg}");
+    assert!(msg.contains("turns=1"), "{msg}");
+    assert!(!msg.contains("claude result success"), "{msg}");
+
+    // 2. error_max_turns → errors[] jointes + stop_reason.
+    let v = send_prompt(&mut c, &sid, "two").await;
+    let msg = v["error"]["message"].as_str().unwrap_or("").to_string();
+    assert!(msg.contains("Reached maximum number of turns"), "{msg}");
+    assert!(msg.contains("error_max_turns"), "{msg}");
+    assert!(msg.contains("stop_reason=max_turn_requests"), "{msg}");
+
+    // 3. error_during_execution → champs api_error_* exposés.
+    let v = send_prompt(&mut c, &sid, "three").await;
+    let msg = v["error"]["message"].as_str().unwrap_or("").to_string();
+    assert!(msg.contains("type=overloaded_error"), "{msg}");
+    assert!(msg.contains("http=529"), "{msg}");
+    assert!(msg.contains("error_during_execution"), "{msg}");
+
+    // 4. cancelled → succès côté ACP, la session vit toujours.
+    let v = send_prompt(&mut c, &sid, "four").await;
+    assert_eq!(v["result"]["stopReason"], "cancelled");
+}
+
 #[tokio::test]
 async fn ctrl_init_failure_kills_claude_no_orphan() {
     // ctrl initialize en échec → session/new erreur ET le process

@@ -874,16 +874,113 @@ async fn handle_result(shared: &Arc<Shared>, v: &Value) {
     let _ = tx.send(Ok(json!({"stopReason": stop})));
 }
 
+/// Message d'échec d'un `result` — toujours explicite. `errors[]`
+/// jointes si présentes ; sinon la cause réelle : pour
+/// subtype=success&is_error le tour s'est terminé sur une erreur
+/// (API, auth, structured output refusé…) et `result` porte le texte
+/// d'erreur, `api_error_*` la classe quand c'est une erreur API.
+/// Jamais le nu « claude result success » qui ne disait ni la cause
+/// ni même que c'était un échec (#380).
 fn result_error_message(v: &Value) -> String {
-    if let Some(errs) = v.get("errors").and_then(Value::as_array) {
-        let msgs: Vec<&str> = errs.iter().filter_map(Value::as_str).collect();
-        if !msgs.is_empty() {
-            return msgs.join("; ");
-        }
-    }
-    // Texte du dernier message assistant si dispo, sinon subtype.
     let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("error");
-    format!("claude result {subtype}")
+    let mut head = if subtype == "success" {
+        // Combo observé en prod : is_error=true sur subtype=success —
+        // claude a clos le tour sur une erreur (API/auth…) alors que
+        // le subtype annonce un succès.
+        "claude reported error despite success subtype".to_string()
+    } else {
+        format!("claude result {subtype}")
+    };
+    // Champs de classification d'une erreur API terminale — leur
+    // présence rend le message auto-explicatif pour le retry borné
+    // du démon (rate_limit_error/overloaded_error → rate_limit).
+    let mut api = Vec::new();
+    if let Some(t) = v.get("api_error_type").and_then(Value::as_str) {
+        api.push(format!("type={t}"));
+    }
+    if let Some(s) = v.get("api_error_status").and_then(Value::as_i64) {
+        api.push(format!("http={s}"));
+    }
+    if let Some(c) = v.get("api_error_code").and_then(Value::as_str) {
+        api.push(format!("code={c}"));
+    }
+    if let Some(o) = v.get("api_error_origin").and_then(Value::as_str) {
+        api.push(format!("origin={o}"));
+    }
+    if let Some(a) = v.get("api_error").and_then(Value::as_str) {
+        api.push(format!("api_error={a}"));
+    }
+    if !api.is_empty() {
+        head.push_str(&format!(" ({})", api.join(" ")));
+    }
+    // Texte porteur : `errors[]` jointes d'abord, sinon `result` =
+    // texte final du tour, ou le texte d'erreur quand is_error (y
+    // compris sur subtype=success).
+    let detail = v
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|errs| {
+            errs.iter()
+                .filter_map(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            v.get("result")
+                .and_then(Value::as_str)
+                .or_else(|| v.get("error").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
+        .unwrap_or_default();
+    let msg = if detail.is_empty() {
+        head
+    } else {
+        format!("{head}: {}", excerpt(&detail, 500))
+    };
+    result_with_context(msg, v)
+}
+
+/// Extrait borné d'un texte potentiellement long (journal + meta
+/// last_error tronquent à 300 de toute façon).
+fn excerpt(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// Contexte de fin de tour accolé au message d'échec — stop_reason,
+/// terminal_reason (aborted_*/api_error…), nombre de tours, arrêt
+/// sur check de permission.
+fn result_with_context(msg: String, v: &Value) -> String {
+    let mut ctx = Vec::new();
+    if let Some(sr) = v.get("stop_reason").and_then(Value::as_str) {
+        ctx.push(format!("stop_reason={sr}"));
+    }
+    if let Some(tr) = v.get("terminal_reason").and_then(Value::as_str) {
+        ctx.push(format!("terminal_reason={tr}"));
+    }
+    if let Some(n) = v.get("num_turns").and_then(Value::as_u64) {
+        ctx.push(format!("turns={n}"));
+    }
+    if v
+        .get("stopped_by_permission_check")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        ctx.push("stopped_by_permission_check".to_string());
+    }
+    if ctx.is_empty() {
+        msg
+    } else {
+        format!("{msg} [{}]", ctx.join(" "))
+    }
 }
 
 /// usage {input_tokens, cache_read_input_tokens,
