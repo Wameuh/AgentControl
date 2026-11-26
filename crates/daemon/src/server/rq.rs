@@ -218,6 +218,14 @@ pub(crate) struct RqState {
     pub requests: BTreeMap<String, RqRequest>,
     #[serde(default)]
     pub reaped: u64,
+    /// Threads en cours de moisson par le reaper — réservation
+    /// MÉMOIRE SEULE (`serde(skip)` : un restart mid-reap ne laisse
+    /// pas de réservation fantôme ; la session supprimée est
+    /// respawnee au prochain dispatch). `pick_next`/`thread_busy`
+    /// la respectent : une intake pendant la suppression ne peut
+    /// pas être dispatchée sur une session en cours de delete.
+    #[serde(skip)]
+    pub reaping: std::collections::BTreeSet<String>,
 }
 
 /// Sonde de la file — cfg vivante (RwLock, patchable à chaud),
@@ -529,6 +537,7 @@ impl RqProbe {
                     )
                 })
                 .map(|r| r.thread.clone())
+                .chain(g.reaping.iter().cloned())
                 .collect();
             g.threads
                 .retain(|key, t| t.session.is_some() || live.contains(key));
@@ -542,7 +551,12 @@ impl RqProbe {
     }
 
     /// Instantané pour `review_queue_status` / l'item composant.
+    /// ORDRE DE VERROUS : `cfg` est lu AVANT `state` — jamais
+    /// `cfg.read()`/`state_dir()` pendant que le garde `state` est
+    /// tenu (rq_patch prend cfg.write → state ; l'inverse
+    /// deadlockerait).
     pub fn status_json(&self) -> Value {
+        let state_dir = self.state_dir().to_string_lossy().to_string();
         let st = self.state.lock().unwrap();
         let mut counts = std::collections::BTreeMap::new();
         for r in st.requests.values() {
@@ -564,7 +578,7 @@ impl RqProbe {
             .collect();
         json!({
             "enabled": self.is_enabled(),
-            "state_dir": self.state_dir().to_string_lossy(),
+            "state_dir": state_dir,
             "threads": st.threads.len(),
             "requests": counts,
             "reaped": st.reaped,
@@ -573,14 +587,17 @@ impl RqProbe {
     }
 }
 
-/// Thread occupé = review active (`Compacting`/`Reviewing`) ou
-/// dispatch en cours (`t.active` posé) — même définition que
-/// `pick_next`. Une requête `Queued` d'un thread occupé attend son
-/// tour SÉQUENTIEL : ce n'est pas une famine de slot.
+/// Thread occupé = review active (`Compacting`/`Reviewing`),
+/// dispatch en cours (`t.active` posé) ou moisson en cours
+/// (`reaping`) — même définition que `pick_next`. Une requête
+/// `Queued` d'un thread occupé attend son tour SÉQUENTIEL : ce
+/// n'est pas une famine de slot.
 pub(crate) fn thread_busy(st: &RqState, key: &str) -> bool {
-    st.requests
-        .values()
-        .any(|r| r.thread == key && r.state.active())
+    st.reaping.contains(key)
+        || st
+            .requests
+            .values()
+            .any(|r| r.thread == key && r.state.active())
         || st
             .threads
             .get(key)
@@ -608,8 +625,9 @@ pub(crate) fn free_thread(st: &mut RqState, key: &str, now: f64) {
 /// **dont le thread n'a pas déjà une review en cours** — les rounds
 /// d'un même thread sont SÉQUENTIELS sur la session reviewer (une
 /// review à la fois par thread, quel que soit `max_parallel`).
-/// « Occupé » = `t.active` posé (dispatch en cours) ou une requête
-/// du thread en `Compacting`/`Reviewing`.
+/// « Occupé » = `t.active` posé (dispatch en cours), une requête
+/// du thread en `Compacting`/`Reviewing`, ou thread en cours de
+/// moisson (`reaping`).
 fn pick_next(st: &RqState) -> Option<String> {
     let busy: std::collections::BTreeSet<&str> = st
         .requests
@@ -622,6 +640,7 @@ fn pick_next(st: &RqState) -> Option<String> {
                 .filter(|t| t.active.is_some())
                 .map(|t| t.key.as_str()),
         )
+        .chain(st.reaping.iter().map(String::as_str))
         .collect();
     st.requests
         .values()
@@ -808,12 +827,21 @@ impl Daemon {
         // plutôt que `Queued` muet jusqu'à acquire_timeout.
         // Ok(true) = « progrès » : la boucle continue sur la
         // requête suivante.
-        let thread_gone = {
+        let (thread_gone, reaping) = {
             let st = self.rq.state.lock().unwrap();
-            !st.threads.contains_key(&thread_key)
+            (
+                !st.threads.contains_key(&thread_key),
+                st.reaping.contains(&thread_key),
+            )
         };
         if thread_gone {
             self.rq_fail(id, "thread state lost").await;
+            return Ok(true);
+        }
+        if reaping {
+            // Thread réservé par le reaper : on ne dispatche pas
+            // dessus — la requête reste `Queued`, `pick_next` la
+            // saute tant que la réservation tient.
             return Ok(true);
         }
         let round = {
@@ -1192,6 +1220,73 @@ mod tests {
         // éligible, T1 restant occupé → rq-2 gagne.
         st.threads.get_mut("T2").unwrap().active = None;
         assert_eq!(pick_next(&st).as_deref(), Some("rq-2"));
+    }
+
+    #[test]
+    fn pick_next_et_busy_respectent_la_reservation_reaper() {
+        // Thread réservé par le reaper (`reaping`) = occupé : sa
+        // requête `Queued` n'est JAMAIS dispatchée pendant la
+        // suppression de sa session — intake pendant le delete ne
+        // peut plus voir son thread disparaître sous elle.
+        let mut st = RqState::default();
+        st.threads.insert("T".into(), thread("T", None));
+        st.requests
+            .insert("rq-1".into(), req("rq-1", "T", ReqState::Queued, 1.0));
+        st.requests
+            .insert("rq-2".into(), req("rq-2", "U", ReqState::Queued, 2.0));
+        assert_eq!(pick_next(&st).as_deref(), Some("rq-1"));
+        st.reaping.insert("T".into());
+        assert_eq!(pick_next(&st).as_deref(), Some("rq-2"));
+        assert!(thread_busy(&st, "T"));
+        // Réservation levée (thread conservé pour la requête
+        // pending ou supprimé) → rq-1 redevient éligible si le
+        // thread existe encore.
+        st.reaping.remove("T");
+        assert_eq!(pick_next(&st).as_deref(), Some("rq-1"));
+    }
+
+    #[test]
+    fn status_json_et_patch_cfg_state_ne_deadloquent_pas() {
+        // Régression lock-order : status_json lisait `state_dir`
+        // (donc cfg.read) PENDANT que le garde `state` était tenu,
+        // alors que rq_patch tient cfg.write → state — inversion
+        // mortelle. Ici on reproduit les deux ordres en concurrence
+        // sur une sonde réelle : le patch simule rq_patch
+        // (cfg.write PUIS state), status_json doit rester fluide.
+        let dir = std::env::temp_dir().join(format!("rq-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let probe = std::sync::Arc::new(RqProbe::open(cfg::ReviewQueueCfg::default(), dir.clone()));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        {
+            let p = std::sync::Arc::clone(&probe);
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    // Ordre rq_patch : cfg.write D'ABORD, state ensuite.
+                    let mut g = p.cfg.write().unwrap();
+                    let _s = p.state.lock().unwrap();
+                    drop(_s);
+                    drop(g);
+                }
+            });
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let p = std::sync::Arc::clone(&probe);
+            std::thread::spawn(move || {
+                for _ in 0..500 {
+                    let _ = p.status_json();
+                }
+                let _ = tx.send(());
+            });
+        }
+        // Si l'ordre est inversé quelque part, status_json bloque
+        // indéfiniment → recv_timeout échoue (le thread fuité ne
+        // empêche pas le process de sortir).
+        rx.recv_timeout(Duration::from_secs(15))
+            .expect("status_json deadlocked vs cfg.write→state order");
+        stop.store(true, Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

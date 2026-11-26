@@ -93,8 +93,26 @@ impl Daemon {
         {
             let mut st = self.rq.state.lock().unwrap();
             for k in &gone {
-                st.threads.remove(k);
-                st.reaped += 1;
+                // Re-vérif sous le même verrou : une intake a pu
+                // ajouter une requête `Queued` depuis la sélection
+                // des candidats — le thread est alors conservé (sa
+                // session est morte/inconnue, le dispatch
+                // respawnera) plutôt que perdu avec sa requête.
+                let pending = st.requests.values().any(|r| {
+                    r.thread == *k
+                        && matches!(
+                            r.state,
+                            ReqState::Queued | ReqState::Compacting | ReqState::Reviewing
+                        )
+                });
+                if pending {
+                    if let Some(t) = st.threads.get_mut(k) {
+                        t.reap_checked_at = now;
+                    }
+                } else {
+                    st.threads.remove(k);
+                    st.reaped += 1;
+                }
             }
             for (key, _p, _s, _la) in &candidates {
                 if !busy_keys.contains(key) && !gone.contains(key) {
@@ -143,12 +161,19 @@ impl Daemon {
                 let st = self.rq.state.lock().unwrap();
                 st.threads.get(&key).and_then(|t| t.session.clone())
             };
-            if let Some(sid) = sid {
-                // TOCTOU : les verdicts forge ont été calculés il y a
-                // quelques secondes — re-vérifier review active +
-                // requête pending + tour vivant avant de supprimer.
-                let still_clear = {
-                    let st = self.rq.state.lock().unwrap();
+            // RÉSERVATION du thread pour la moisson : posé sous le
+            // même verrou que la re-vérification d'éligibilité —
+            // intake (`Queued`) et dispatch (`pick_next` +
+            // `rq_dispatch_one`) respectent `st.reaping` jusqu'à la
+            // fin de la suppression. Les awaits qui suivent ne
+            // peuvent plus laisser passer une requête sur une
+            // session en cours de delete : elle verrait le thread
+            // disparaître sous elle (« thread state lost »).
+            let reserved = {
+                let mut st = self.rq.state.lock().unwrap();
+                if st.reaping.contains(&key) {
+                    false
+                } else {
                     let no_active = st
                         .threads
                         .get(&key)
@@ -161,29 +186,77 @@ impl Daemon {
                                 ReqState::Queued | ReqState::Compacting | ReqState::Reviewing
                             )
                     });
-                    no_active && no_pending
-                };
-                if !still_clear {
-                    continue;
+                    if no_active && no_pending {
+                        st.reaping.insert(key.clone());
+                        true
+                    } else {
+                        false
+                    }
                 }
+            };
+            if !reserved {
+                continue;
+            }
+            // Libère la réservation sans rien supprimer — utilisé
+            // sur tous les chemins d'abandon.
+            macro_rules! unreserve {
+                () => {{
+                    let mut st = self.rq.state.lock().unwrap();
+                    st.reaping.remove(&key);
+                }};
+            }
+            if let Some(sid) = sid {
+                // TOCTOU résiduel : les verdicts forge ont été
+                // calculés il y a quelques secondes — re-vérifier
+                // qu'un tour n'a pas démarré sur la session avant
+                // de la supprimer.
                 if let Ok(s) = self.get_session(&sid).await {
                     let m = s.meta_snapshot();
                     if matches!(
                         m.state.as_str(),
                         "working" | "compacting" | "starting" | "waiting_input"
                     ) {
+                        unreserve!();
                         continue;
                     }
                 }
                 if let Err(e) = self.h_delete_session(sid.clone()).await {
                     warn!("review-queue: reap {key}: delete {sid}: {e:#}");
+                    unreserve!();
                     continue;
                 }
             }
-            {
+            // Finalisation sous UN SEUL verrou : si une requête a
+            // été intake pendant les awaits, le thread est CONSERVÉ
+            // (sa session a été supprimée → `session: None`, le
+            // dispatch respawnera un reviewer frais) — la requête
+            // acquittée n'est jamais perdue. Sinon suppression.
+            let removed = {
                 let mut st = self.rq.state.lock().unwrap();
-                st.threads.remove(&key);
-                st.reaped += 1;
+                st.reaping.remove(&key);
+                let pending = st.requests.values().any(|r| {
+                    r.thread == key
+                        && matches!(
+                            r.state,
+                            ReqState::Queued | ReqState::Compacting | ReqState::Reviewing
+                        )
+                });
+                if pending {
+                    if let Some(t) = st.threads.get_mut(&key) {
+                        t.session = None;
+                        t.active = None;
+                        t.reap_checked_at = now;
+                    }
+                    false
+                } else {
+                    st.threads.remove(&key);
+                    st.reaped += 1;
+                    true
+                }
+            };
+            if !removed {
+                info!("review-queue: reap {key} aborted — request arrived during delete");
+                continue;
             }
             info!("review-queue: reaped thread {key} ({reason})");
             reaped.push(key);
