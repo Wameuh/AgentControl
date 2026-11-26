@@ -51,7 +51,9 @@
 //!   → jamais pris pour une review par le hook). Session supprimée
 //!   et worktree retiré à la fin de passe.
 //! - Les échecs transitoires (spawn KO — rate limit en tête, reviewer
-//!   mort ou idle sans bloc, timeout, verdict malformé) sont REJOUÉS
+//!   mort ou idle sans bloc, timeout, verdict malformé, session en
+//!   erreur sans reprise provider — `error:<kind>` après une courte
+//!   grâce) sont REJOUÉS
 //!   en backoff borné (2 min/10 min/30 min, 3 retries) : l'entrée
 //!   passe `retry_wait` avec `retry_at` et `attempts`, hors du pool et
 //!   sans masquer un nouveau déclencheur ; `review failed` n'arrive
@@ -104,6 +106,12 @@ const REVIEW_MAX_ATTEMPTS: u64 = 4;
 /// Backoff entre tentatives (indice = tentative échouée - 1) :
 /// 2 min, 10 min, 30 min — borné, jamais de boucle infinie.
 const REVIEW_RETRY_DELAYS: [u64; 3] = [120, 600, 1800];
+/// Grâce avant de déclarer morte une session reviewer en erreur sans
+/// reprise provider (kind `model`/`auth`/`other` — item #381) : une
+/// erreur déjà résorbée (forced send, set_model, resume) n'est pas
+/// punie d'une tentative ; passé ce délai la session ne repartira
+/// jamais seule → transient_fail borné.
+const REVIEW_ERR_GRACE_SECS: f64 = 60.0;
 
 /// État d'une entrée `pr_reviews` — persisté claim-first. `RetryWait`
 /// = échec transitoire soldé provisoirement : la prochaine tentative
@@ -532,6 +540,57 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
+/// Kind d'erreur « backoff provider » : la session reprend seule
+/// (`rate_limit` = timer de retry armé) ou le failover provider la
+/// remplace sur drift de profil (`quota` = forfait épuisé, même
+/// besoin de bascule). Partagé avec `orch_failover` — les autres
+/// kinds (`model`/`auth`/`other`) relèvent d'une intervention,
+/// jamais d'un respawn automatique (items #193/#381).
+pub(crate) fn err_kind_backoff(kind: &str) -> bool {
+    matches!(kind, "rate_limit" | "quota")
+}
+
+/// Verdict de la passe running sur l'état `error` de la session
+/// reviewer — kind-aware (item #381). Seuls `rate_limit`/`quota`
+/// ont une sémantique de backoff (attente ou échec quota dédié) et
+/// suspendent le timeout ; tout autre kind ne repart JAMAIS seul :
+/// grâce `err_since` puis retry borné `error:<kind>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReviewErrVerdict {
+    /// Pas d'erreur à traiter (session vivante, ou `error` sans
+    /// `last_error` — le timeout seul borne ce cas).
+    None,
+    /// Backoff provider : attendre — timeout suspendu.
+    Wait,
+    /// Erreur sans reprise dans sa grâce : armer `err_since` au
+    /// premier tick, rien d'autre.
+    Grace,
+    /// Grâce écoulée → `transient_fail` borné `error:<kind>`.
+    Retry(String),
+}
+
+fn review_err_verdict(
+    meta: &SessionMeta,
+    err_since: Option<f64>,
+    now: f64,
+) -> ReviewErrVerdict {
+    if meta.state != "error" {
+        return ReviewErrVerdict::None;
+    }
+    let Some(kind) = meta.last_error.as_ref().map(|le| le.kind.as_str()) else {
+        return ReviewErrVerdict::None;
+    };
+    if err_kind_backoff(kind) {
+        return ReviewErrVerdict::Wait;
+    }
+    match err_since {
+        Some(s) if now - s >= REVIEW_ERR_GRACE_SECS => {
+            ReviewErrVerdict::Retry(format!("error:{kind}"))
+        }
+        _ => ReviewErrVerdict::Grace,
+    }
+}
+
 impl Daemon {
     /// Failover provider (item #193) — voir server/orch_failover.rs.
     /// Une session `PRReview-*` en backoff `rate_limit` ou bloquée
@@ -564,7 +623,7 @@ impl Daemon {
                     && m.state == "error"
                     && m.last_error
                         .as_ref()
-                        .is_some_and(|e| matches!(e.kind.as_str(), "rate_limit" | "quota"))
+                        .is_some_and(|e| err_kind_backoff(&e.kind))
                     && m.agent != effective
                     && !acwait_pending(&m.id)
             })
@@ -848,21 +907,66 @@ impl Daemon {
                 self.orch_save(&st);
                 continue;
             }
+            let Some(meta) = metas.iter().find(|m| m.id == sid) else {
+                continue;
+            };
+            // Erreur session sans reprise provider (model/auth/other —
+            // ni timer de retry ni failover, item #381) : la session
+            // ne repartira JAMAIS seule. Grâce `err_since` (~1-2
+            // ticks) puis transient_fail borné « error:<kind> », comme
+            // une interruption — le retry relance une session fraîche
+            // sur le profil courant. Le verdict est rendu AVANT le
+            // timeout : le kind d'erreur est plus parlant que
+            // « timeout ».
+            let err_since = entry.get("err_since").and_then(Value::as_f64);
+            let verdict = review_err_verdict(meta, err_since, now);
+            match &verdict {
+                ReviewErrVerdict::Retry(kind) => {
+                    warn!("orchestrator: PR review {key} reviewer {kind} → retry");
+                    self.pr_review_transient_fail(&key, kind, repo, pr_n, &mut st, &wt, &cfg)
+                        .await;
+                    self.orch_save(&st);
+                    continue;
+                }
+                ReviewErrVerdict::Grace => {
+                    // Premier tick de l'erreur : armer la grâce — le
+                    // prochain tick sans changement produit Retry.
+                    if err_since.is_none() {
+                        if let Some(e) =
+                            st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut)
+                        {
+                            e.insert("err_since".into(), json!(now));
+                        }
+                    }
+                    continue;
+                }
+                _ => {
+                    // Session sortie de l'erreur (ou backoff provider) :
+                    // la grâce repart à zéro si un autre kind d'erreur
+                    // survient plus tard.
+                    if err_since.is_some() {
+                        if let Some(e) =
+                            st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut)
+                        {
+                            e.remove("err_since");
+                        }
+                    }
+                }
+            }
             // Timeout → kill + retry borné (un reviewer trop lent est
-            // souvent un symptôme de rate limit ambiant). Une session
-            // en `error` (rate limit) attend sa reprise : le temps de
-            // backoff ne compte pas dans le timeout.
-            let rate_limited = metas.iter().any(|m| m.id == sid && m.state == "error");
-            if !rate_limited && now - started > cfg.pr_review_timeout as f64 {
+            // souvent un symptôme de rate limit ambiant). Seules les
+            // erreurs à backoff provider (rate_limit/quota) suspendent
+            // le timeout : leur attente est calée sur la reprise
+            // provider, pas sur la review (item #381).
+            if !matches!(verdict, ReviewErrVerdict::Wait)
+                && now - started > cfg.pr_review_timeout as f64
+            {
                 warn!("orchestrator: review PR {key} timeout → retry");
                 self.pr_review_transient_fail(&key, "timeout", repo, pr_n, &mut st, &wt, &cfg)
                     .await;
                 self.orch_save(&st);
                 continue;
             }
-            let Some(meta) = metas.iter().find(|m| m.id == sid) else {
-                continue;
-            };
             // Requêtes pendantes → refus immédiat (le reviewer est en
             // lecture seule, aucune interaction légitime). Après 2
             // refus sans déblocage → échec « blocked on request ».
@@ -1543,6 +1647,7 @@ impl Daemon {
             e.remove("pending_body");
             e.remove("post_tries");
             e.remove("reported_by");
+            e.remove("err_since");
         }
         if !sid.is_empty() {
             self.pr_review_rm_session(key, &sid, st).await;

@@ -63,6 +63,7 @@
 
 use super::orch::*;
 use super::orch_plan;
+use super::orch_review::err_kind_backoff;
 use super::*;
 use proto::SessionMeta;
 use serde_json::Value;
@@ -99,7 +100,7 @@ fn fail_role(
         || !m
             .last_error
             .as_ref()
-            .is_some_and(|e| matches!(e.kind.as_str(), "rate_limit" | "quota"))
+            .is_some_and(|e| err_kind_backoff(&e.kind))
         || acwait_pending(&m.id)
     {
         return None;
