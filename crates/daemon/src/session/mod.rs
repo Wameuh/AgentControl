@@ -344,10 +344,45 @@ impl Session {
         compact_src: &CompactSrc,
         caps: Arc<CapsRegistry>,
     ) -> Result<Arc<Self>> {
-        let meta: SessionMeta = serde_json::from_str(
+        let mut meta: SessionMeta = serde_json::from_str(
             &std::fs::read_to_string(dir.join("meta.json")).context("meta.json unreadable")?,
         )?;
         let journal = Journal::open(&dir)?;
+        // Backfill state_since pour les meta.json d'avant #383 : le
+        // dernier StatusChanged du journal date l'entrée dans l'état
+        // courant. Best-effort — événement compacté/absent ou état
+        // divergé (crash entre save_meta et emit) → None, le prochain
+        // set_state posera la valeur exacte.
+        let backfilled = if meta.state_since.is_none() {
+            let found = journal
+                .read_tail(&dir, 0, 500, 256 * 1024)
+                .ok()
+                .and_then(|(evs, ..)| {
+                    // Le DERNIER StatusChanged date la transition la
+                    // plus récente — accepté seulement s'il correspond
+                    // à l'état persisté (un écart = journal et meta
+                    // désynchronisés, ex. crash entre save_meta et
+                    // emit → on préfère None plutôt qu'un âge faux).
+                    let last = evs.iter().rev().find_map(|e| match &e.kind {
+                        EventKind::StatusChanged { state } => Some((state, e.ts.as_str())),
+                        _ => None,
+                    })?;
+                    if last.0 != &meta.state {
+                        return None;
+                    }
+                    chrono::DateTime::parse_from_rfc3339(last.1)
+                        .ok()
+                        .map(|t| t.timestamp())
+                });
+            if let Some(ts) = found {
+                meta.state_since = Some(ts);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let last_text = seed_text_anchor(&journal, &dir);
         // Chargés avant le struct literal : `dir` y est déplacé en
         // premier champ — un open_pins/open_steps(&dir) inline serait
@@ -357,7 +392,7 @@ impl Session {
         let compact_base = compact_src.base_for(&meta.agent);
         let compact_override = Self::open_compact_override(&dir);
         let (events_tx, _) = broadcast::channel(1024);
-        Ok(Arc::new_cyclic(|me| Self {
+        let s = Arc::new_cyclic(|me| Self {
             dir,
             meta: Mutex::new(meta),
             journal,
@@ -409,7 +444,13 @@ impl Session {
             wake_pending: std::sync::atomic::AtomicBool::new(false),
             spawn_lock: tokio::sync::Mutex::new(()),
             child: Mutex::new(None),
-        }))
+        });
+        // Persiste le backfill une fois — sinon il serait recalculé à
+        // chaque open tant que meta.json ne porte pas le champ.
+        if backfilled {
+            s.save_meta();
+        }
+        Ok(s)
     }
 
     /// Crée le répertoire d'une nouvelle session.
@@ -677,6 +718,9 @@ impl Session {
                 return;
             }
             m.state = state.into();
+            // Âge d'état pour le client (« asleep depuis … », #383) —
+            // persisté avec le reste du meta, survit au restart.
+            m.state_since = Some(proto::now_unix());
         }
         // Transition = nouvel épisode watchdog : l'horloge repart
         // (un idle ancien ne doit pas faire tirer le premier tour) et

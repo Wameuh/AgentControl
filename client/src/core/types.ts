@@ -49,6 +49,10 @@ export interface SessionMeta {
    *  "wait-asleep" (#189 : âge du waiter le plus ancien, son nom, son
    *  timeout ; #222 : wait-asleep = session endormie sous waiter). */
   wait?: { secs: number; name?: string; timeout?: number };
+  /** Horodatage (epoch s UTC) du dernier changement d'état persisté —
+   *  absent sur les vieux démons ; l'âge « asleep depuis … » en est
+   *  dérivé côté client (#383). */
+  state_since?: number;
 }
 
 /** Registre PR ↔ session du démon (prs.json) — badge sidebar. */

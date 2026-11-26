@@ -61,6 +61,14 @@
 #m-home-state .sess .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 #session-list .sess .a,
 #m-home-state .sess .a { color: var(--dim); font-size: 11px; font-family: Mono, ui-monospace, monospace; }
+/* Âge de l'état « asleep » (meta.state_since, #383) : même registre
+   typographique discret que le nom d'agent — l'info vit aussi dans le
+   tooltip de la gemme. */
+#session-list .sess .sess-age,
+#m-home-state .sess .sess-age {
+  flex: none; color: var(--dim); font-size: 10px;
+  font-family: Mono, ui-monospace, monospace; opacity: .75;
+}
 #session-list .sess .sess-pr,
 #m-home-state .sess .sess-pr {
   flex: none; font-size: 10px; font-family: Mono, ui-monospace, monospace;
@@ -131,6 +139,8 @@
 #m-home-state .sess.sub .sess-pr { font-size: 9px; padding: 0 4px; }
 #session-list .sess.sub .sess-origin,
 #m-home-state .sess.sub .sess-origin { font-size: 9px; padding: 0 4px; }
+#session-list .sess.sub .sess-age,
+#m-home-state .sess.sub .sess-age { font-size: 9px; }
 
 #btn-new-session {
   border-style: dashed; color: var(--muted);

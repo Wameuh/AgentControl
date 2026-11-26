@@ -484,6 +484,7 @@ fn alive_exclut_asleep() {
         context_size: None,
         last_error: None,
         wait: None,
+        state_since: None,
     };
     let c = cfg_default();
     let metas = vec![
