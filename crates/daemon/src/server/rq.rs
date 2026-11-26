@@ -385,7 +385,7 @@ fn repos_markdown(req: &RqRequest, cfg: &cfg::ReviewQueueCfg) -> String {
             if head.is_empty() { "?" } else { head },
             base,
             r.path,
-            if r.base.is_empty() { "HEAD" } else { r.base.as_str() },
+            if r.base.is_empty() { "origin/HEAD" } else { r.base.as_str() },
             r.branch,
             r.path,
         ));
@@ -450,10 +450,10 @@ impl RqProbe {
         for r in st.requests.values() {
             *counts.entry(r.state.as_str()).or_insert(0usize) += 1;
         }
-        let recent: Vec<Value> = st
-            .requests
-            .values()
-            .rev()
+        let mut recent: Vec<&RqRequest> = st.requests.values().collect();
+        recent.sort_by(|a, b| b.created_at.partial_cmp(&a.created_at).unwrap());
+        let recent: Vec<Value> = recent
+            .into_iter()
             .take(10)
             .map(|r| {
                 json!({
@@ -976,8 +976,8 @@ impl Daemon {
     // -- compact ------------------------------------------------------
 
     /// Requêtes `Compacting` : la session a fini son tour de compact
-    /// (state `idle`) ou le timeout borné est passé → on envoie le
-    /// prompt du round. Session morte → re-dispatch en fresh.
+    /// (state `idle`) **ou** le timeout borné est passé → on envoie
+    /// le prompt du round. Session morte → `rq_fail` au send.
     async fn rq_advance_compact(self: &Arc<Self>) {
         let compact_to = self.rq.cfg.read().unwrap().compact_timeout_secs as f64;
         let now = now_secs();
@@ -985,30 +985,31 @@ impl Daemon {
             let st = self.rq.state.lock().unwrap();
             st.requests
                 .iter()
-                .filter(|(_, r)| {
-                    r.state == ReqState::Compacting
-                        && r.compact_at
-                            .map(|c| now - c > compact_to)
-                            .unwrap_or(true)
-                })
+                .filter(|(_, r)| r.state == ReqState::Compacting)
                 .map(|(id, _)| id.clone())
                 .collect()
         };
         let mut to_send = Vec::new();
         for id in due {
-            let sid = {
+            let (sid, compact_at) = {
                 let st = self.rq.state.lock().unwrap();
-                st.requests.get(&id).and_then(|r| r.session.clone())
+                match st.requests.get(&id) {
+                    Some(r) => (r.session.clone(), r.compact_at),
+                    None => continue,
+                }
             };
+            let timed_out = compact_at
+                .map(|c| now - c > compact_to)
+                .unwrap_or(true);
             let Some(sid) = sid else { continue };
             match self.get_session(&sid).await {
                 Ok(s) => {
                     let m = s.meta_snapshot();
-                    if m.state == "idle" {
+                    if timed_out || matches!(m.state.as_str(), "idle" | "asleep") {
                         to_send.push(id);
                     }
                 }
-                Err(_) => to_send.push(id), // session partie → fresh au send
+                Err(_) => to_send.push(id), // session partie → fail au send
             }
         }
         for id in to_send {
@@ -1418,6 +1419,28 @@ impl Daemon {
                 st.threads.get(&key).and_then(|t| t.session.clone())
             };
             if let Some(sid) = sid {
+                // TOCTOU : les verdicts forge ont été calculés il y a
+                // quelques secondes — re-vérifier review active +
+                // tour vivant avant de supprimer.
+                let still_clear = {
+                    let st = self.rq.state.lock().unwrap();
+                    st.threads
+                        .get(&key)
+                        .map(|t| t.active.is_none())
+                        .unwrap_or(false)
+                };
+                if !still_clear {
+                    continue;
+                }
+                if let Ok(s) = self.get_session(&sid).await {
+                    let m = s.meta_snapshot();
+                    if matches!(
+                        m.state.as_str(),
+                        "working" | "compacting" | "starting" | "waiting_input"
+                    ) {
+                        continue;
+                    }
+                }
                 if let Err(e) = self.h_delete_session(sid.clone()).await {
                     warn!("review-queue: reap {key}: delete {sid}: {e:#}");
                     continue;
