@@ -932,9 +932,29 @@ enum AuthOutcome {
     /// ouverte et utilisable en mode pré-auth (compat à conserver tant
     /// que le parc n'est pas mis à jour).
     PreAuth,
-    /// auth-required / conn refermée : jeton absent, faux ou périmé.
+    /// Réponse d'erreur reçue : jeton absent, faux ou périmé.
     Refused,
+    /// Aucune réponse avant EOF/erreur/timeout : le pair n'est pas un
+    /// démon joignable (endpoint absent, forward mort, service gelé) —
+    /// distinct d'un `auth-required` réellement reçu. Sur ssh -L c'est
+    /// le cas « démon absent » qui doit proposer l'install (item #379).
+    Silent(Silence),
 }
+
+/// Pourquoi le handshake n'a reçu aucune réponse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Silence {
+    /// EOF ou erreur de lecture : le canal a été refermé sans réponse.
+    Closed,
+    /// Aucune ligne dans le délai : pair gelé ou service muet.
+    Timeout,
+}
+
+/// Marqueurs d'échec du handshake SANS réponse du pair — consommés par
+/// `classify_connect_stage1` (distincts d'`auth-required`, vraie
+/// réponse d'erreur).
+const ERR_PREAUTH_CLOSED: &str = "preauth-closed";
+const ERR_PREAUTH_TIMEOUT: &str = "preauth-timeout";
 
 /// Envoie `auth` en 1re ligne et lit la réponse — synchrone, avant le
 /// spawn des tasks reader/writer du Client (aucune trame ne part avant).
@@ -963,8 +983,31 @@ async fn auth_handshake(
     .await;
     let line = match got {
         Ok(Ok(Some(l))) => l,
-        // EOF (refus implicite) / timeout / erreur : tout est « refus ».
-        _ => return Ok(AuthOutcome::Refused),
+        // EOF / erreur de lecture : le pair a refermé sans répondre —
+        // endpoint absent ou forward mort, PAS un refus d'auth.
+        Ok(Ok(None)) => {
+            log(
+                Level::Warn,
+                "conn closed before auth response — daemon unreachable?",
+            );
+            return Ok(AuthOutcome::Silent(Silence::Closed));
+        }
+        Ok(Err(e)) => {
+            log(
+                Level::Warn,
+                format!("auth read error before response ({e}) — daemon unreachable?"),
+            );
+            return Ok(AuthOutcome::Silent(Silence::Closed));
+        }
+        // Timeout : le port écoute mais ne répond pas (démon gelé ou
+        // autre service) — pas un refus non plus.
+        Err(_) => {
+            log(
+                Level::Warn,
+                "no auth response within 15 s — daemon unreachable or frozen?",
+            );
+            return Ok(AuthOutcome::Silent(Silence::Timeout));
+        }
     };
     let v: Value = serde_json::from_str(&line).unwrap_or_default();
     if v["ok"].as_bool() == Some(true) {
@@ -1052,6 +1095,31 @@ pub fn classify_connect_stage1(t: &Transport, msg: &str) -> String {
     // échec d'authentification, jamais « démon absent » ni transport.
     if msg.contains(proto::ERR_AUTH_REQUIRED) {
         return connect_fail("auth", msg);
+    }
+    // Handshake auth sans réponse (EOF/erreur/timeout avant toute ligne
+    // du pair) — PAS un refus auth. Timeout = port qui écoute sans
+    // répondre → unresponsive. EOF = canal fermé : sur les transports
+    // ssh c'est le forward distant mort (démon absent) ; sur TCP un
+    // listener existe mais n'est pas notre démon → transport.
+    if msg.contains(ERR_PREAUTH_TIMEOUT) {
+        return connect_fail("daemon-unresponsive", msg);
+    }
+    if msg.contains(ERR_PREAUTH_CLOSED) {
+        let kind = match t {
+            // ssh -L : stderr du tunnel distingue le refus franc du
+            // port distant (« Connection refused » → absent) des
+            // forwards interdits ou autres causes (« open failed »
+            // sans refused → transport). EOF nu sans signature stderr
+            // = canal forwardé mort → absent.
+            Transport::Ssh { .. }
+                if msg.contains("open failed") && !msg.contains("Connection refused") =>
+            {
+                "transport"
+            }
+            Transport::Ssh { .. } | Transport::SshNative { .. } => "daemon-absent",
+            _ => "transport",
+        };
+        return connect_fail(kind, msg);
     }
     let kind = match t {
         Transport::Unix(_) | Transport::Tcp { .. }
@@ -1642,6 +1710,35 @@ impl Client {
                 let token = transport_token(t, guard.as_deref(), attempt > 0).await;
                 match auth_handshake(&mut br, &mut w, token.as_deref().unwrap_or("")).await? {
                     AuthOutcome::Authed | AuthOutcome::PreAuth => break,
+                    // Silence total : pas de réponse auth à juger —
+                    // déterministe (endpoint absent/gelé), pas de retry.
+                    // Le marqueur distingue l'échec de `auth-required`
+                    // pour classify_connect_stage1 (install vs auth).
+                    AuthOutcome::Silent(sil) => {
+                        let (marker, why) = match sil {
+                            Silence::Closed => (
+                                ERR_PREAUTH_CLOSED,
+                                "conn closed before auth response — daemon unreachable?",
+                            ),
+                            Silence::Timeout => (
+                                ERR_PREAUTH_TIMEOUT,
+                                "no auth response within 15 s — daemon unreachable or frozen?",
+                            ),
+                        };
+                        // ssh -L : le canal forwardé meurt AVANT que la
+                        // ligne stderr « open failed » n'arrive — même
+                        // fenêtre de vidange que classify_connect_stage2.
+                        if matches!(t, Transport::Ssh { .. }) {
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        }
+                        let suffix =
+                            tail_suffix(&guard.as_deref().map(guard_err_tail).unwrap_or_default());
+                        log(
+                            Level::Warn,
+                            format!("transport {} {why}{suffix}", transport_desc(t)),
+                        );
+                        bail!("{marker}: {why}{suffix}");
+                    }
                     AuthOutcome::Refused if attempt == 0 => {
                         invalidate_token(t);
                         log(

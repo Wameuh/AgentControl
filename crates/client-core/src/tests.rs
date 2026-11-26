@@ -376,6 +376,163 @@ async fn settle_waiter_drops_non_dedup_entry() {
     assert_eq!(c.open_heavy.load(Ordering::Relaxed), 0);
 }
 
+// --- auth_handshake : EOF/timeout ≠ refus auth (item #379) -------------
+
+/// Moitiés d'un flux bidirectionnel : `io` pour le handshake client,
+/// `peer` joue le pair (démon ou rien).
+fn handshake_pair() -> (BufReader<BoxedStream>, BoxedWriter, tokio::io::DuplexStream) {
+    let (io, peer) = tokio::io::duplex(4096);
+    let (rd, wr) = tokio::io::split(io);
+    (
+        BufReader::new(Box::new(rd) as BoxedStream),
+        Box::new(wr) as BoxedWriter,
+        peer,
+    )
+}
+
+/// Le pair écrit une ligne de réponse puis reste ouvert le temps du test.
+async fn feed_line(peer: &mut tokio::io::DuplexStream, line: &str) {
+    peer.write_all(line.as_bytes()).await.unwrap();
+    peer.flush().await.unwrap();
+}
+
+/// AsyncRead en EOF immédiat — le pair a accepté la connexion puis
+/// refermé sans réponse (canal forwardé mort, démon absent).
+struct EofRead;
+impl AsyncRead for EofRead {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+/// EOF immédiat (démon absent derrière le forward) : le handshake doit
+/// rendre `Silent`, JAMAIS `Refused` — sinon connect() classe l'échec
+/// en `auth-required` et l'offre d'install n'apparaît pas (#379).
+#[tokio::test]
+async fn auth_handshake_eof_is_silent_not_refused() {
+    let mut br = BufReader::new(Box::new(EofRead) as BoxedStream);
+    let mut w = Box::new(tokio::io::sink()) as BoxedWriter;
+    let out = auth_handshake(&mut br, &mut w, "").await.unwrap();
+    assert!(matches!(out, AuthOutcome::Silent(Silence::Closed)));
+}
+
+/// AsyncRead qui échoue immédiatement (RST côté pair).
+struct FailRead;
+impl AsyncRead for FailRead {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "rst",
+        )))
+    }
+}
+
+/// Erreur de lecture (RST) : même classe `Silent(Closed)` — le canal a
+/// été aboyé sans réponse auth, pas un refus.
+#[tokio::test]
+async fn auth_handshake_read_error_is_silent() {
+    let mut br = BufReader::new(Box::new(FailRead) as BoxedStream);
+    let mut w = Box::new(tokio::io::sink()) as BoxedWriter;
+    let out = auth_handshake(&mut br, &mut w, "").await.unwrap();
+    assert!(matches!(out, AuthOutcome::Silent(Silence::Closed)));
+}
+
+/// Vraie réponse `auth-required` : toujours `Refused` → retry token /
+/// erreur auth, pas d'offre d'install.
+#[tokio::test]
+async fn auth_handshake_auth_required_is_refused() {
+    let (mut br, mut w, mut peer) = handshake_pair();
+    tokio::spawn(async move {
+        feed_line(&mut peer, "{\"id\":0,\"error\":\"auth-required\"}\n").await;
+    });
+    let out = auth_handshake(&mut br, &mut w, "bad-token").await.unwrap();
+    assert!(matches!(out, AuthOutcome::Refused));
+}
+
+/// Compat pré-B1 : « unknown variant `auth` » → `PreAuth`.
+#[tokio::test]
+async fn auth_handshake_unknown_variant_is_preauth() {
+    let (mut br, mut w, mut peer) = handshake_pair();
+    tokio::spawn(async move {
+        feed_line(
+            &mut peer,
+            "{\"id\":0,\"error\":\"unknown variant `auth`, expected ...\"}\n",
+        )
+        .await;
+    });
+    let out = auth_handshake(&mut br, &mut w, "").await.unwrap();
+    assert!(matches!(out, AuthOutcome::PreAuth));
+}
+
+/// Réponse ok → `Authed`.
+#[tokio::test]
+async fn auth_handshake_ok_is_authed() {
+    let (mut br, mut w, mut peer) = handshake_pair();
+    tokio::spawn(async move {
+        feed_line(&mut peer, "{\"id\":0,\"ok\":true}\n").await;
+    });
+    let out = auth_handshake(&mut br, &mut w, "tok").await.unwrap();
+    assert!(matches!(out, AuthOutcome::Authed));
+}
+
+/// Classification stage1 des marqueurs de silence : ssh -L EOF =
+/// « daemon-absent » (l'install est proposée), timeout = « unresponsive »,
+/// et le stderr « administratively prohibited » reste un problème
+/// transport — jamais la classe `auth`.
+#[test]
+fn connect_fail_preauth_silence() {
+    let ssh = Transport::Ssh {
+        host: "h".into(),
+        remote_port: 7331,
+        args: vec![],
+    };
+    let native = Transport::SshNative {
+        host: "h".into(),
+        port: 22,
+        user: "u".into(),
+        remote_port: 7331,
+        password: None,
+        key_path: None,
+        expected_hk: None,
+        accept_unknown_hostkey: false,
+    };
+    let tcp = Transport::Tcp {
+        addr: "127.0.0.1:7331".into(),
+        token: None,
+    };
+
+    // EOF nu (stderr vide) → absent sur ssh, transport sur tcp.
+    let eof =
+        format!("{ERR_PREAUTH_CLOSED}: conn closed before auth response — daemon unreachable?");
+    assert!(classify_connect_stage1(&ssh, &eof).starts_with("connect-failed:daemon-absent:"));
+    assert!(classify_connect_stage1(&native, &eof).starts_with("connect-failed:daemon-absent:"));
+    assert!(classify_connect_stage1(&tcp, &eof).starts_with("connect-failed:transport:"));
+    // « Connection refused » explicite dans stderr → absent.
+    let refused = format!(
+        "{ERR_PREAUTH_CLOSED}: conn closed… : channel 2: open failed: connect failed: Connection refused"
+    );
+    assert!(classify_connect_stage1(&ssh, &refused).starts_with("connect-failed:daemon-absent:"));
+    // Forward interdit / autre cause « open failed » → transport.
+    let prohibited = format!(
+        "{ERR_PREAUTH_CLOSED}: conn closed… : channel 2: open failed: administratively prohibited: open failed"
+    );
+    assert!(classify_connect_stage1(&ssh, &prohibited).starts_with("connect-failed:transport:"));
+    // Timeout auth = port qui écoute sans répondre → unresponsive.
+    let tmo = format!("{ERR_PREAUTH_TIMEOUT}: no auth response within 15 s");
+    assert!(classify_connect_stage1(&ssh, &tmo).starts_with("connect-failed:daemon-unresponsive:"));
+    assert!(classify_connect_stage1(&tcp, &tmo).starts_with("connect-failed:daemon-unresponsive:"));
+    // Vrai refus auth : la classe `auth` prime toujours.
+    assert!(classify_connect_stage1(&ssh, "auth-required").starts_with("connect-failed:auth:"));
+}
+
 /// Un push NDJSON est toujours matérialisé et broadcasté tel quel.
 #[tokio::test]
 async fn dispatch_push_broadcasts_value() {
