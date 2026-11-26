@@ -27,8 +27,7 @@ impl Daemon {
                         }
                         ReqState::Reviewing => r
                             .dispatched_at
-                            .map(|d| (now - d > review_to).then_some(ReqState::Timeout))
-                            .flatten(),
+                            .and_then(|d| (now - d > review_to).then_some(ReqState::Timeout)),
                         _ => None,
                     };
                     to.map(|s| (id.clone(), r.by.clone(), s))

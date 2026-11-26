@@ -135,7 +135,11 @@ Section `[review_queue]` of `config.toml` (component
 
 State (`review-queue-state.json` + `runs/<id>/`) lives under
 `state_dir` and survives daemon restarts — threads keep their
-reviewer session across reboots.
+reviewer session across reboots. `state_dir` can be patched live
+only while the queue has no unsettled request (queued/compacting/
+reviewing); the state file is then migrated to the new directory
+while existing `runs/<id>` stay behind under their recorded
+absolute paths.
 
 ## For agent authors
 

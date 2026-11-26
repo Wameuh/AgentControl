@@ -2,7 +2,8 @@
 //! file de revue — voir `rq` pour la mécanique.
 
 use super::rq::{
-    now_secs, resolve_repo, thread_key, thread_tid, ReqState, RqPair, RqRequest, RqThread,
+    migrate_state_file, now_secs, resolve_repo, same_dir, thread_key, thread_tid, unsettled,
+    ReqState, RqPair, RqRequest, RqThread,
 };
 use super::*;
 use proto::ReviewRepoSpec;
@@ -183,6 +184,22 @@ impl Daemon {
             let mut guard = self.rq.cfg.write().unwrap();
             let mut next = guard.clone();
             let applied = rq_cfg::apply_patch(&mut next, &patch)?;
+            // `state_dir` à chaud : refusé tant que la file a du
+            // travail non soldé (leurs run_dir/intake vivent dans
+            // l'ancien dossier) ; à file vide, le fichier d'état
+            // est migré pour qu'un restart avant le prochain save()
+            // ne perde pas l'historique.
+            let old_dir = guard.state_dir(&self.root);
+            let new_dir = next.state_dir(&self.root);
+            if !same_dir(&old_dir, &new_dir) {
+                let live = unsettled(&self.rq.state.lock().unwrap());
+                anyhow::ensure!(
+                    live == 0,
+                    "state_dir change refused: {live} unsettled \
+                     request(s) — drain the queue first"
+                );
+                migrate_state_file(&old_dir, &new_dir)?;
+            }
             rq_cfg::persist(&self.root, &next)?;
             let flip = patch.contains_key("enabled") && next.enabled != self.rq.is_enabled();
             let en = next.enabled;

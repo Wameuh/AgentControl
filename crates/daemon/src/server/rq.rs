@@ -568,6 +568,57 @@ fn pick_next(st: &RqState) -> Option<String> {
         .map(|r| r.id.clone())
 }
 
+/// Requêtes `Reviewing` persistées sans `dispatched_at` — dispatch
+/// jamais arrivé au send (crash entre état et envoi). Voir
+/// `rq_reconcile_dispatches`.
+fn undispatched(st: &RqState) -> Vec<String> {
+    st.requests
+        .iter()
+        .filter(|(_, r)| r.state == ReqState::Reviewing && r.dispatched_at.is_none())
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// Requêtes non soldées (Queued/Compacting/Reviewing) — une file
+/// « vivante » ne peut pas changer de `state_dir` à chaud : leurs
+/// `run_dir`/intake et le fichier d'état doivent rester cohérents.
+/// Voir `rq_patch`.
+pub(crate) fn unsettled(st: &RqState) -> usize {
+    st.requests
+        .values()
+        .filter(|r| {
+            matches!(
+                r.state,
+                ReqState::Queued | ReqState::Compacting | ReqState::Reviewing
+            )
+        })
+        .count()
+}
+
+/// Copie `review-queue-state.json` de `old` vers `new` (créé si
+/// besoin) — migration à froid d'un changement de `state_dir` : un
+/// restart entre le patch et le prochain `save()` ne doit pas
+/// perdre l'historique. Les `runs/<id>` existants restent dans
+/// l'ancien dossier (leurs `run_dir` absolus restent valides).
+pub(crate) fn migrate_state_file(old: &Path, new: &Path) -> Result<()> {
+    let src = old.join("review-queue-state.json");
+    if !src.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(new)?;
+    std::fs::copy(&src, new.join("review-queue-state.json"))?;
+    Ok(())
+}
+
+/// Deux chemins désignent le même dossier (comparaison canonique,
+/// repli littéral si l'un n'existe pas encore).
+pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 fn load_state(sdir: &Path) -> RqState {
     let p = sdir.join("review-queue-state.json");
     match std::fs::read_to_string(&p) {
@@ -609,6 +660,7 @@ impl Daemon {
             return;
         }
         self.rq_settle_timeouts().await;
+        self.rq_reconcile_dispatches().await;
         self.rq_poll_completions().await;
         self.rq_dispatch().await;
         if self.rq.cfg.read().unwrap().reaper_enabled {
@@ -618,7 +670,22 @@ impl Daemon {
         }
     }
 
-    // (le corps du tick est dans rq_settle_timeouts/poll/dispatch/reap)
+    // (le corps du tick est dans rq_settle_timeouts/reconcile/poll/dispatch/reap)
+
+    /// Reprise des dispatchs persistés mais jamais envoyés : une
+    /// requête `Reviewing` avec `dispatched_at: None` = le démon est
+    /// mort entre la pose de l'état et `rq_send_round` — sans ce
+    /// reconcile elle occuperait un slot pour toujours (le timeout
+    /// exige `dispatched_at`, la completion attend des fichiers
+    /// qu'aucun prompt ne produira). `rq_send_round` la renvoie ;
+    /// session morte → `rq_fail` borné. Idempotent : la garde de
+    /// `rq_send_round` saute ce qui a déjà `dispatched_at`.
+    async fn rq_reconcile_dispatches(self: &Arc<Self>) {
+        let ids = undispatched(&self.rq.state.lock().unwrap());
+        for id in ids {
+            self.rq_send_round(&id).await;
+        }
+    }
 
     // -- dispatch -----------------------------------------------------
 
@@ -717,7 +784,6 @@ impl Daemon {
         } else {
             false
         };
-        let run_dir = self.rq.state_dir().join("runs").join(id);
         {
             let mut st = self.rq.state.lock().unwrap();
             {
@@ -726,7 +792,10 @@ impl Daemon {
                 };
                 r.session = Some(sid.clone());
                 r.snaps = r.repos.iter().map(repo_snap).collect();
-                r.run_dir = run_dir.to_string_lossy().to_string();
+                // run_dir n'est PAS recalculé ici : il a été créé à
+                // l'intake sous le state_dir de l'époque — le
+                // réécrire avec le state_dir courant casserait les
+                // requêtes intake avant un changement de state_dir.
             }
             if let Some(t) = st.threads.get_mut(&thread_key) {
                 t.session = Some(sid.clone());
@@ -770,16 +839,13 @@ impl Daemon {
             st.threads.get(thread_key).and_then(|t| t.session.clone())
         };
         if let Some(sid) = existing {
-            match self.get_session(&sid).await {
-                Ok(s) => {
-                    let m = s.meta_snapshot();
-                    // "dead" = session tuée — on recrée (le thread
-                    // garde son compteur de rounds).
-                    if m.state != "dead" {
-                        return Ok(Some((sid, true)));
-                    }
+            // "dead" = session tuée — on recrée (le thread garde
+            // son compteur de rounds). Session inconnue du map →
+            // idem, on recrée.
+            if let Ok(s) = self.get_session(&sid).await {
+                if s.meta_snapshot().state != "dead" {
+                    return Ok(Some((sid, true)));
                 }
-                Err(_) => {} // session partie du map → recréer
             }
             // Session morte : le thread repart sur une session fraîche
             // (round non compacté — nouvelle session, contexte vide).
@@ -907,6 +973,11 @@ impl Daemon {
             }
             Prep::Send(s, r, pk, pp) => (s, r, pk, pp),
         };
+        // Le run_dir a été créé à l'intake — recréé au cas où
+        // (état restauré, dossier déplacé manuellement).
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         if let Err(e) = std::fs::write(&p, packet) {
             warn!("review-queue: writing {}: {e}", p.display());
             self.rq_fail(req_id, "cannot write prompt.md").await;
@@ -1087,6 +1158,64 @@ mod tests {
         let st: RqState = serde_json::from_str(&text).unwrap();
         assert_eq!(st.reaped, 40);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undispatched_ne_prend_que_reviewing_sans_envoi() {
+        // Reprise post-restart : seule une requête persistée
+        // `Reviewing` SANS `dispatched_at` doit être renvoyée —
+        // tout le reste (autres états, déjà envoyées) est ignoré.
+        let mut st = RqState::default();
+        let mut r = req("rq-a", "T", ReqState::Reviewing, 1.0);
+        r.dispatched_at = None;
+        st.requests.insert("rq-a".into(), r);
+        let mut r = req("rq-b", "T", ReqState::Reviewing, 1.0);
+        r.dispatched_at = Some(1.0);
+        st.requests.insert("rq-b".into(), r);
+        st.requests
+            .insert("rq-c".into(), req("rq-c", "T", ReqState::Queued, 1.0));
+        st.requests
+            .insert("rq-d".into(), req("rq-d", "T", ReqState::Compacting, 1.0));
+        assert_eq!(undispatched(&st), vec!["rq-a".to_string()]);
+    }
+
+    #[test]
+    fn unsettled_compte_le_vivant_seulement() {
+        let mut st = RqState::default();
+        assert_eq!(unsettled(&st), 0);
+        for (id, s) in [
+            ("q", ReqState::Queued),
+            ("c", ReqState::Compacting),
+            ("r", ReqState::Reviewing),
+            ("d", ReqState::Done),
+            ("f", ReqState::Failed),
+            ("t", ReqState::Timeout),
+            ("a", ReqState::AcquireTimeout),
+        ] {
+            st.requests.insert(id.into(), req(id, "T", s, 1.0));
+        }
+        assert_eq!(unsettled(&st), 3);
+    }
+
+    #[test]
+    fn migrate_state_file_preserve_l_historique() {
+        // Changement de state_dir à file vide : le JSON d'état est
+        // copié vers le nouveau dossier — un restart avant le
+        // prochain save() ne perd rien. Source absente = no-op.
+        let base = std::env::temp_dir().join(format!("rq-mig-{}", std::process::id()));
+        let old = base.join("old");
+        let new = base.join("new");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&old).unwrap();
+        migrate_state_file(&old, &new).unwrap(); // rien à copier
+        assert!(!new.join("review-queue-state.json").exists());
+        std::fs::write(old.join("review-queue-state.json"), "{}").unwrap();
+        migrate_state_file(&old, &new).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(new.join("review-queue-state.json")).unwrap(),
+            "{}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
