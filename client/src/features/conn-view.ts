@@ -560,6 +560,7 @@ export class ConnView {
     this.editing = null;
     ($("cv-form-title") as HTMLElement).textContent = t("new_conn");
     ($("cv-form-reset") as HTMLButtonElement).hidden = true;
+    ($("cv-save") as HTMLButtonElement).hidden = true;
     // Défaut ssh : le cas nominal (démon sur serveur distant).
     ($("c-kind") as HTMLSelectElement).value = "ssh";
     for (const id of ["c-host", "c-args", "c-user", "c-pass", "c-token"]) {
@@ -581,6 +582,7 @@ export class ConnView {
     this.fillForm(c);
     ($("cv-form-title") as HTMLElement).textContent = t("edit_conn");
     ($("cv-form-reset") as HTMLButtonElement).hidden = false;
+    ($("cv-save") as HTMLButtonElement).hidden = false;
     const pacc = $("cv-pacc");
     pacc.hidden = c.kind !== "ssh" || isWeb;
     if (!pacc.hidden) {
@@ -868,6 +870,34 @@ export class ConnView {
     }
   }
 
+  /** « Enregistrer » en mode édition : persiste la cfg SANS toucher au
+   *  transport — change couleur/label d'une conn active sans reconnecter.
+   *  Si l'édition visait la conn liée ici, son accent/titre se ré-appliquent
+   *  en live (updateBound → chromeForCurrent) ; sinon la prochaine
+   *  activation la prend via le bind. Host/port modifiés = autre clé conn
+   *  → save_connection ajoute une entrée : l'ancienne est purgée pour ne
+   *  pas laisser un doublon orphelin. */
+  private async saveOnly() {
+    const cfg = this.cfgFromForm();
+    const btn = $("cv-save") as HTMLButtonElement;
+    btn.disabled = true;
+    try {
+      await invoke("save_connection", { cfg });
+      const old = this.editing;
+      if (old && this.conns.keyOf(old) !== this.conns.keyOf(cfg)) {
+        await invoke("remove_connection", { cfg: old }).catch(() => {});
+      }
+      this.conns.updateBound(cfg);
+      this.saved = await invoke<SavedConn[]>("saved_connections").catch(() => this.saved);
+      if (this.isOpen()) this.renderSavedList();
+      this.resetForm();
+    } catch (e) {
+      dlgErr("c-err", String(e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   private cfgFromForm(): Record<string, unknown> {
     const kind = ($("c-kind") as HTMLSelectElement).value;
     const cfg: Record<string, unknown> =
@@ -959,6 +989,10 @@ export class ConnView {
     $("c-go").addEventListener("click", async (e) => {
       e.preventDefault();
       await this.go(this.cfgFromForm());
+    });
+    $("cv-save").addEventListener("click", (e) => {
+      e.preventDefault();
+      void this.saveOnly();
     });
   }
 

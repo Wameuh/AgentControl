@@ -283,6 +283,19 @@ export class ConnectionManager {
     this.chromeForCurrent();
   }
 
+  /** Édition sans reconnexion (vue connexion « Enregistrer ») : remplace
+   *  la cfg stockée de la clé si elle est liée ici, puis ré-applique le
+   *  chrome — la couleur change sous les yeux, le transport n'est pas
+   *  touché. Faux si la clé n'est pas liée (host/port modifiés = autre
+   *  conn : rien à ré-appliquer, le prochain bind la prendra). */
+  updateBound(cfg: Record<string, unknown>): boolean {
+    const k = this.keyOf(cfg);
+    if (!this.cfg.has(k)) return false;
+    this.cfg.set(k, { ...this.cfg.get(k), ...cfg });
+    this.chromeForCurrent();
+    return true;
+  }
+
   /** Tooltip du badge selon l'état (avec prochain essai / nb de
    *  tentatives). `conn` "gone" (déconnectée à la demande) → libellé
    *  dédié : elle ne réessaiera jamais toute seule. */
