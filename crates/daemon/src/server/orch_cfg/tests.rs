@@ -554,6 +554,7 @@ fn meta(agent: &str) -> proto::SessionMeta {
         agent: agent.into(),
         title: "t".into(),
         cwd: "/tmp".into(),
+        reported_cwd: None,
         created_at: proto::now_iso(),
         native_session_id: None,
         mode: None,

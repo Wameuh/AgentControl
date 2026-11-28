@@ -922,6 +922,7 @@ mod tests {
             agent: "test".into(),
             title: "t".into(),
             cwd: "/tmp".into(),
+            reported_cwd: None,
             created_at: proto::now_iso(),
             native_session_id: None,
             mode: None,

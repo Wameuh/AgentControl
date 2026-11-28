@@ -1117,6 +1117,7 @@ impl Daemon {
             ReqKind::SessionSetSteps { session, steps } => {
                 self.h_session_set_steps(session, steps).await
             }
+            ReqKind::SessionSetCwd { session, cwd } => self.h_session_set_cwd(session, cwd).await,
             ReqKind::SetConfigOption {
                 session,
                 config_id,

@@ -86,7 +86,7 @@ MISSION — a single task (one worker = one item, no loop):
 
    Edge case: if one of your tasks stays wip because its PR is not merged yet (popped before this instruction), you are NOT free — first drive that PR to merge (step 4), mark --done, then only resume the popped item above if any. You stop when EVERYTHING assigned to you is settled — you NEVER RE-POP after a --done: the orchestrator spawns a fresh worker per pending item.
 
-2. Implement the task following its description to the letter: dedicated git worktree under {WORKTREE_DIR} based on the repo's integration branch ({BASE}) — NEVER in the main checkout {WS} — spec, requested checks. Optional: local diff review before pushing if a local review tool is available.
+2. Implement the task following its description to the letter: dedicated git worktree under {WORKTREE_DIR} based on the repo's integration branch ({BASE}) — NEVER in the main checkout {WS} — spec, requested checks. Optional: local diff review before pushing if a local review tool is available. Once the worktree exists, run `acctl cwd <its absolute path>` — the session terminal then opens there (re-declare if you move).
 
 3. Contribution cycle: apply the workflow described in the repo's rules ({RULES}) — typically branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> handle each round (fix, push, rerun the review) -> review settled -> mark the PR ready -> wait for the required GREEN checks on the head.
 
@@ -128,7 +128,7 @@ MISSION — a single task:
 
    Edge case: if one of your tasks stays wip because its PR is not merged yet (assigned before this instruction), you are NOT free — first drive that PR to merge (step 4), mark --done, then only then the current item. You stop when EVERYTHING assigned to you is settled — you NEVER RE-POP: the orchestrator spawns a fresh worker per pending item.
 
-2. Implement the task following its description to the letter: dedicated git worktree under {WORKTREE_DIR} based on the repo's integration branch ({BASE}) — NEVER in the main checkout {WS} — spec, requested checks. Optional: local diff review before pushing if a local review tool is available.
+2. Implement the task following its description to the letter: dedicated git worktree under {WORKTREE_DIR} based on the repo's integration branch ({BASE}) — NEVER in the main checkout {WS} — spec, requested checks. Optional: local diff review before pushing if a local review tool is available. Once the worktree exists, run `acctl cwd <its absolute path>` — the session terminal then opens there (re-declare if you move).
 
 3. Contribution cycle (per the repo's rules — {RULES}): branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> handle each round (fix, push, rerun the review) -> review settled -> mark the PR ready -> wait for the required GREEN checks on the head. Any wait > ~1 min (review verdict, CI checks, merge, delay) goes through an ac-wait waiter if the AgentControl daemon exposes one — never a blocking `--watch` or a poll loop inside a tool call.
 

@@ -6,6 +6,7 @@ fn meta(origin: Option<&str>, title: &str, state: &str) -> SessionMeta {
         agent: "devin".into(),
         title: title.into(),
         cwd: "/workspace".into(),
+        reported_cwd: None,
         created_at: "2026-01-01T00:00:00Z".into(),
         native_session_id: None,
         mode: None,

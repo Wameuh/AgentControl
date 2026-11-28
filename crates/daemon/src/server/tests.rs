@@ -74,6 +74,7 @@ fn advisor_meta(advisor: Option<&str>) -> proto::SessionMeta {
         agent: "t".into(),
         title: String::new(),
         cwd: String::new(),
+        reported_cwd: None,
         created_at: String::new(),
         native_session_id: None,
         mode: None,

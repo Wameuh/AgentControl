@@ -1,5 +1,6 @@
 // ---------------------------------------------------------------------------
-// Terminal PTY : shell sur l'hôte du démon, cwd = workspace de la session.
+// Terminal PTY : shell sur l'hôte du démon, cwd = workspace effectif de
+// la session (cwd déclaré par l'agent via acctl cwd, sinon cwd de session).
 // Panneau bas de la vue conversation — un shell par session, conservé en
 // mémoire (détaché/réattaché au changement de session, scrollback intact).
 // Flux : pushes daemon term_data/term_exit relayés par la pompe du bridge
@@ -32,6 +33,10 @@ interface TermEntry {
   /** Conteneur du xterm — détaché/réattaché dans #term-box au switch. */
   box: HTMLElement;
   exited: boolean;
+  /** cwd réel du shell (réponse term_open) — peut différer du cwd de
+   *  session quand l'agent a déclaré un workspace effectif
+   *  (acctl cwd / worktree). */
+  cwd: string | null;
   /** Frappes reçues pendant "connecting…" — flushées à l'ouverture. */
   pending: string[];
 }
@@ -247,7 +252,9 @@ export class TermPanel {
     // terminal affiché ne suivrait plus la session courante.
     box.replaceChildren(e.box);
     $("term-panel").hidden = false;
-    $("term-cwd").textContent = app.current?.cwd ?? "";
+    const cwd = e.cwd ?? app.current?.cwd ?? "";
+    $("term-cwd").textContent = cwd;
+    $("term-cwd").title = cwd;
     requestAnimationFrame(() => {
       e.fit.fit();
       e.xterm.focus();
@@ -301,6 +308,7 @@ export class TermPanel {
       fit,
       box,
       exited: false,
+      cwd: null,
       pending: [],
     };
     this.terms.set(key, entry);
@@ -353,6 +361,7 @@ export class TermPanel {
         return;
       }
       entry.termId = r.term;
+      entry.cwd = r.cwd;
       $("term-cwd").textContent = r.cwd;
       $("term-cwd").title = r.cwd;
       // La taille a pu changer pendant l'ouverture (fit post-montage).

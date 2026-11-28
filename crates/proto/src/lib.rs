@@ -497,6 +497,15 @@ pub struct SessionMeta {
     pub agent: String,
     pub title: String,
     pub cwd: String,
+    /// Cwd « effectif » déclaré par l'agent (`session_set_cwd` /
+    /// `acctl cwd`) — typiquement le worktree dédié d'un worker
+    /// backlog, différent du cwd de spawn (`cwd`). Consommé par
+    /// term_open avec repli sur `cwd` si absent ou invalide ;
+    /// jamais utilisé pour borner les outils fichier (le workspace
+    /// déclaré reste `cwd`). Additif — None sur les meta.json
+    /// écrits avant le champ.
+    #[serde(default)]
+    pub reported_cwd: Option<String>,
     pub created_at: String,
     /// ID de session natif côté agent (pour session/load ou -r)
     #[serde(default)]
@@ -1180,6 +1189,19 @@ pub enum ReqKind {
         session: String,
         steps: Vec<SessionStep>,
     },
+    /// Déclare le cwd « effectif » de la session (skill/outillage
+    /// agent, `acctl cwd`) — typiquement le worktree dédié dans
+    /// lequel l'agent travaille réellement alors que `meta.cwd` reste
+    /// le workspace de spawn. Persisté dans meta.json
+    /// (`reported_cwd`) ; `cwd: None` efface la déclaration.
+    /// Consommé par term_open (repli sur `cwd` si absent/invalide) —
+    /// les outils fichier restent bornés à `meta.cwd`.
+    /// Réponse : `{cwd: <chemin|null>}` — la valeur stockée.
+    /// Extension additive : démons anciens → erreur « req inconnue ».
+    SessionSetCwd {
+        session: String,
+        cwd: Option<String>,
+    },
     /// Tue l'agent et supprime la session + ses fichiers (journal/blobs).
     DeleteSession {
         session: String,
@@ -1707,6 +1729,7 @@ impl ReqKind {
             Self::SetAdvisor { .. } => "set_advisor",
             Self::SetConfigOption { .. } => "set_config_option",
             Self::SessionSetSteps { .. } => "session_set_steps",
+            Self::SessionSetCwd { .. } => "session_set_cwd",
             Self::DeleteSession { .. } => "delete_session",
             Self::ClearSession { .. } => "clear_session",
             Self::SleepSession { .. } => "sleep_session",

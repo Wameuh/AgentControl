@@ -18,6 +18,7 @@ pub(super) fn tmp_session(tag: &str) -> (Arc<Session>, PathBuf) {
         agent: "test".into(),
         title: "t".into(),
         cwd: "/tmp".into(),
+        reported_cwd: None,
         created_at: proto::now_iso(),
         native_session_id: None,
         mode: None,
@@ -266,6 +267,45 @@ fn steps() {
     assert!(!s2.clear_steps()); // déjà vide → pas d'event en double
     let s3 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
     assert!(s3.steps_snapshot().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Cwd effectif déclaré par l'agent (session_set_cwd / acctl cwd) :
+/// validé (absolu + dossier existant, canonicalisé), persisté dans
+/// meta.json, consommé par term_cwd avec repli sur meta.cwd quand la
+/// déclaration est absente ou devenue invalide (worktree supprimé).
+#[test]
+fn reported_cwd() {
+    let (s, dir) = tmp_session("cwd");
+    // Défaut : pas de déclaration → cwd de session.
+    assert_eq!(s.term_cwd(), "/tmp");
+    // Worktree factice hors du cwd de session.
+    let wt = dir.join("wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    let wt_str = wt.display().to_string();
+    let stored = s.set_reported_cwd(Some(wt_str.clone())).unwrap();
+    assert_eq!(
+        stored.as_deref(),
+        Some(std::fs::canonicalize(&wt).unwrap().to_str().unwrap())
+    );
+    assert_eq!(s.term_cwd(), stored.clone().unwrap());
+    // Persisté dans meta.json : la réouverture garde la déclaration.
+    let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
+    assert_eq!(s2.term_cwd(), stored.unwrap());
+    // Relatif / inexistant / non-dossier → refus.
+    assert!(s2.set_reported_cwd(Some("relative/path".into())).is_err());
+    assert!(s2
+        .set_reported_cwd(Some(dir.join("nope").display().to_string()))
+        .is_err());
+    let f = dir.join("file");
+    std::fs::write(&f, b"x").unwrap();
+    assert!(s2.set_reported_cwd(Some(f.display().to_string())).is_err());
+    // Worktree supprimé après déclaration → repli sur meta.cwd.
+    std::fs::remove_dir_all(&wt).unwrap();
+    assert_eq!(s2.term_cwd(), "/tmp");
+    // Effacement explicite.
+    assert!(s2.set_reported_cwd(None).unwrap().is_none());
+    assert_eq!(s2.term_cwd(), "/tmp");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

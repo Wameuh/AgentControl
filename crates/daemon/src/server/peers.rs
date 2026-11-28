@@ -201,6 +201,7 @@ impl Daemon {
             agent: agent_id.clone(),
             title: title.clone(),
             cwd,
+            reported_cwd: None,
             created_at: proto::now_iso(),
             native_session_id: None,
             mode: mode.or(if same_agent { cm.mode.clone() } else { None }),

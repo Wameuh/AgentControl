@@ -30,6 +30,7 @@ fn tmp_session_cfg(
         agent: "test".into(),
         title: "t".into(),
         cwd: "/tmp".into(),
+        reported_cwd: None,
         created_at: proto::now_iso(),
         native_session_id: Some(native_id.to_string()),
         mode: mode.map(String::from),

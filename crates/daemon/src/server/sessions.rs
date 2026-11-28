@@ -118,6 +118,7 @@ impl Daemon {
             agent: agent.clone(),
             title: title.unwrap_or_else(|| "session".into()),
             cwd,
+            reported_cwd: None,
             created_at: proto::now_iso(),
             native_session_id: None,
             mode: mode.clone(),
@@ -211,6 +212,7 @@ impl Daemon {
             agent: agent.clone(),
             title: title.unwrap_or_else(|| format!("attach:{native_id}")),
             cwd,
+            reported_cwd: None,
             created_at: proto::now_iso(),
             native_session_id: Some(native_id),
             mode: None,
@@ -1404,6 +1406,20 @@ impl Daemon {
         let s = self.get_session(&session).await?;
         let steps = s.set_steps(steps)?;
         Ok(json!({"steps": steps}))
+    }
+
+    /// Déclare le cwd « effectif » de la session (skill/outillage
+    /// agent, `acctl cwd`) — voir SessionSetCwd dans proto. Persisté
+    /// dans meta.json (`reported_cwd`) ; `cwd: null` efface. La
+    /// réponse porte la valeur stockée.
+    pub(super) async fn h_session_set_cwd(
+        self: &Arc<Self>,
+        session: String,
+        cwd: Option<String>,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let stored = s.set_reported_cwd(cwd)?;
+        Ok(json!({"cwd": stored}))
     }
 
     pub(super) async fn h_queue_list(self: &Arc<Self>, session: String) -> Result<Value> {
