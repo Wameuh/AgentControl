@@ -1,0 +1,1112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <link rel="icon" type="image/svg+xml" href="/gem.svg" />
+    <title>AgentControl</title>
+    <script type="module" crossorigin src="/assets/index-lJ4jzeMK.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BGzeijNZ.css">
+  </head>
+  <body>
+    <canvas id="mesh-bg"></canvas>
+    <div id="app">
+      <div id="titlebar">
+        <button id="tb-menu" hidden data-icon="menu" data-i18n-title="menu_title" title="Menu"></button>
+        <span id="titlebar-gem"></span>
+        <span id="titlebar-title">AgentControl</span>
+        <!-- Chrome de l'accueil mobile (m-home) : titre de vue, puce de
+             connexion → feuille d'actions, loupe → filtre de sessions. -->
+        <span id="m-home-title"></span>
+        <button id="m-conn" type="button"></button>
+        <button id="m-search" type="button" data-icon="search" data-i18n-title="sess_filter_title" title="Filter"></button>
+        <div class="tb-btns">
+          <button id="tb-map" data-icon="map" title="Map" data-i18n-title="map_title"></button>
+          <button id="tb-logs" data-icon="scroll" title="Logs" data-i18n-title="logs"></button>
+          <button id="tb-components" hidden data-icon="tool" title="Components" data-i18n-title="comp_h"></button>
+          <button id="tb-settings" data-icon="settings" title="Settings" data-i18n-title="settings_title"></button>
+          <button id="tb-about" data-icon="info" title="About" data-i18n-title="about_title"></button>
+          <button id="tb-more" hidden data-icon="more" data-i18n-title="menu_title" title="Menu"></button>
+          <!-- Desktop : un bouton « Options » libellé remplace les icônes
+               carte/logs/composants/paramètres/à propos (toujours dans le
+               DOM, masquées en CSS — le menu et le ⋮ Android les cliquent). -->
+          <button id="tb-options" type="button" aria-haspopup="menu" aria-expanded="false"><span data-icon="settings"></span><span data-i18n="options_btn">Options</span><span class="tb-chev" data-icon="chev-down"></span></button>
+          <button id="tb-min" data-icon="min" data-i18n-title="win_min" title="Minimize"></button>
+          <button id="tb-max" data-icon="max" data-i18n-title="win_max" title="Maximize"></button>
+          <button id="tb-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+        </div>
+      </div>
+      <div id="app-body">
+        <aside id="sidebar">
+          <div id="conn-bar">
+            <button id="btn-connect" data-i18n="new_conn">New connection</button>
+            <button id="conn-chip" class="badge warn" hidden data-icon="refresh"></button>
+          </div>
+          <div id="side-view" role="tablist">
+            <button id="sv-agents" class="sv on" role="tab" data-i18n-title="view_agents_title" title="Agent sessions"><span class="sv-ic" data-icon="bot"></span><span data-i18n="view_agents">Agents</span></button>
+            <button id="sv-repos" class="sv" role="tab" data-i18n-title="view_repos_title" title="Pull requests"><span class="sv-ic" data-icon="pr"></span><span data-i18n="view_repos">Repos</span><span id="sv-count" hidden></span></button>
+            <button id="sv-backlog" class="sv" role="tab" data-i18n-title="view_backlog_title" title="Backlog"><span class="sv-ic" data-icon="backlog"></span><span data-i18n="view_backlog">Backlog</span><span id="sv-bcount" hidden></span></button>
+            <button id="sv-map" class="sv" role="tab" data-i18n-title="map_title" title="Diagram"><span class="sv-ic" data-icon="map"></span><span data-i18n="map_title">Diagram</span></button>
+          </div>
+          <div id="sess-filter">
+            <div id="sess-filter-box">
+              <input id="sess-filter-input" data-i18n-ph="sess_filter_ph" data-i18n-title="sess_filter_title" placeholder="Filter sessions…" />
+              <button id="sess-filter-clear" hidden data-icon="close" data-i18n-title="sess_filter_clear" title="Clear the filter"></button>
+            </div>
+            <button id="btn-agent-caps" hidden data-icon="sliders" data-i18n-title="agent_caps_title" title="Agent capabilities"></button>
+          </div>
+          <div id="m-home-state" hidden></div>
+          <div id="session-list"></div>
+          <div id="pr-list" hidden></div>
+          <div id="backlog-list" hidden></div>
+          <button id="btn-new-session"><span data-icon="user-plus"></span><span data-i18n="new_session">New agent</span></button>
+          <div id="sidebar-resize" title="Drag to resize"></div>
+        </aside>
+        <main id="chat">
+          <header id="m-sbar">
+            <button id="m-sbar-nav" data-icon="back" data-i18n-title="comp_back" title="Back"></button>
+            <span id="m-sbar-gem"></span>
+            <button id="m-sbar-title" type="button">
+              <span id="m-sbar-name">—</span>
+              <span id="m-sbar-sub"></span>
+            </button>
+            <button id="m-sbar-stop" hidden data-icon="stop" data-i18n-title="stop" title="Stop"></button>
+          </header>
+          <header id="chat-header">
+            <span id="chat-gem" hidden></span>
+            <span id="chat-title" data-i18n-title="title_dblclick">—</span>
+            <span id="chat-state" class="badge"></span>
+            <span id="chat-ctx" class="badge" hidden></span>
+            <div id="chat-opts">
+              <select id="mode-select" hidden></select>
+              <select id="model-select" hidden></select>
+              <select id="effort-select" hidden data-i18n-title="effort_title" title="Effort"></select>
+              <select id="advisor-select" hidden data-i18n-title="advisor_title" title="Advisor"></select>
+              <button id="btn-fusion-edit" hidden data-icon="merge" title="Configure fusion"></button>
+              <input id="model-free" hidden data-i18n-ph="model_free_ph" data-i18n-title="model_free_title" placeholder="model…" />
+              <span id="dyn-opts"></span>
+              <button id="btn-caps-refresh" hidden data-icon="refresh" data-i18n-title="caps_refresh" title="Refresh models"></button>
+            </div>
+            <button id="btn-search" hidden data-icon="search" data-i18n-title="search_title" title="Search"></button>
+            <button id="btn-first" hidden data-icon="top" data-i18n-title="first_post" title="First post"></button>
+            <button id="btn-pins" hidden data-icon="pin" data-i18n-title="pins_title" title="Pinned messages"></button>
+            <button id="btn-steps" hidden data-icon="steps" data-i18n-title="steps_title" title="Task steps"></button>
+            <button id="btn-term" hidden data-icon="terminal" data-i18n-title="term_title" title="Terminal"></button>
+            <button id="btn-files" hidden data-icon="folder" data-i18n-title="files_title" title="Files"></button>
+            <button id="btn-refresh" data-icon="refresh" data-i18n-title="refresh_title" title="Reload"></button>
+            <button id="btn-resume" hidden data-i18n="resume">Resume</button>
+            <button id="btn-fresh" hidden data-i18n="fresh_ctx" data-i18n-title="fresh_ctx_title" title="New context">New context</button>
+            <button id="btn-sleep" hidden data-i18n="ctx_sleep">Sleep</button>
+            <button id="btn-cancel" hidden data-i18n="stop">Stop</button>
+            <button id="chat-more" hidden data-icon="more" data-i18n-title="menu_title" title="Menu"></button>
+          </header>
+          <div id="search-wrap" hidden>
+            <div id="search-bar">
+              <input id="search-input" data-i18n-ph="search_ph" placeholder="Search history…" />
+              <span id="search-count"></span>
+              <button id="search-prev" data-icon="up" data-i18n-title="search_prev" title="Previous"></button>
+              <button id="search-next" data-icon="down" data-i18n-title="search_next" title="Next"></button>
+              <button id="search-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </div>
+            <div id="search-results" hidden></div>
+          </div>
+          <div id="events">
+            <div id="scroll-sentinel"></div>
+            <div id="empty-state" hidden>
+              <span class="load-gem" id="empty-gem"></span>
+              <div id="empty-h"></div>
+              <div id="empty-txt"></div>
+              <button id="empty-cta" hidden></button>
+            </div>
+          </div>
+          <button id="btn-bottom" hidden data-icon="down" data-i18n-title="bottom_title" title="Latest"></button>
+          <div id="queue-bar" hidden></div>
+          <div id="queue-panel" hidden>
+            <header id="qp-head">
+              <span id="qp-title" data-i18n="queue_panel_title">Queued prompts</span>
+              <span id="qp-count" class="badge"></span>
+              <button id="qp-clear" hidden data-i18n="queue_clear" data-i18n-title="queue_clear_title" title="Clear all"></button>
+              <button id="qp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="qp-list"></div>
+          </div>
+          <div id="pins-panel" hidden>
+            <header id="pp-head">
+              <span id="pp-title" data-i18n="pins_title">Pinned messages</span>
+              <span id="pp-count" class="badge"></span>
+              <button id="pp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="pp-list"></div>
+          </div>
+          <div id="steps-panel" hidden>
+            <header id="sp-head">
+              <span id="sp-title" data-i18n="steps_title">Task steps</span>
+              <span id="sp-count" class="badge"></span>
+              <button id="sp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="sp-list"></div>
+          </div>
+          <div id="term-panel" hidden>
+            <div id="term-resize" data-i18n-title="term_drag" title="Drag to resize"></div>
+            <header id="term-head">
+              <span id="term-title" data-i18n="term_title">Terminal</span>
+              <span id="term-cwd"></span>
+              <button id="btn-term-restart" data-icon="refresh" data-i18n-title="term_new" title="New shell"></button>
+              <button id="btn-term-hide" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="term-box"></div>
+            <div id="term-keys"></div>
+          </div>
+          <div id="perm-dock" hidden></div>
+          <footer id="composer">
+            <div id="cmd-ac" hidden></div>
+            <div id="attach-bar" hidden></div>
+            <div id="drop-hint" data-i18n="att_drop" hidden>Drop files to attach</div>
+            <button id="btn-attach" hidden data-icon="plus" data-i18n-title="att_add" title="Attach file"></button>
+            <input id="attach-pick" type="file" multiple hidden>
+            <div id="mic-hint" hidden></div>
+            <div id="input-wrap">
+              <div id="input-ghost" aria-hidden="true"></div>
+              <textarea id="input" data-i18n-ph="input_ph" placeholder="Message… (Enter = send)" rows="2"></textarea>
+              <button id="btn-expand" type="button" hidden></button>
+            </div>
+            <button id="btn-alt" hidden data-icon="steer" data-i18n-title="steer_title" title="Steer"></button>
+            <button id="btn-mic" type="button" hidden data-icon="mic" data-i18n-title="stt_mic" title="Dictation"></button>
+            <button id="btn-send" data-i18n="send">Send</button>
+          </footer>
+          <div id="settings-view" tabindex="-1" hidden>
+            <header id="settings-head">
+              <span id="settings-title" data-i18n="settings_h">Settings</span>
+              <span id="s-version"></span>
+              <button id="settings-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="settings-main">
+              <!-- Rail des catégories (desktop) : rempli par settings-nav.ts
+                   depuis les sections (data-scope/data-icon) — Android garde
+                   sa liste + sous-écrans (mobile/settings-mobile.ts). -->
+              <nav id="s-rail" aria-label="Settings categories" data-i18n-aria="s_rail_aria">
+                <label id="s-search-box">
+                  <span data-icon="search"></span>
+                  <input id="s-search" type="search" autocomplete="off" spellcheck="false" data-i18n-ph="s_search_ph" placeholder="Search settings" />
+                </label>
+                <div id="s-rail-items"></div>
+              </nav>
+              <div id="settings-body">
+              <p id="s-search-empty" class="s-desc" hidden data-i18n="s_search_none">No setting matches this search</p>
+              <details class="s-sec" id="s-sec-general" data-scope="app" data-rail-icon="sliders">
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_general">General</span>
+                  <span class="s-sec-state" id="s-st-general"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <label class="s-row"><span class="s-txt"><span data-i18n="lang_label">Language</span>
+                      <small class="s-desc" data-i18n="lang_desc">Applied to the whole interface when you save</small></span>
+                    <select id="s-lang"><!-- options injectées depuis LANGS (i18n) --></select>
+                  </label>
+                  <label class="s-row chk" id="s-autoconn-row">
+                    <input type="checkbox" id="s-autoconn" checked />
+                    <span class="s-txt"><span data-i18n="autoconnect_label">Reconnect on launch</span>
+                      <small class="s-desc" data-i18n="autoconnect_desc">Restores the last server connection when the app starts</small></span>
+                  </label>
+                  <label class="s-row chk" id="s-rcchan-row">
+                    <input type="checkbox" id="s-rcchan" />
+                    <span class="s-txt"><span data-i18n="rcchan_label">Release candidates (rc)</span>
+                      <small class="s-desc" data-i18n="rcchan_desc">Also propose pre-release builds when checking for updates</small></span>
+                  </label>
+                  <div class="s-row" id="s-update-row">
+                    <span class="s-txt"><span data-i18n="update_label">App update</span>
+                      <small class="s-desc" data-i18n="update_desc2">Versions of this app and of the connected daemon</small></span>
+                    <button id="s-checkupdate" type="button" class="s-test" data-i18n="check_update">Check for updates</button>
+                  </div>
+                </div>
+              </details>
+              <details class="s-sec" id="s-sec-appearance" data-scope="app" data-rail-icon="palette">
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_appearance">Appearance</span>
+                  <span class="s-sec-state" id="s-st-appearance"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <div class="s-row s-col"><span class="s-txt"><span data-i18n="theme_label">Theme</span>
+                      <small class="s-desc" data-i18n="theme_desc">Interface colors, dark or light</small></span>
+                    <select id="s-theme" class="s-vh" tabindex="-1" aria-hidden="true">
+                      <option value="dark" data-i18n="theme_dark">Dark</option>
+                      <option value="light" data-i18n="theme_light">Light</option>
+                    </select>
+                    <div class="s-tiles" role="radiogroup" data-for="s-theme" data-i18n-aria="theme_label" aria-label="Theme">
+                      <button type="button" class="s-tile" role="radio" data-v="dark"><span class="s-tile-pv pv-dark"><i></i><i></i><i></i><b></b></span><span class="s-tile-nm"><span data-i18n="theme_dark">Dark</span><span class="s-tile-gem"></span></span></button>
+                      <button type="button" class="s-tile" role="radio" data-v="light"><span class="s-tile-pv pv-light"><i></i><i></i><i></i><b></b></span><span class="s-tile-nm"><span data-i18n="theme_light">Light</span><span class="s-tile-gem"></span></span></button>
+                    </div>
+                  </div>
+                  <div class="s-row s-col"><span class="s-txt"><span data-i18n="s-accent">Accent color</span>
+                      <small class="s-desc" data-i18n="accent_desc">Highlights, active items and badges</small></span>
+                    <select id="s-accent" class="s-vh" tabindex="-1" aria-hidden="true">
+                      <option value="sage" data-i18n="accent_sage">Sage</option>
+                      <option value="gold" data-i18n="accent_gold">Golden</option>
+                      <option value="grey" data-i18n="accent_grey">Grey</option>
+                      <option value="violet" data-i18n="accent_violet">Violet</option>
+                      <option value="red" data-i18n="accent_red">Red</option>
+                    </select>
+                    <div class="s-swatches" role="radiogroup" data-for="s-accent" data-i18n-aria="s-accent" aria-label="Accent color">
+                      <button type="button" class="s-swatch" role="radio" data-v="sage"><span class="s-gem" data-accent="sage"></span><span data-i18n="accent_sage">Sage</span></button>
+                      <button type="button" class="s-swatch" role="radio" data-v="gold"><span class="s-gem" data-accent="gold"></span><span data-i18n="accent_gold">Golden</span></button>
+                      <button type="button" class="s-swatch" role="radio" data-v="grey"><span class="s-gem" data-accent="grey"></span><span data-i18n="accent_grey">Grey</span></button>
+                      <button type="button" class="s-swatch" role="radio" data-v="violet"><span class="s-gem" data-accent="violet"></span><span data-i18n="accent_violet">Violet</span></button>
+                      <button type="button" class="s-swatch" role="radio" data-v="red"><span class="s-gem" data-accent="red"></span><span data-i18n="accent_red">Red</span></button>
+                    </div>
+                  </div>
+                  <div class="s-row"><span class="s-txt"><span data-i18n="s-accent-int">Accent intensity</span>
+                      <small class="s-desc" data-i18n="accent_int_desc">Saturated, vivid variant of the accent palette</small></span>
+                    <select id="s-accent-int" class="s-vh" tabindex="-1" aria-hidden="true">
+                      <option value="soft" data-i18n="accent_int_soft">Soft</option>
+                      <option value="strong" data-i18n="accent_int_strong">Strong</option>
+                    </select>
+                    <div class="s-seg" role="radiogroup" data-for="s-accent-int" data-i18n-aria="s-accent-int" aria-label="Accent intensity">
+                      <button type="button" role="radio" data-v="soft" data-i18n="accent_int_soft">Soft</button>
+                      <button type="button" role="radio" data-v="strong" data-i18n="accent_int_strong">Strong</button>
+                    </div>
+                  </div>
+                  <label class="s-row chk" id="s-bganim-row">
+                    <input type="checkbox" id="s-bganim" checked />
+                    <span class="s-txt"><span data-i18n="s-bg-anim">Animated background</span>
+                      <small class="s-desc" data-i18n="bganim_desc">Slow-moving gradient behind the app — off saves battery</small></span>
+                  </label>
+                </div>
+              </details>
+              <details class="s-sec" id="s-sec-chat" data-scope="app" data-rail-icon="msg">
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_chat">Chat</span>
+                  <span class="s-sec-state" id="s-st-chat"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <label class="s-row"><span class="s-txt"><span data-i18n="sendmode_label">Sending during a turn</span>
+                      <small class="s-desc" data-i18n="sendmode_desc">What Enter and Send do while the agent is busy</small></span>
+                    <select id="s-sendmode">
+                      <option value="queue" data-i18n="sendmode_queue">Queue for the next turn</option>
+                      <option value="steer" data-i18n="sendmode_steer">Inject mid-turn (steer)</option>
+                    </select>
+                  </label>
+                  <label class="s-row"><span class="s-txt"><span data-i18n="images_label">Remote images in chat</span>
+                      <small class="s-desc" data-i18n="images_desc">Load images hosted on external domains</small></span>
+                    <select id="s-images">
+                      <option value="never" data-i18n="images_never">Never</option>
+                      <option value="click" data-i18n="images_click">On click</option>
+                      <option value="always" data-i18n="images_always">Always</option>
+                    </select>
+                  </label>
+                  <label class="s-row s-col"><span class="s-txt"><span data-i18n="img_hosts_label">Trusted image hosts</span>
+                      <small class="s-desc" data-i18n="img_hosts_desc">Domains loaded without a click — comma-separated</small></span>
+                    <input type="text" id="s-img-hosts" data-i18n-ph="img_hosts_ph" placeholder="github.com, githubusercontent.com" />
+                  </label>
+                </div>
+              </details>
+              <details class="s-sec" id="s-sec-notif" data-scope="app" data-rail-icon="bell">
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_notif">Notifications</span>
+                  <span class="s-sec-state" id="s-st-notif"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <p class="s-desc" data-i18n="alerts_intro">When a session needs your attention</p>
+                  <!-- Matrice événements × canaux : les ids historiques
+                       (s-snd*, s-notif*) sont conservés — staging et tests
+                       inchangés. Colonne OS masquée en web (.no-os). -->
+                  <div class="s-mx-wrap">
+                  <table id="s-alerts" class="s-mx">
+                    <thead>
+                      <tr>
+                        <th class="mx-ev" data-i18n="alerts_event">Event</th>
+                        <th class="mx-col">
+                          <label class="mx-head"><input type="checkbox" id="s-snd" class="s-sw" checked /><span data-i18n="alerts_sound">Sound</span></label>
+                          <div class="mx-sub mx-snd"><span data-i18n="sounds_vol">Volume</span>
+                            <input type="range" id="s-snd-vol" min="0" max="100" step="5" data-i18n-aria="sounds_vol" aria-label="Volume" />
+                            <output id="s-snd-volv" for="s-snd-vol"></output></div>
+                        </th>
+                        <th class="mx-col mx-os-col">
+                          <label class="mx-head"><input type="checkbox" id="s-notif" class="s-sw" checked /><span data-i18n="notif_label">System notifications</span></label>
+                          <div class="mx-sub"><button type="button" class="s-test" id="s-notif-test" data-i18n="notif_test_short">Send a test</button></div>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td class="mx-ev"><span data-i18n="sounds_done">Turn finished</span><small class="s-desc" data-i18n="snd_done_desc">An agent completed its turn</small></td>
+                        <td><div class="mx-cell mx-snd"><input type="checkbox" id="s-snd-done" class="s-sw" checked data-i18n-aria="sounds_done" aria-label="Turn finished" /><select class="s-preset" id="s-snd-preset-done" data-i18n-title="sounds_preset" title="Sound"></select><button type="button" class="s-test s-play" id="s-snd-test-done" data-i18n-title="sounds_test" title="Test" data-icon="play"></button></div></td>
+                        <td class="mx-os-col"><div class="mx-cell mx-os"><input type="checkbox" id="s-notif-done" class="s-sw" checked data-i18n-aria="sounds_done" aria-label="Turn finished" /></div></td>
+                      </tr>
+                      <tr>
+                        <td class="mx-ev"><span data-i18n="sounds_question">Question / permission</span><small class="s-desc" data-i18n="snd_question_desc">An agent waits for an answer or an approval</small></td>
+                        <td><div class="mx-cell mx-snd"><input type="checkbox" id="s-snd-question" class="s-sw" checked data-i18n-aria="sounds_question" aria-label="Question / permission" /><select class="s-preset" id="s-snd-preset-question" data-i18n-title="sounds_preset" title="Sound"></select><button type="button" class="s-test s-play" id="s-snd-test-question" data-i18n-title="sounds_test" title="Test" data-icon="play"></button></div></td>
+                        <td class="mx-os-col"><div class="mx-cell mx-os"><input type="checkbox" id="s-notif-question" class="s-sw" checked data-i18n-aria="sounds_question" aria-label="Question / permission" /></div></td>
+                      </tr>
+                      <tr>
+                        <td class="mx-ev"><span data-i18n="sounds_error">Error / dead session</span><small class="s-desc" data-i18n="snd_error_desc">A session failed or stopped</small></td>
+                        <td><div class="mx-cell mx-snd"><input type="checkbox" id="s-snd-error" class="s-sw" checked data-i18n-aria="sounds_error" aria-label="Error / dead session" /><select class="s-preset" id="s-snd-preset-error" data-i18n-title="sounds_preset" title="Sound"></select><button type="button" class="s-test s-play" id="s-snd-test-error" data-i18n-title="sounds_test" title="Test" data-icon="play"></button></div></td>
+                        <td class="mx-os-col"><div class="mx-cell mx-os"><input type="checkbox" id="s-notif-error" class="s-sw" checked data-i18n-aria="sounds_error" aria-label="Error / dead session" /></div></td>
+                      </tr>
+                      <tr class="mx-foot">
+                        <td class="mx-ev"><span data-i18n="alerts_unfocused">Only outside the app</span><small class="s-desc" data-i18n="snd_unfocused_desc">Stay silent while you are already looking at the app</small></td>
+                        <td><div class="mx-cell mx-snd"><input type="checkbox" id="s-snd-unfocused" class="s-sw" data-i18n-aria="alerts_unfocused" aria-label="Only outside the app" /></div></td>
+                        <td class="mx-os-col"><div class="mx-cell mx-os"><input type="checkbox" id="s-notif-unfocused" class="s-sw" data-i18n-aria="alerts_unfocused" aria-label="Only outside the app" /></div></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  </div>
+                  <p class="s-desc s-warn" id="s-snd-blocked" hidden><span data-i18n="sounds_blocked">Audio blocked until you interact — click anywhere or press Test</span></p>
+                  <p class="s-desc s-warn" id="s-notif-denied" hidden><span data-i18n="notif_denied">Notifications are blocked — allow AgentControl in the OS notification settings</span></p>
+                </div>
+              </details>
+              <details class="s-sec" id="s-sec-files" data-scope="app" data-rail-icon="folder">
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_files">Files</span>
+                  <span class="s-sec-state" id="s-st-files"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <label class="s-row"><span class="s-txt"><span data-i18n="enc_label">File encoding</span>
+                      <small class="s-desc" data-i18n="enc_desc">Charset used to read and save files in the viewer</small></span>
+                    <select id="s-encoding">
+                      <option value="utf-8">UTF-8</option>
+                      <option value="windows-1252">Windows-1252 / Latin-1</option>
+                      <option value="utf-16le">UTF-16 LE</option>
+                      <option value="utf-16be">UTF-16 BE</option>
+                    </select>
+                  </label>
+                  <label class="s-row chk">
+                    <input type="checkbox" id="s-mdrender" checked />
+                    <span class="s-txt"><span data-i18n="mdrender_label">Markdown preview</span>
+                      <small class="s-desc" data-i18n="mdrender_desc">Open .md files rendered — the viewer button flips the same default</small></span>
+                  </label>
+                </div>
+              </details>
+              <details class="s-sec" id="s-sec-stt" data-scope="app" data-rail-icon="mic" hidden>
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_stt">Speech recognition</span>
+                  <span class="s-sec-state" id="s-st-stt"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <div class="s-row"><span class="s-txt"><span class="s-desc" data-i18n="stt_sec_desc">On-device voice dictation — models download on demand, prefer Wi-Fi</span></span>
+                  </div>
+                  <label class="s-row"><span class="s-txt"><span data-i18n="stt_engine">Engine</span>
+                      <small class="s-desc" data-i18n="stt_engine_desc">Recognizer used for dictation</small></span>
+                    <select id="s-stt-engine">
+                      <option value="sherpa" data-i18n="stt_engine_sherpa">Downloaded model</option>
+                      <option value="system" data-i18n="stt_engine_system">System recognizer</option>
+                    </select>
+                  </label>
+                  <label class="s-row"><span class="s-txt"><span data-i18n="stt_lang">Dictation language</span>
+                      <small class="s-desc" data-i18n="stt_lang_desc">Forced per dictation, or auto-detected</small></span>
+                    <select id="s-stt-lang">
+                      <option value="auto" data-i18n="stt_lang_auto">Auto</option>
+                      <option value="en">English</option>
+                      <option value="fr">Français</option>
+                      <option value="es">Español</option>
+                      <option value="de">Deutsch</option>
+                    </select>
+                  </label>
+                  <div id="s-stt-models"></div>
+                </div>
+              </details>
+              <details class="s-sec" id="s-sec-tts" data-scope="app" data-rail-icon="speaker" hidden>
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_tts">Speech synthesis</span>
+                  <span class="s-sec-state" id="s-st-tts"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <div class="s-row"><span class="s-txt"><span class="s-desc" data-i18n="tts_sec_desc">Read agent replies aloud on-device — voice models download on demand, a system voice works with zero model</span></span>
+                  </div>
+                  <label class="s-row"><span class="s-txt"><span data-i18n="tts_engine">Engine</span>
+                      <small class="s-desc" data-i18n="tts_engine_desc">Synthesizer used for playback</small></span>
+                    <select id="s-tts-engine">
+                      <option value="auto" data-i18n="tts_engine_auto">Auto (model if installed, system otherwise)</option>
+                      <option value="sherpa" data-i18n="tts_engine_sherpa">Downloaded model</option>
+                      <option value="system" data-i18n="tts_engine_system">System voice</option>
+                    </select>
+                  </label>
+                  <div class="s-row"><span class="s-txt"><span data-i18n="tts_voice">Voice</span>
+                      <small class="s-desc" data-i18n="tts_voice_desc">Voices offered by the installed models</small></span>
+                    <span class="stt-actions">
+                      <select id="s-tts-voice"><option value="" data-i18n="tts_voice_auto">Auto</option></select>
+                      <button type="button" id="s-tts-preview" class="s-test" data-i18n="tts_preview">Preview</button>
+                    </span>
+                  </div>
+                  <label class="s-row"><span class="s-txt"><span data-i18n="tts_speed">Speed</span>
+                      <small class="s-desc" data-i18n="tts_speed_desc">Playback speed</small></span>
+                    <select id="s-tts-speed">
+                      <option value="0.75">0.75×</option>
+                      <option value="1">1×</option>
+                      <option value="1.25">1.25×</option>
+                      <option value="1.5">1.5×</option>
+                      <option value="2">2×</option>
+                    </select>
+                  </label>
+                  <label class="s-row chk">
+                    <input type="checkbox" id="s-tts-autoread" />
+                    <span class="s-txt"><span data-i18n="tts_autoread">Read agent replies aloud</span>
+                      <small class="s-desc" data-i18n="tts_autoread_desc">Each new completed reply is spoken — code blocks are skipped</small></span>
+                  </label>
+                  <div id="s-tts-models"></div>
+                </div>
+              </details>
+              <details class="s-sec" id="s-sec-diag" data-scope="app" data-rail-icon="activity">
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_diag">Diagnostics</span>
+                  <span class="s-sec-state" id="s-st-diag"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <label class="s-row chk">
+                    <input type="checkbox" id="s-telemetry" checked />
+                    <span class="s-txt"><span data-i18n="telemetry_label">Perf telemetry</span>
+                      <small class="s-desc" data-i18n="telemetry_desc">Aggregated perf counters (typing latency, long tasks, DOM flushes, RPC) written to the local log every 5 min — stays on this machine</small></span>
+                  </label>
+                  <details id="s-logs" class="log-details">
+                    <summary data-i18n="logs_client">App log</summary>
+                    <div class="log-bar">
+                      <select id="s-log-level" class="log-level" data-i18n-title="log_level" title="Minimum level">
+                        <option value="debug">DEBUG</option>
+                        <option value="info" selected>INFO</option>
+                        <option value="warn">WARN</option>
+                        <option value="error">ERROR</option>
+                      </select>
+                    </div>
+                    <pre id="s-log-view" class="log-view"></pre>
+                  </details>
+                </div>
+              </details>
+              <details class="s-sec" id="s-sec-conn" data-scope="server" data-rail-icon="key">
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_pair">Paired devices</span>
+                  <span class="s-sec-state" id="s-st-conn"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <div class="s-row" id="s-pair-row">
+                    <span class="s-txt"><span data-i18n="qr_share">Pair a device</span>
+                      <small class="s-desc" data-i18n="pair_desc">Show the pairing QR of a saved server</small></span>
+                    <select id="s-pair-conn" disabled></select>
+                    <button type="button" class="s-test" id="s-pair-go" disabled data-i18n="pair_btn">Pair…</button>
+                  </div>
+                  <div class="s-row" id="s-pair-none" hidden>
+                    <span class="s-desc" data-i18n="pair_none">No saved SSH connection — add one from the connections view</span>
+                  </div>
+                  <div id="s-pacc" hidden>
+                    <div class="s-row">
+                      <span class="s-txt"><span data-i18n="pair_acc_h">Paired access</span>
+                        <small class="s-desc" data-i18n="pair_acc_desc">Keys this app manages on the selected server</small></span>
+                      <button type="button" class="s-test" id="s-pacc-ref" data-i18n="pair_acc_ref">Refresh</button>
+                    </div>
+                    <p id="s-pacc-state" class="s-desc" hidden></p>
+                    <ul id="s-pacc-list" class="pair-acc-list"></ul>
+                  </div>
+                </div>
+              </details>
+              </div>
+            </div>
+            <!-- Barre d'enregistrement (#190) : visible seulement avec des
+                 modifications en attente — nombre + noms, Annuler/Enregistrer. -->
+            <footer id="s-savebar" hidden>
+              <span id="s-dirty" hidden></span>
+              <span id="s-dirty-msg"></span>
+              <button id="s-cancel" type="button" class="s-act" data-i18n="cancel" disabled>Cancel</button>
+              <button id="s-save" type="button" class="s-act primary" data-i18n="save" disabled>Save</button>
+            </footer>
+          </div>
+          <div id="conn-view" tabindex="-1" hidden>
+            <header id="connview-head">
+              <span id="connview-title" data-i18n="conn_h">Connect to daemon</span>
+              <button id="connview-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="connview-body">
+              <section id="cv-saved-sec" hidden>
+                <h4 data-i18n="recent">Recent connections</h4>
+                <ul id="cv-saved"></ul>
+              </section>
+              <section id="cv-progress" hidden>
+                <div class="daemon-dlg">
+                  <span class="spin-ico" data-icon="loader"></span>
+                  <div class="daemon-body">
+                    <p id="cv-progress-msg"></p>
+                    <ul id="cv-progress-steps"></ul>
+                  </div>
+                </div>
+                <button type="button" id="cv-progress-bg" data-i18n="run_bg">Run in background</button>
+              </section>
+              <div id="c-status" class="dlg-status" hidden></div>
+              <div id="c-err" class="dlg-err" role="alert" hidden></div>
+              <div id="cv-other-inst" class="dlg-warn" data-i18n="inst_running_warn" hidden></div>
+              <section id="cv-welcome" hidden>
+                <h4 data-i18n="cv_welcome_h">Restore access</h4>
+                <p class="cv-welcome-txt" data-i18n="cv_welcome_txt">No connection configured — after a reinstall, keys and pairings are gone. Restore everything in one scan: on your computer, open AgentControl → a connection → “Pair a device”, then scan the QR here.</p>
+                <button type="button" id="cv-restore" data-i18n="cv_restore_qr">Restore access via QR</button>
+              </section>
+              <section id="cv-form-sec">
+                <h4 id="cv-form-title" data-i18n="new_conn">New connection</h4>
+                <label><span data-i18n="type_label">Type</span>
+                  <select id="c-kind">
+                    <option value="local" data-i18n="local_sock">Local socket</option>
+                    <option value="ssh" data-i18n="ssh_label">SSH (remote server)</option>
+                    <option value="tcp" data-i18n="tcp_label">Direct TCP</option>
+                  </select>
+                </label>
+                <label id="c-native-wrap" class="chk-row">
+                  <input type="checkbox" id="c-native" />
+                  <span data-i18n="ssh_native_label">Native SSH (russh)</span>
+                </label>
+                <label><span data-i18n="host_label">Host</span> <input id="c-host" list="ssh-hosts" data-i18n-ph="host_ph" placeholder="user@server" /></label>
+                <datalist id="ssh-hosts"></datalist>
+                <label class="nat-row"><span data-i18n="ssh_port_label">SSH port</span> <input id="c-sport" type="number" value="22" /></label>
+                <label class="nat-row"><span data-i18n="user_label">User</span> <input id="c-user" data-i18n-ph="user_ph" placeholder="(user@host if blank)" /></label>
+                <label class="nat-row"><span data-i18n="password_label">Password</span> <input id="c-pass" type="password" data-i18n-ph="password_ph" placeholder="(key preferred)" /></label>
+                <label><span data-i18n="port_label">Remote daemon port</span> <input id="c-port" type="number" value="7331" /></label>
+                <label id="c-token-wrap" style="display:none"><span data-i18n="tcp_token_label">Daemon token</span> <input id="c-token" type="password" autocomplete="off" data-i18n-ph="tcp_token_ph" placeholder="(~/.agentcontrol/daemon.token)" /></label>
+                <div id="c-tcp-warn" class="dlg-warn" data-i18n="tcp_loop_warn" hidden></div>
+                <label id="c-args-wrap"><span data-i18n="ssh_args_label">SSH args</span> <input id="c-args" data-i18n-ph="ssh_args_ph" placeholder="-i ~/.ssh/key -p 22" /></label>
+                <label><span data-i18n="conn_color">Connection color</span>
+                  <select id="c-accent">
+                    <option value="" data-i18n="conn_color_auto">App accent (default)</option>
+                    <option value="sage" data-i18n="accent_sage">Sage</option>
+                    <option value="gold" data-i18n="accent_gold">Golden</option>
+                    <option value="grey" data-i18n="accent_grey">Grey</option>
+                    <option value="violet" data-i18n="accent_violet">Violet</option>
+                    <option value="red" data-i18n="accent_red">Red</option>
+                  </select>
+                </label>
+                <div id="c-pubkey-box" class="nat-row" hidden>
+                  <span data-i18n="pubkey_label">App public key (server authorized_keys)</span>
+                  <pre id="c-pubkey"></pre>
+                  <button id="c-pubkey-copy" type="button" data-i18n="copy">Copy</button>
+                </div>
+                <div class="cv-actions">
+                  <button type="button" id="cv-form-reset" data-i18n="cancel" hidden>Cancel</button>
+                  <button type="button" id="c-scan" data-i18n="qr_scan">Scan QR</button>
+                  <button type="button" id="cv-save" data-i18n="save" hidden>Save</button>
+                  <button id="c-go" data-i18n="connect">Connect</button>
+                </div>
+                <div id="cv-pacc" hidden>
+                  <h4 data-i18n="pair_acc_h">Paired access</h4>
+                  <p id="cv-pacc-state" class="qr-hint" hidden></p>
+                  <ul id="cv-pacc-list" class="pair-acc-list"></ul>
+                </div>
+              </section>
+              <details id="cv-logs" class="log-details">
+                <summary data-i18n="logs">Logs</summary>
+                <div class="log-bar">
+                  <select id="log-level" class="log-level" data-i18n-title="log_level" title="Minimum level">
+                    <option value="debug">DEBUG</option>
+                    <option value="info" selected>INFO</option>
+                    <option value="warn">WARN</option>
+                    <option value="error">ERROR</option>
+                  </select>
+                </div>
+                <pre id="log-view" class="log-view"></pre>
+              </details>
+            </div>
+          </div>
+          <div id="map-view" tabindex="-1" hidden>
+            <header id="map-head">
+              <span id="map-h" data-i18n="map_title">Map</span>
+              <span id="map-stats"></span>
+              <button id="map-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="map-body">
+              <svg id="map-svg"></svg>
+              <div id="map-legend">
+                <span><i class="lg-n lg-daemon"></i><b data-i18n="map_daemon">daemon</b></span>
+                <span><i class="lg-n lg-prog"></i><b data-i18n="map_leg_prog">program</b></span>
+                <span><i class="lg-n lg-agent"></i><b data-i18n="map_leg_agent">agent</b></span>
+                <span><i class="lg-e"></i><b data-i18n="map_leg_manage">manages</b></span>
+                <span><i class="lg-e lg-know"></i><b data-i18n="map_leg_know">observed</b></span>
+                <span><i class="lg-e lg-spawn"></i><b data-i18n="map_leg_spawn">spawned</b></span>
+                <span><i class="lg-flow"></i><b data-i18n="map_leg_flow">active flow</b></span>
+                <span><i class="lg-dot st-working"></i><b data-i18n="map_leg_working">working</b></span>
+                <span><i class="lg-dot st-waiting_input"></i><b data-i18n="map_leg_wait">waiting</b></span>
+                <span><i class="lg-dot st-idle"></i><b data-i18n="map_leg_idle">idle</b></span>
+                <span><i class="lg-dot st-error"></i><b data-i18n="map_leg_error">error</b></span>
+                <span><i class="lg-dot st-dead"></i><b data-i18n="map_leg_dead">dead</b></span>
+                <span id="map-nocomps" hidden></span>
+              </div>
+              <div id="map-info" hidden></div>
+            </div>
+          </div>
+          <div id="components-view" tabindex="-1" hidden>
+            <header id="comp-head">
+              <span id="comp-title" data-i18n="comp_h">Components</span>
+              <div id="comp-tabs" role="tablist">
+                <button type="button" id="comp-tab-list" class="comp-tab on" role="tab" data-i18n="comp_tab_list">Installed</button>
+                <button type="button" id="comp-tab-cat" class="comp-tab" role="tab" data-i18n="comp_tab_catalog">Catalog</button>
+              </div>
+              <span class="comp-sp"></span>
+              <button type="button" id="comp-add" data-icon="plus" data-i18n-title="comp_add" title="New component"></button>
+              <button type="button" id="comp-refresh" data-icon="refresh" data-i18n-title="comp_refresh" title="Refresh"></button>
+              <button type="button" id="comp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="comp-body">
+              <div id="comp-err" class="dlg-err" role="alert" hidden></div>
+              <div id="comp-list"></div>
+              <div id="comp-catalog" hidden></div>
+              <!-- « Configurer » : vue pleine page des paramètres déclarés
+                   (onglets par groupe, filtre, récapitulatif) — params-view.ts. -->
+              <div id="comp-params" hidden></div>
+              <div id="comp-editor" hidden>
+                <h4 id="comp-ed-title"></h4>
+                <div id="comp-ed-form">
+                  <div id="ce-config-warn" class="ce-config-warn" hidden></div>
+                  <label><span data-i18n="comp_f_name">Name</span> <input id="ce-name" autocomplete="off" spellcheck="false" /></label>
+                  <label><span data-i18n="comp_f_desc">Description</span> <input id="ce-desc" autocomplete="off" /></label>
+                  <div id="ce-params" hidden></div>
+                  <div id="ce-spec-fields">
+                    <label><span data-i18n="comp_f_kind">Kind</span>
+                      <select id="ce-kind">
+                        <option value="process">process</option>
+                        <option value="external">external</option>
+                        <option value="tool">tool</option>
+                      </select>
+                    </label>
+                    <label class="ce-f-cmd"><span data-i18n="comp_f_cmd">Command (one arg per line)</span> <textarea id="ce-cmd" rows="3" spellcheck="false"></textarea></label>
+                    <label class="ce-f-env"><span data-i18n="comp_f_env">Environment (KEY=VALUE per line)</span> <textarea id="ce-env" rows="3" spellcheck="false"></textarea></label>
+                    <label class="ce-f-cwd"><span data-i18n="workdir">Working directory</span> <input id="ce-cwd" autocomplete="off" spellcheck="false" /></label>
+                    <label class="ce-f-restart"><span data-i18n="comp_f_restart">Restart policy</span>
+                      <select id="ce-restart">
+                        <option value="on-failure">on-failure</option>
+                        <option value="always">always</option>
+                        <option value="never">never</option>
+                      </select>
+                    </label>
+                    <label class="ce-f-rsec"><span data-i18n="comp_f_restart_sec">Restart delay (s)</span> <input id="ce-rsec" type="number" min="0" max="60" /></label>
+                    <label><span data-i18n="comp_f_hc">Healthcheck</span>
+                      <select id="ce-hc">
+                        <option value="none">none</option>
+                        <option value="process">process</option>
+                        <option value="tcp">tcp</option>
+                        <option value="http">http</option>
+                        <option value="command">command</option>
+                      </select>
+                    </label>
+                    <label class="ce-f-hc-tcp"><span data-i18n="comp_f_hc_addr">TCP address</span> <input id="ce-hc-addr" placeholder="127.0.0.1:8080" autocomplete="off" spellcheck="false" /></label>
+                    <label class="ce-f-hc-http"><span data-i18n="comp_f_hc_url">HTTP URL</span> <input id="ce-hc-url" placeholder="http://127.0.0.1:8080/health" autocomplete="off" spellcheck="false" /></label>
+                    <label class="ce-f-hc-cmd"><span data-i18n="comp_f_hc_argv">Probe command (one arg per line)</span> <textarea id="ce-hc-argv" rows="2" spellcheck="false"></textarea></label>
+                  </div>
+                  <label class="ce-f-autostart chk-row">
+                    <input type="checkbox" id="ce-autostart" />
+                    <span data-i18n="comp_f_autostart">Start with the daemon</span>
+                  </label>
+                  <details id="ce-internals" hidden>
+                    <summary><span data-i18n="comp_internals">Internals (catalog-owned, read-only)</span></summary>
+                    <pre id="ce-internals-json"></pre>
+                  </details>
+                  <div class="cv-actions">
+                    <button type="button" id="ce-del" class="danger" hidden data-i18n="delete">Delete</button>
+                    <button type="button" id="ce-cancel" data-i18n="cancel">Cancel</button>
+                    <button type="button" id="ce-save" data-i18n="comp_save">Save</button>
+                  </div>
+                </div>
+              </div>
+              <div id="comp-logs-view" hidden>
+                <div id="comp-logs-bar">
+                  <button type="button" id="comp-logs-back" data-icon="back" data-i18n-title="comp_back" title="Back"></button>
+                  <span id="comp-logs-name"></span>
+                  <span id="comp-logs-trunc" hidden></span>
+                </div>
+                <pre id="comp-logs"></pre>
+              </div>
+            </div>
+          </div>
+          <div id="logs-view" tabindex="-1" hidden>
+            <header id="logs-head">
+              <span id="logs-title" data-i18n="logs">Logs</span>
+              <div id="logs-tabs" role="tablist">
+                <button type="button" id="logs-tab-client" class="comp-tab on" role="tab" data-i18n="logs_tab_client">Client</button>
+                <button type="button" id="logs-tab-daemon" class="comp-tab" role="tab" data-i18n="logs_tab_daemon">Daemon</button>
+              </div>
+              <span class="comp-sp"></span>
+              <select id="logs-conn" hidden data-i18n-title="logs_conn" title="Daemon connection"></select>
+              <select id="logs-level" class="log-level" data-i18n-title="log_level" title="Minimum level">
+                <option value="debug">DEBUG</option>
+                <option value="info" selected>INFO</option>
+                <option value="warn">WARN</option>
+                <option value="error">ERROR</option>
+              </select>
+              <button type="button" id="logs-pause" data-icon="stop" data-i18n-title="logs_pause" title="Pause follow"></button>
+              <button type="button" id="logs-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="logs-body">
+              <div id="logs-daemon-note" class="logs-note" hidden data-i18n="logs_daemon_old">Daemon too old for live logs.</div>
+              <pre id="logs-out" class="log-view logs-live"></pre>
+            </div>
+          </div>
+          <div id="plugin-view" tabindex="-1" hidden>
+            <header id="pv-head">
+              <span id="pv-title"></span>
+              <span class="comp-sp"></span>
+              <button type="button" id="pv-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <iframe id="pv-frame" sandbox="allow-scripts" title="Plugin view"></iframe>
+          </div>
+        </main>
+        <aside id="file-panel" hidden>
+          <div id="file-resize" title="Drag to resize"></div>
+          <header id="file-head">
+            <span id="file-path"></span>
+            <span id="file-title" hidden><b id="file-title-name"></b><small id="file-title-path"></small></span>
+            <button id="btn-tree" data-icon="panel" data-i18n-title="tree_title" title="File tree"></button>
+            <button id="btn-tree-refresh" hidden data-icon="refresh" data-i18n-title="tree_refresh" title="Refresh"></button>
+            <button id="btn-openpath" data-icon="search" data-i18n-title="qo_title" title="Quick open"></button>
+            <button id="file-close" data-icon="close"></button>
+          </header>
+          <div id="file-body">
+            <div id="ft-side" hidden>
+              <div id="ft-bar">
+                <span id="ft-ico" data-icon="search"></span>
+                <input id="ft-q" data-i18n-ph="file_search_ph" data-i18n-title="file_search_ph" placeholder="Search files…" autocomplete="off" spellcheck="false" />
+              </div>
+              <div id="ft-recent" hidden></div>
+              <div id="file-tree"></div>
+              <div id="file-hits" hidden></div>
+            </div>
+            <div id="ft-split" role="separator" aria-orientation="vertical" tabindex="0" data-i18n-title="ft_split" title="Drag to resize"></div>
+            <div id="file-viewer">
+              <div id="fv-bar">
+                <button id="fv-back" data-icon="back" data-i18n-title="menu_title" title="Back"></button>
+                <span id="fv-name"></span>
+                <span id="fv-status"></span>
+                <span class="fv-spacer"></span>
+                <button id="fv-zout" hidden data-icon="zoom-out" data-i18n-title="pdf_zoom_out" title="Zoom out"></button>
+                <button id="fv-zin" hidden data-icon="zoom-in" data-i18n-title="pdf_zoom_in" title="Zoom in"></button>
+                <button id="fv-loadall" hidden data-i18n="fv_loadall">load all</button>
+                <select id="fv-enc" title="Encoding"></select>
+                <button id="fv-md" hidden data-icon="code" data-i18n-title="md_view" title="Rendered"></button>
+                <button id="fv-edit" hidden data-i18n-title="fv_edit_title" title="Edit"><span class="fv-lbl" data-i18n="ctx_edit">Edit</span></button>
+                <button id="fv-save" hidden data-icon="check" data-i18n-title="fv_save_title" title="Save"></button>
+              </div>
+              <div id="fv-conflict" hidden>
+                <span id="fv-conflict-msg" data-i18n="conflict_msg">changed on disk</span>
+                <button id="fv-reload" data-i18n="conflict_reload">Reload</button>
+                <button id="fv-overwrite" data-i18n="conflict_overwrite">Overwrite</button>
+              </div>
+              <div id="file-main">
+                <pre id="file-view" class="syn"></pre>
+                <div id="file-md" class="md" hidden></div>
+                <div id="file-edwrap" hidden>
+                  <pre id="file-nums" aria-hidden="true"></pre>
+                  <div id="file-edscroll">
+                    <pre id="file-hl" class="syn" aria-hidden="true"></pre>
+                    <textarea id="file-edit" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+        <div id="fctx" hidden></div>
+        <div id="sctx" hidden></div>
+        <!-- Menu « Options » (desktop) et fenêtre « Mises à jour » ancrée
+             sous la pastille de version / le bouton Options. -->
+        <div id="tb-menu-pop" role="menu" hidden></div>
+        <div id="upd-pop" role="dialog" aria-labelledby="upd-h" hidden>
+          <div class="upd-head"><h4 id="upd-h" data-i18n="upd_h">Updates</h4>
+            <button type="button" id="upd-close" class="upd-x" data-icon="close" data-i18n-title="close" title="Close"></button></div>
+          <div class="upd-row" id="upd-app-row">
+            <span class="upd-l" data-i18n="upd_app">This app</span>
+            <span class="upd-v" id="upd-app-v">—</span>
+            <button type="button" id="upd-app-go" class="primary" hidden data-i18n="update_now">Update now</button>
+          </div>
+          <div class="upd-row" id="upd-daemon-row" hidden>
+            <span class="upd-l"><span data-i18n="upd_daemon">Daemon</span><span id="upd-daemon-host"></span></span>
+            <span class="upd-v" id="upd-daemon-v">—</span>
+            <button type="button" id="upd-daemon-go" hidden data-i18n="daemon_update_now">Update daemon</button>
+          </div>
+          <div class="upd-row" id="upd-chan-row">
+            <span class="upd-l" data-i18n="upd_channel">Channel</span>
+            <div class="s-seg" id="upd-chan" role="radiogroup" data-i18n-aria="upd_channel" aria-label="Channel">
+              <button type="button" role="radio" data-v="stable" data-i18n="upd_stable">Stable</button>
+              <button type="button" role="radio" data-v="rc" data-i18n="upd_rc">Pre-releases</button>
+            </div>
+          </div>
+          <p class="upd-status" id="upd-status" role="status"></p>
+          <div class="upd-foot">
+            <button type="button" id="upd-check" class="link" data-i18n="upd_check_now">Check now</button>
+            <button type="button" id="upd-notes" class="link" data-i18n="upd_notes">Release notes</button>
+          </div>
+        </div>
+        <div id="evctx" hidden></div>
+      </div>
+      <footer id="statusbar">
+        <span id="sb-left"></span>
+        <span class="sb-flex"></span>
+        <span id="sb-stats" title="Client process">—</span>
+      </footer>
+    </div>
+    <div class="resize-edge" id="re-right" data-dir="East"></div>
+    <div class="resize-edge" id="re-bottom" data-dir="South"></div>
+    <div class="resize-edge" id="re-corner" data-dir="SouthEast"></div>
+
+    <dialog id="dlg-agentcaps">
+      <form method="dialog">
+        <h3 data-i18n="agent_caps_h">Agent capabilities</h3>
+        <label id="ac-conn-wrap"><span data-i18n="server_label">Server</span> <select id="ac-conn"></select></label>
+        <div id="ac-list"></div>
+        <div id="ac-err" class="dlg-err" role="alert" hidden></div>
+        <menu>
+          <button type="button" id="ac-refresh" data-i18n="comp_refresh">Refresh</button>
+          <button id="ac-close" value="cancel" data-i18n="close">Close</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-new">
+      <form method="dialog" id="form-new">
+        <h3 data-i18n="new_session_h">New session</h3>
+        <label id="f-conn-wrap" hidden><span data-i18n="server_label">Server</span> <select id="f-conn"></select></label>
+        <label><span data-i18n="agent">Agent</span> <select id="f-agent"></select><span id="f-agent-spin" class="spin-ico" data-icon="loader" hidden></span></label>
+        <label><span data-i18n="workdir">Working directory</span> <input id="f-cwd" placeholder="/home/agent/projet" required /></label>
+        <label><span data-i18n="title_label">Title</span> <input id="f-title" data-i18n-ph="title_ph" placeholder="my session" /></label>
+        <label><span data-i18n="mode_label">Mode</span> <select id="f-mode-sel" hidden></select><input id="f-mode" data-i18n-ph="mode_ph" placeholder="normal (optional)" /></label>
+        <label><span data-i18n="model_label">Model</span> <select id="f-model-sel" hidden></select><input id="f-model" list="model-list" data-i18n-ph="model_ph" placeholder="default" /></label>
+        <label id="f-thought-wrap" hidden><span data-i18n="thought_label">Thinking</span> <select id="f-thought-sel"></select></label>
+        <datalist id="model-list"></datalist>
+        <label><span data-i18n="attach_label">Resume native ID</span> <input id="f-attach" data-i18n-ph="attach_ph" placeholder="(optional)" /></label>
+        <label><span data-i18n="prompt_label">Initial message</span> <textarea id="f-prompt" rows="3"></textarea></label>
+        <div id="f-status" class="dlg-status" role="status" hidden></div>
+        <div id="f-err" class="dlg-err" role="alert" hidden></div>
+        <menu>
+          <button type="button" id="f-cancel" data-i18n="cancel">Cancel</button>
+          <button id="f-create" value="default" data-i18n="create">Create</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-fusion">
+      <form method="dialog">
+        <h3 data-i18n="fusion_h">Fusion — two models in parallel</h3>
+        <label><span data-i18n="main_model">Main model</span> <select id="fu-a"></select></label>
+        <label><span data-i18n="main_effort">Main effort</span> <select id="fu-ea"></select></label>
+        <label><span data-i18n="sidekick">Sidekick</span> <select id="fu-b"></select></label>
+        <label><span data-i18n="sidekick_effort">Sidekick effort</span> <select id="fu-eb"></select></label>
+        <div id="fu-cost" class="dlg-status" hidden></div>
+        <div id="fu-err" class="dlg-err" role="alert" hidden></div>
+        <menu>
+          <button type="button" id="fu-cancel" data-i18n="cancel">Cancel</button>
+          <button id="fu-ok" value="default" data-i18n="apply">Apply</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-resume">
+      <form method="dialog">
+        <h3 data-i18n="resume_h">Agent sessions to resume</h3>
+        <input id="native-filter" type="text" autocomplete="off"
+               spellcheck="false" data-i18n-ph="resume_filter_ph" placeholder="Filter…" />
+        <div id="native-scroll">
+          <div id="native-list">…</div>
+          <div id="native-scrollbar"><div id="native-scroll-thumb"></div></div>
+        </div>
+        <menu><button value="cancel" data-i18n="close">Close</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-first">
+      <form method="dialog">
+        <h3 data-i18n="first_post">First post</h3>
+        <div id="first-meta"></div>
+        <pre id="first-body"></pre>
+        <menu>
+          <button type="button" id="first-copy" data-i18n="copy">Copy</button>
+          <button value="ok" data-i18n="close">Close</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-filedirty">
+      <form method="dialog">
+        <h3 data-i18n="dirty_h">Unsaved changes</h3>
+        <p data-i18n="dirty_msg">Discard the modified buffer?</p>
+        <menu>
+          <button type="button" id="fd-stay" data-i18n="dirty_stay">Keep editing</button>
+          <button type="button" id="fd-discard" data-i18n="dirty_discard">Discard</button>
+          <button type="button" id="fd-save" data-i18n="dirty_save">Save</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <!-- Paramètres / paramètres de composant : modifications non
+         enregistrées à la fermeture — rester / ignorer / enregistrer. -->
+    <dialog id="dlg-unsaved">
+      <form method="dialog">
+        <h3 data-i18n="unsaved_h">Unsaved changes</h3>
+        <p id="unsaved-msg" class="dlg-msg"></p>
+        <menu>
+          <button type="button" id="us-stay" data-i18n="unsaved_stay">Keep editing</button>
+          <button type="button" id="us-discard" data-i18n="dirty_discard">Discard</button>
+          <button type="button" id="us-save" class="primary" data-i18n="dirty_save">Save</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-group">
+      <form method="dialog">
+        <h3 data-i18n="group_h">Session group</h3>
+        <input id="g-name" data-i18n-ph="group_name_ph" placeholder="Group name…" list="g-list" autocomplete="off" />
+        <datalist id="g-list"></datalist>
+        <menu>
+          <button type="button" id="g-none" data-i18n="group_none">No group</button>
+          <button type="button" id="g-cancel" data-i18n="cancel">Cancel</button>
+          <button id="g-ok" value="ok" data-i18n="ok">OK</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-grpdel">
+      <form method="dialog">
+        <h3 data-i18n="grpdel_h">Delete group and its sessions</h3>
+        <p id="gd-summary"></p>
+        <div id="gd-warns"></div>
+        <menu>
+          <button type="button" id="gd-cancel" data-i18n="cancel">Cancel</button>
+          <button id="gd-ok" value="ok" class="danger" data-i18n="grpdel_ok">Delete</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-cparams">
+      <form method="dialog">
+        <h3 id="cp-title"></h3>
+        <div id="cp-fields"></div>
+        <div id="cp-err" class="dlg-err" role="alert" hidden></div>
+        <menu>
+          <button type="button" id="cp-cancel" data-i18n="cancel">Cancel</button>
+          <button id="cp-ok" value="default" data-i18n="apply">Apply</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <div id="toasts"></div>
+
+    <dialog id="dlg-qr">
+      <form method="dialog">
+        <h3 data-i18n="qr_share_h">Pair a device</h3>
+        <div class="qr-ep">
+          <input id="qr-user" autocomplete="off" spellcheck="false" data-i18n-ph="qr_user_ph" placeholder="user" />
+          <input id="qr-host" autocomplete="off" spellcheck="false" data-i18n-ph="host_ph" placeholder="server" />
+          <input id="qr-port" type="number" min="1" max="65535" value="22" />
+          <button type="button" id="qr-gen" data-i18n="qr_gen">Generate</button>
+        </div>
+        <canvas id="qr-canvas" hidden></canvas>
+        <p id="qr-ttl" class="qr-ttl"></p>
+        <p id="qr-status" class="qr-status" hidden></p>
+        <p id="qr-warn" class="qr-warn" hidden></p>
+        <details class="qr-alt">
+          <summary data-i18n="qr_alt_h">Other methods</summary>
+          <button type="button" id="qr-alt-creds" data-i18n="qr_alt_creds">Permanent credentials (full access)</button>
+          <button type="button" id="qr-alt-ep" data-i18n="qr_alt_ep">Endpoint only (manual key install)</button>
+        </details>
+        <details class="qr-devs">
+          <summary data-i18n="qr_devs_h">Paired devices</summary>
+          <p id="qr-dev-empty" class="qr-hint" data-i18n="pair_acc_none" hidden>no managed access</p>
+          <ul id="qr-dev-list" class="pair-acc-list"></ul>
+        </details>
+        <menu>
+          <button value="close" data-i18n="close">Close</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-scan">
+      <form method="dialog">
+        <h3 data-i18n="qr_scan_h">Scan a pairing QR</h3>
+        <video id="scan-video" playsinline muted></video>
+        <p class="qr-hint" data-i18n="qr_scan_hint">Point the camera at the QR shown on the other device.</p>
+        <menu>
+          <button value="cancel" data-i18n="cancel">Cancel</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-pair">
+      <form method="dialog">
+        <h3 data-i18n="pair_h">Pair this server?</h3>
+        <p id="pair-msg"></p>
+        <menu>
+          <button value="cancel" data-i18n="cancel">Cancel</button>
+          <button id="pair-go" type="button" data-i18n="pair_go">Save &amp; connect</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-dupdate">
+      <form method="dialog">
+        <h3 data-i18n="dupdate_h">Update daemon</h3>
+        <p id="dupdate-msg"></p>
+        <menu>
+          <button value="later" data-i18n="later">Later</button>
+          <button id="dupdate-go" type="button" data-i18n="update_now">Update now</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-outdated">
+      <form method="dialog">
+        <h3 data-i18n="outdated_h">Update required</h3>
+        <p id="outdated-msg"></p>
+        <menu>
+          <button value="later" data-i18n="later">Later</button>
+          <button id="outdated-update" type="button" data-i18n="update_now">Update now</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-quick">
+      <input id="qo-input" autocomplete="off" spellcheck="false"
+             role="combobox" aria-expanded="true" aria-controls="qo-list" aria-autocomplete="list" />
+      <div id="qo-list" role="listbox"></div>
+      <div id="qo-foot" data-i18n="qo_hint"></div>
+    </dialog>
+
+    <dialog id="dlg-about">
+      <form method="dialog">
+        <h3 data-i18n="about_h">About</h3>
+        <div id="about-body">
+          <span id="about-gem"></span>
+          <div id="about-info">
+            <div><b>AgentControl</b></div>
+            <div class="about-row" id="about-client-row">
+              <span><span data-i18n="about_client">Client</span> : <b id="about-version" class="about-ver">v0.0.1</b></span>
+            </div>
+            <div class="about-row" id="about-daemon-row" hidden>
+              <span><span data-i18n="about_daemon">Daemon</span> : <b id="about-daemon-ver" class="about-ver">—</b><span id="about-daemon-host"></span></span>
+            </div>
+            <div class="about-row" id="about-release-row" hidden>
+              <span><span data-i18n="about_release">Latest release</span> : <b id="about-remote-ver" class="about-ver"></b></span>
+            </div>
+            <div><a id="about-gh" href="https://github.com/Wameuh/AgentControl">github.com/Wameuh/AgentControl</a></div>
+            <div class="about-eng" id="about-engine"></div>
+            <div><span data-i18n="license_label">License</span> : MIT</div>
+          </div>
+        </div>
+        <menu><button type="button" id="about-updates" data-i18n="about_updates">Updates…</button><button value="cancel" data-i18n="close">Close</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-mem">
+      <form method="dialog">
+        <h3 data-i18n="mem_h">Memory</h3>
+        <div id="mem-body"></div>
+        <menu><button value="cancel" data-i18n="close">Close</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-session">
+      <form method="dialog">
+        <div id="ss-head"></div>
+        <div id="ss-opts"></div>
+        <div id="ss-acts"></div>
+        <menu><button value="cancel" data-i18n="close">Close</button></menu>
+      </form>
+    </dialog>
+
+  </body>
+</html>
