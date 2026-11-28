@@ -714,8 +714,23 @@ if (await ev(() => !document.querySelector("#file-view")?.textContent.trim() &&
 }
 
 // ── Mode édition + dirty guard au back ───────────────────────────────────────
+// Le fichier texte non-md s'ouvre DÉJÀ dans l'éditeur (édition directe,
+// sans focus → pas de clavier virtuel au tap du nœud). fv-edit = retour
+// lecture, pas prérequis pour taper. Si la session active n'est pas
+// s1 (filtre groupe/état), son cwd diffère du mock /home/agent/api →
+// editable() faux, fv-edit caché : le dirty guard n'est pas testable.
 await step("a16-fileedit", async () => {
-  await tap("#fv-edit", 350);
+  const canEdit = await ev(() => !document.getElementById("fv-edit")?.hidden);
+  if (!canEdit) {
+    console.log("  · a16-fileedit : fichier non éditable (cwd session ≠ mock) — dirty guard non testé");
+    await shot("a16-fileedit");
+    await collect("a16-fileedit");
+    return;
+  }
+  if (!(await ev(() => !document.getElementById("file-edwrap")?.hidden &&
+                    document.getElementById("fv-edit")?.classList.contains("on")))) {
+    V("a16-fileedit", "direct-edit", "fichier texte non-md non ouvert en édition directe");
+  }
   await shot("a16-fileedit");
   await collect("a16-fileedit");
   await ev(() => {

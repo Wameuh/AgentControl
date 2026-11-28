@@ -251,7 +251,7 @@ await sleep(700);
 check("flink ../client.ts → client.ts (résolution baseDir)", (await p.evaluate(() => document.querySelector("#file-path").textContent)) === "client.ts",
   await p.evaluate(() => document.querySelector("#file-path").textContent));
 check("fv-md masqué sur .ts", !(await vis("#fv-md")));
-check("file-view source affiché sur .ts", await vis("#file-view"));
+check(".ts : éditeur direct visible (file-view masqué)", await vis("#file-edwrap") && !(await vis("#file-view")));
 
 // Retour sur deep.md → édition : split source/aperçu live (desktop)
 await p.evaluate(() => [...document.querySelectorAll(".fnode.is-dir")].find((n) => n.textContent.includes("docs"))?.click());
@@ -317,15 +317,30 @@ check("sortie édition : split retiré", await p.evaluate(() => !document.queryS
 check("sortie édition : aperçu contient le texte sauvé", await p.evaluate(() => document.querySelector("#file-md").textContent.includes("SAVE-ME")));
 check("sortie édition : rendu restauré", await vis("#file-md"));
 
-// Fichier non-md (.ts) : édition sans split ni aperçu
+// Fichier non-md (.ts) : édition directe — le contenu affiché EST
+// l'éditeur, plus besoin du bouton « Éditer » (qui devient le retour
+// en lecture). fv-edit visible et actif (.on) = indicateur d'état.
 await p.evaluate(() => [...document.querySelectorAll(".fnode")].find((n) => n.textContent.includes("client.ts"))?.click());
 await sleep(700);
+check("client.ts : edwrap visible d'office", await vis("#file-edwrap"));
+check("client.ts : file-view masqué", !(await vis("#file-view")));
 check("client.ts : fv-edit visible", await vis("#fv-edit"));
-await click("#fv-edit"); await sleep(300);
-check(".ts édition : edwrap visible", await vis("#file-edwrap"));
+check("client.ts : fv-edit actif (.on)", await p.evaluate(() => document.querySelector("#fv-edit").classList.contains("on")));
 check(".ts édition : pas de split", await p.evaluate(() => !document.querySelector("#file-main").classList.contains("fv-split")));
 check(".ts édition : fv-md masqué", !(await vis("#fv-md")));
+// Frappe directe → dirty, Ctrl+S → save (mêmes gardes qu'avant).
+await p.click("#file-edit");
+await p.keyboard.type(" DIRECT-EDIT");
+await sleep(200);
+check(".ts : frappe → dirty", await p.evaluate(() => document.querySelector("#fv-status").textContent.includes("modified")));
+await p.keyboard.down("Control"); await p.keyboard.press("s"); await p.keyboard.up("Control"); await sleep(400);
+check(".ts : Ctrl+S → saved", await p.evaluate(() => document.querySelector("#fv-status").textContent.includes("saved")),
+  await p.evaluate(() => document.querySelector("#fv-status").textContent));
+// fv-edit = retour en lecture (buffer propre → pas de dialog).
 await click("#fv-edit"); await sleep(300);
+check(".ts : sortie → file-view affiché", await vis("#file-view"));
+check(".ts : sortie → edwrap masqué", !(await vis("#file-edwrap")));
+check(".ts : sortie → contenu relu", await p.evaluate(() => document.querySelector("#file-view").textContent.includes("DIRECT-EDIT")));
 
 // read_file en échec sur un .md : l'erreur doit être visible en vue
 // source (pas de « … » éternel ni de rendu partiel silencieux).
