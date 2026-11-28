@@ -390,6 +390,8 @@ export const fr: Record<Key, string> = {
   term_slow: "[toujours en connexion — liaison lente…]",
   term_unsupported: "Démon trop ancien pour le terminal — mettez-le à jour.",
   tree_refresh: "Rafraîchir l'arborescence", tree_empty: "(vide)",
+  tree_float: "Arborescence", tree_pop: "Détacher l'arborescence dans une fenêtre flottante",
+  tree_dock: "Raccrocher l'arborescence au panneau", ft_float_rz: "Glisser pour redimensionner — double-clic pour réinitialiser",
   file_search_ph: "Rechercher par nom de fichier…", file_search_none: "Aucun résultat", ft_split: "Glisser pour redimensionner — double-clic pour réinitialiser",
   file_search_trunc: "Résultats tronqués — affinez la recherche",
   file_search_local: "Démon ancien — recherche limitée aux dossiers ouverts",

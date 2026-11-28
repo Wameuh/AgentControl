@@ -752,6 +752,7 @@
             <span id="file-path"></span>
             <span id="file-title" hidden><b id="file-title-name"></b><small id="file-title-path"></small></span>
             <button id="btn-tree" data-icon="panel" data-i18n-title="tree_title" title="File tree"></button>
+            <button id="btn-tree-pop" data-icon="external" data-i18n-title="tree_pop" title="Pop out tree"></button>
             <button id="btn-tree-refresh" hidden data-icon="refresh" data-i18n-title="tree_refresh" title="Refresh"></button>
             <button id="btn-openpath" data-icon="search" data-i18n-title="qo_title" title="Quick open"></button>
             <button id="file-close" data-icon="close"></button>
@@ -800,6 +801,18 @@
             </div>
           </div>
         </aside>
+        <!-- Fenêtre flottante de l'arborescence : #ft-side y est déplacé
+             quand l'utilisateur la détache (desktop seulement — le bouton
+             pop-out est masqué sur Android). -->
+        <div id="ft-float" hidden>
+          <div id="ft-float-bar">
+            <span id="ft-float-title" data-i18n="tree_float">File tree</span>
+            <span class="ff-sp"></span>
+            <button id="ft-float-dock" data-icon="dock" data-i18n-title="tree_dock" title="Dock to panel"></button>
+            <button id="ft-float-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+          </div>
+          <div id="ft-float-rz" data-i18n-title="ft_float_rz" title="Drag to resize"></div>
+        </div>
         <div id="fctx" hidden></div>
         <div id="sctx" hidden></div>
         <!-- Menu « Options » (desktop) et fenêtre « Mises à jour » ancrée

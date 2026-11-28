@@ -390,6 +390,8 @@ export const en = {
   term_slow: "[still connecting — slow link…]",
   term_unsupported: "Daemon too old for the terminal — update it first.",
   tree_refresh: "Refresh tree", tree_empty: "(empty)",
+  tree_float: "File tree", tree_pop: "Pop out the tree into a floating window",
+  tree_dock: "Dock the tree back into the panel", ft_float_rz: "Drag to resize — double-click to reset",
   file_search_ph: "Search files by name…", file_search_none: "No match", ft_split: "Drag to resize — double-click to reset",
   file_search_trunc: "Results truncated — refine the search",
   file_search_local: "Older daemon — searching open folders only",

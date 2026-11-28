@@ -393,6 +393,8 @@ export const es: Record<Key, string> = {
   term_slow: "[aún conectando — enlace lento…]",
   term_unsupported: "Daemon demasiado antiguo para el terminal — actualícelo primero.",
   tree_refresh: "Refrescar el árbol", tree_empty: "(vacío)",
+  tree_float: "Árbol de archivos", tree_pop: "Desacoplar el árbol en una ventana flotante",
+  tree_dock: "Acoplar el árbol de nuevo al panel", ft_float_rz: "Arrastra para redimensionar — doble clic para restablecer",
   file_search_ph: "Buscar archivos por nombre…", file_search_none: "Sin coincidencias", ft_split: "Arrastra para redimensionar — doble clic para restablecer",
   file_search_trunc: "Resultados truncados — refine la búsqueda",
   file_search_local: "Daemon antiguo — buscando solo en carpetas abiertas",
