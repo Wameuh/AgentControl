@@ -24,6 +24,10 @@ const SHAPES: Record<string, string> = {
   refresh:
     '<path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/>' +
     '<path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/>',
+  // Demi-refresh (une seule flèche, en bas à gauche) — pour les actions de
+  // « re-sondage » (caps modèles/modes) à distinguer du reload de session.
+  sync:
+    '<path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/>',
   play: '<path d="M8 5v14l11-7Z"/>',
   merge:
     '<circle cx="6" cy="6" r="2.7"/><circle cx="18" cy="18" r="2.7"/>' +
@@ -40,6 +44,11 @@ const SHAPES: Record<string, string> = {
   terminal:
     '<rect x="3" y="4.5" width="18" height="15" rx="2"/>' +
     '<path d="m6.5 9 3.5 3-3.5 3"/><path d="M12.5 15.5H17"/>',
+  // Terminal réduit + badge « + » — « nouveau shell » (pas un reload).
+  "term-new":
+    '<rect x="2.5" y="5" width="14" height="11.5" rx="2"/>' +
+    '<path d="m5.5 8.5 2.6 2.3-2.6 2.3"/><path d="M9.6 13h2.9"/>' +
+    '<path d="M19.5 2.5v5M17 5h5"/>',
   panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9.5 4v16"/>',
   down: '<path d="M12 4v12"/><path d="m6 12 6 6 6-6"/><path d="M5 21h14"/>',
   steer: '<path d="m15 10 5 5-5 5"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/>',
