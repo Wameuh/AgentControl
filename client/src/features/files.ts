@@ -210,7 +210,12 @@ export class FileExplorer {
       nav.push("files");
       // Ré-ouverture : les watches ont été lâchés à la fermeture et
       // l'arbre affiché peut être périmé — reload si la colonne est on.
-      if (this.treeOpen) this.treeReady = this.loadTreeRoot();
+      // Exception : arbre dans le flottant détaché — ses watches sont
+      // restées actives à la fermeture du panneau → pas périmé, et un
+      // reload détruirait les dossiers dépliés à chaque fichier ouvert.
+      if (this.treeOpen && $("ft-float").hidden) {
+        this.treeReady = this.loadTreeRoot();
+      }
     }
     // Android : le viewer glisse par-dessus la liste (navigation plein écran).
     if (isAndroid()) {
@@ -1885,7 +1890,10 @@ export class FileExplorer {
           const w = Math.max(Number(p.style.width.replace("px", "")) || 0, 620);
           p.style.width = `${Math.min(w, window.innerWidth - 120)}px`;
         }
-        this.setTreeVisible(true);
+        // Arbre déjà affiché dans le flottant détaché : setTreeVisible
+        // rechargerait l'arbre (watches actives → pas périmé) et
+        // viderait la recherche — on saute.
+        if ($("ft-float").hidden || !this.treeOpen) this.setTreeVisible(true);
       } else {
         this.closeFilePanel();
       }

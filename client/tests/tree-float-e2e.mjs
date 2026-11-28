@@ -91,6 +91,47 @@ check("recherche flottante : hits affichés, arbre masqué", await p.evaluate(()
   document.getElementById("file-tree").hidden));
 await shot("float-search");
 
+// Régression review : ouvrir un fichier depuis le flottant panneau
+// fermé ne doit PAS recharger l'arbre (dossiers dépliés conservés).
+await p.evaluate(() => {
+  const q = document.getElementById("ft-q");
+  q.value = "";
+  q.dispatchEvent(new Event("input", { bubbles: true }));
+});
+await sleep(500);
+// Déplie « src » dans le flottant.
+await p.evaluate(() => {
+  const n = [...document.querySelectorAll("#ft-float .fnode.is-dir")]
+    .find((x) => x.dataset.rel === "src");
+  n?.click();
+});
+await sleep(500);
+check("src déplié dans le flottant", await p.evaluate(() => {
+  const n = [...document.querySelectorAll("#ft-float .fnode.is-dir")]
+    .find((x) => x.dataset.rel === "src");
+  return n?.nextElementSibling?.classList.contains("fchildren") ?? false;
+}));
+// Ferme le panneau fichiers puis clique un fichier du flottant.
+await p.evaluate(() => document.getElementById("file-close").click());
+await sleep(500);
+check("panneau fermé, flottant toujours visible", await p.evaluate(() =>
+  document.getElementById("file-panel").hidden &&
+  !document.getElementById("ft-float").hidden));
+await p.evaluate(() => {
+  [...document.querySelectorAll("#ft-float .fnode")]
+    .find((n) => n.dataset.rel === "src/client.ts")?.click();
+});
+await sleep(800);
+check("fichier ouvert : panneau rouvert", await vis("#file-panel"));
+check("fichier ouvert : arbre toujours dans le flottant",
+  (await state()).sideParent === "ft-float");
+check("fichier ouvert : src toujours déplié", await p.evaluate(() => {
+  const n = [...document.querySelectorAll("#ft-float .fnode.is-dir")]
+    .find((x) => x.dataset.rel === "src");
+  return n?.nextElementSibling?.classList.contains("fchildren") ?? false;
+}));
+await shot("float-file-open");
+
 // Dock retour → colonne dans #file-body, géométrie conservée pour plus tard.
 await p.evaluate(() => document.getElementById("ft-float-dock").click());
 await sleep(300);
