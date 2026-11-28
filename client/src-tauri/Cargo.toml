@@ -1,6 +1,6 @@
 [package]
 name = "agentcontrol"
-version = "0.10.3"
+version = "0.11.0"
 edition = "2021"
 build = "build.rs"
 
@@ -28,11 +28,14 @@ proto = { path = "../../crates/proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+# Launchers open_url_ext (Linux : xdg-open/gio/kde-open + $BROWSER) —
+# déjà dans l'arbre via tauri-plugin-opener.
+open = "5"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
-
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# HTTP releases — utilisé par ensure_daemon AUSSI sur Android (le
+# téléchargement + la vérif d'intégrité y vivent, I1).
 ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -40,6 +43,8 @@ ureq = { version = "2.12", default-features = false, features = ["json", "tls"] 
 # connections.json) — desktop inchangé (pas de dépendance).
 tauri-plugin-ac-keystore = { path = "../../plugins/ac-keystore" }
 tauri-plugin-ac-device = { path = "../../plugins/ac-device" }
+# Retour haptique (Y4) — plugin officiel, Android uniquement.
+tauri-plugin-haptics = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }

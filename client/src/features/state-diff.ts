@@ -76,7 +76,7 @@ class StateDiff {
         try {
           cb(prev, s);
         } catch (e) {
-          logUi("error", `state-diff: canal brut en échec: ${e}`);
+          logUi("error", `state-diff: raw channel failed: ${e}`);
         }
       }
       const kind = classify(prev, s.state);
@@ -87,7 +87,7 @@ class StateDiff {
           try {
             cb(kind, s);
           } catch (e) {
-            logUi("error", `state-diff: canal d'alerte en échec: ${e}`);
+            logUi("error", `state-diff: alert channel failed: ${e}`);
           }
         }
       }
@@ -99,7 +99,7 @@ class StateDiff {
           try {
             cb(k);
           } catch (e) {
-            logUi("error", `state-diff: canal gone en échec: ${e}`);
+            logUi("error", `state-diff: gone channel failed: ${e}`);
           }
         }
       }

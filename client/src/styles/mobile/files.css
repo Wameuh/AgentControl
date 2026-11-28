@@ -1,0 +1,108 @@
+/* ── Android — explorateur de fichiers + viewer ───────────────────────── */
+/* Viewer de fichier : colonne desktop (barre d'outils + contenu), overlay
+   plein écran Android. Les styles du bureau vivent dans files.css. */
+#fv-back, #fv-name { display: none; }
+/* Explorateur = page plein écran ; le viewer glisse par-dessus la liste. */
+body.android #file-panel {
+  position: fixed; inset: 0; z-index: 45; width: auto; max-width: none;
+  border-left: 0;
+}
+body.android #file-resize { display: none; }
+body.android #file-head { min-height: 52px; gap: 6px; }
+body.android #file-head button { min-width: 44px; min-height: 44px; font-size: 17px; }
+/* Barre aux conventions Android : retour ‹ en tête (icône posée par
+   applyAndroidChrome), titre dossier + chemin à la place de la ligne
+   mono #file-path, toggle d'arbre sans objet (l'arbre EST la page). */
+body.android #file-close { order: -1; }
+body.android #file-path { display: none; }
+body.android #file-title:not([hidden]) {
+  display: flex; flex-direction: column; flex: 1; min-width: 0; line-height: 1.25;
+}
+body.android #file-title-name, body.android #file-title-path {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+body.android #file-title-name { font-size: 16px; font-weight: 500; color: var(--ink); }
+body.android #file-title-path {
+  font-family: Mono, ui-monospace, monospace; font-size: 12px; color: var(--dim);
+}
+body.android #btn-tree { display: none !important; }
+/* Pas de pop-out sur mobile : la colonne est déjà la page entière. */
+body.android #btn-tree-pop, body.android #ft-float { display: none !important; }
+/* Raccourcis « fichiers récents » : rangée à défilement horizontal au
+   sommet de l'arbre (une puce par ouverture récente de la session). */
+body.android #ft-recent:not([hidden]) {
+  display: flex; gap: 6px; overflow-x: auto; padding: 4px 10px 8px;
+}
+body.android .ft-rec {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  min-height: 44px; padding: 0 12px; border-radius: 10px;
+  background: rgba(var(--tint-rgb), .06);
+  font-family: Mono, ui-monospace, monospace; font-size: 12px; color: var(--ink);
+}
+body.android .ft-rec .ic { width: 14px; height: 14px; flex: none; color: var(--dim); }
+/* max-width : le plafond desktop (calc(100% - 200px), place gardée à la
+   preview du split) amputait l'explorateur de 200 px sur téléphone. */
+body.android #ft-side:not([hidden]) { flex: 1; width: auto; max-width: none; }
+/* Pas de split horizontal sur Android : explorateur plein écran,
+   viewer en overlay — la poignée desktop reste masquée. */
+body.android #file-body #ft-split { display: none; }
+body.android #ft-bar { padding: 8px 10px; }
+body.android #ft-ico { left: 18px; }
+body.android #ft-ico .ic { width: 15px; height: 15px; }
+body.android #ft-q { font-size: 15px; min-height: 44px; padding-left: 30px; }
+body.android .fnode { padding: 9px 8px 9px 0; font-size: 15px; min-height: 44px; }
+body.android .fhit { padding: 9px 8px; font-size: 15px; min-height: 44px; }
+body.android .fhit .fhdir, body.android .fhit .fsize { font-size: 12px; }
+body.android .froot { font-size: 12px; }
+/* Icônes teintées par type (data-rel porte déjà l'extension ; la règle
+   dossier est en dernier — un dossier « x.ts » garde la couleur accent). */
+body.android .fnode[data-rel$=".ts"] .fico, body.android .fnode[data-rel$=".rs"] .fico,
+body.android .fnode[data-rel$=".js"] .fico, body.android .fnode[data-rel$=".json"] .fico,
+body.android .fnode[data-rel$=".toml"] .fico { color: var(--sage); }
+body.android .fnode[data-rel$=".md"] .fico { color: var(--violet); }
+body.android .fnode[data-rel$=".pdf"] .fico { color: var(--red); }
+body.android .fnode[data-rel$=".png"] .fico, body.android .fnode[data-rel$=".jpg"] .fico,
+body.android .fnode[data-rel$=".svg"] .fico, body.android .fnode[data-rel$=".mp4"] .fico { color: var(--opal); }
+body.android .fnode.is-dir .fico { color: var(--accent); }
+body.android .fnode .fsize { font-size: 12px; }
+body.android .fempty, body.android .ferr { font-size: 12px; }
+body.android #fv-status, body.android #fv-loadall { font-size: 12px; }
+body.android #file-viewer {
+  display: flex; flex-direction: column;
+  position: fixed; inset: 0; z-index: 50;
+  background: var(--panel-solid);
+  transform: translateX(102%); visibility: hidden;
+  transition: transform .2s ease, visibility 0s .2s;
+}
+body.android #file-viewer.open {
+  transform: none; visibility: visible; transition: transform .2s ease;
+}
+body.android #fv-bar {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  min-height: 52px; padding: 0 10px;
+  border-bottom: 1px solid var(--line);
+}
+body.android #fv-back {
+  display: block;
+  font-size: 26px; line-height: 1; min-width: 44px; min-height: 44px;
+  padding: 6px 10px; background: none; border: 0; color: var(--fg);
+}
+body.android #fv-name {
+  display: block;
+  font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+body.android #fv-bar button { min-width: 44px; min-height: 44px; }
+body.android #fv-bar select { min-height: 44px; font-size: 13px; }
+body.android #fv-enc { max-width: 96px; }
+/* Save épinglé au bord droit : visible même si la barre défile. */
+body.android #fv-save {
+  position: sticky; right: 0; background: var(--panel-solid);
+}
+body.android #file-view { flex: 1; overflow: auto; font-size: 13px; margin: 0; padding: 12px; }
+body.android #file-hl, body.android #file-edit { font-size: 13px; padding: 12px; }
+body.android #file-nums { font-size: 13px; padding: 12px 6px 12px 12px; }
+body.android #fv-conflict { font-size: 13px; padding: 8px 12px; }
+body.android #fv-conflict button { min-height: 44px; padding: 6px 12px; font-size: 13px; }
+
+/* Racine de l'arbre fichiers */
+body.android .froot { min-height: 44px; }

@@ -24,6 +24,43 @@ impl<R: Runtime> Device<R> {
             )
             .map_err(Into::into)
     }
+
+    /// Barres système lisibles suivant le thème (Y4) — `@Command
+    /// setSystemBars` Kotlin : `light: true` = icônes sombres (thème
+    /// clair), `false` = icônes claires (thème sombre).
+    pub fn set_system_bars(&self, light: bool) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin(
+                "setSystemBars",
+                serde_json::json!({ "light": light }),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Lance l'installeur système sur l'APK `path` (déjà téléchargé et
+    /// vérifié côté client — `update_client` Android) — `@Command
+    /// installApk` Kotlin : FileProvider + intent VIEW, permission
+    /// « apps inconnues » et reprise après retour gérées par le plugin.
+    /// `notify_*` = texte localisé de la notification de secours quand
+    /// l'app est en arrière-plan. Retour brut
+    /// `{"status": "launched"|"pending"|"permission_required"}`.
+    pub fn install_apk(
+        &self,
+        path: &str,
+        notify_title: &str,
+        notify_text: &str,
+    ) -> crate::Result<serde_json::Value> {
+        self.0
+            .run_mobile_plugin(
+                "installApk",
+                serde_json::json!({
+                    "path": path,
+                    "notify_title": notify_title,
+                    "notify_text": notify_text,
+                }),
+            )
+            .map_err(Into::into)
+    }
 }
 
 /// Enregistre la classe Kotlin auprès du runtime Android.

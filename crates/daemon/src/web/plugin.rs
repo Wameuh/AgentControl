@@ -94,7 +94,7 @@ pub async fn serve_plugin(
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
-        return http::respond_err(stream, 404, "introuvable").await;
+        return http::respond_err(stream, 404, "not found").await;
     }
     // "" ou "/" → index.html ; pas de listing de dossier.
     let mut rel = rel.to_string();
@@ -104,16 +104,16 @@ pub async fn serve_plugin(
         rel.push_str("index.html");
     }
     let Some(dir) = daemon.components.plugin_view_dir_of(name).await else {
-        return http::respond_err(stream, 404, "pas de vue pour ce composant").await;
+        return http::respond_err(stream, 404, "no view for this component").await;
     };
     let Some(file) = safe_join(&dir, &rel) else {
-        return http::respond_err(stream, 404, "introuvable").await;
+        return http::respond_err(stream, 404, "not found").await;
     };
     // La racine est canonicalisée mais pas la cible : un symlink posé
     // dans le dossier de vue ne doit pas servir hors de la racine.
     let file = match file.canonicalize() {
         Ok(f) if f.starts_with(&dir) => f,
-        _ => return http::respond_err(stream, 404, "introuvable").await,
+        _ => return http::respond_err(stream, 404, "not found").await,
     };
     // Un `view_dir` large (`.`/root, `~`, `..`) est une config de
     // confiance, mais les fichiers porteurs de secrets du démon ne
@@ -122,7 +122,7 @@ pub async fn serve_plugin(
         .file_name()
         .is_some_and(|n| is_sensitive_name(&n.to_string_lossy()))
     {
-        return http::respond_err(stream, 404, "introuvable").await;
+        return http::respond_err(stream, 404, "not found").await;
     }
     // Tout document HTML exige le token de vue (le chemin direct
     // `/plugin/<name>/index.html` compris — pas seulement l'URL
@@ -135,15 +135,15 @@ pub async fn serve_plugin(
     if is_doc {
         let token = http::qparam(q, "token").unwrap_or_default();
         if !daemon.components.view_token_valid(name, token) {
-            return http::respond_err(stream, 401, "token de vue invalide").await;
+            return http::respond_err(stream, 401, "invalid view token").await;
         }
     }
     let meta = match tokio::fs::metadata(&file).await {
         Ok(m) if m.is_file() => m,
-        _ => return http::respond_err(stream, 404, "introuvable").await,
+        _ => return http::respond_err(stream, 404, "not found").await,
     };
     if meta.len() > ASSET_MAX {
-        return http::respond_err(stream, 413, "asset trop gros").await;
+        return http::respond_err(stream, 413, "asset too large").await;
     }
     // Origine concrète de la requête pour la CSP (cf. plugin_csp) —
     // Host absent (HTTP/1.0) → 'self' seul. IPv6 : ne bracket que le

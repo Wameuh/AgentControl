@@ -6,27 +6,54 @@
 //! indépendante d'agentbacklog et du cycle — un agentbacklog absent ou
 //! un cycle en erreur ne coupe pas les reviews) :
 //!
-//! - PR ouvertes à base `next_release` (`gh pr list` ∪ registre PR) :
-//!   un commentaire nu `pr_review_trigger` (corps exact après trim,
-//!   auteur OWNER/MEMBER/COLLABORATOR) plus récent que le dernier
-//!   traité lance une review — sauf si une review est déjà en cours
-//!   sur cette PR, si le pool `pr_review_max_parallel` est plein, ou
-//!   si un ack d'automatisation externe (« Launching a review ») suit
-//!   le trigger.
+//! - Changes ouverts à base `integration_branch` (`list_changes` du
+//!   `ForgeClient` résolu ∪ registre — la base allowlistée est le
+//!   param orchestrateur, défaut `next_release`), TOUTES forges
+//!   déclarées (gh, REST github/gitlab, glab, gerrit — git nu exclu,
+//!   mode dégradé sans review auto) : la source du déclencheur dépend
+//!   de `review_trigger_mode` (global ou override `[review.<repo>]`) :
+//!   `comment` = un commentaire nu `pr_review_trigger` (corps exact
+//!   après trim, auteur OWNER/MEMBER/COLLABORATOR — `author_assoc`
+//!   du transport) plus récent que le dernier traité lance une
+//!   review — sauf si une review est déjà en cours sur ce change, si
+//!   le pool `pr_review_max_parallel` est plein, ou si un ack
+//!   d'automatisation externe (« Launching a review ») suit le
+//!   trigger ; `auto_open` = review à la première vue du change
+//!   ouvert ; `auto_push` = re-review à chaque head différent du sha
+//!   reviewé — les modes auto ne déclenchent que sur un change DE
+//!   CONFIANCE (branche source dans le même dépôt, ou auteur
+//!   OWNER/MEMBER/COLLABORATOR — `auto_review_untrusted` relâche le
+//!   filtre) : un change non fiable est mémorisé `skipped_untrusted`,
+//!   jamais reviewé ni réévalué à chaque tick ; `manual` = aucun
+//!   scan forge (demandes internes
+//!   `acctl pr review`/RPC seules) ; `off` = même les demandes sont
+//!   refusées.
 //! - La session reviewer `PRReview-<N>` (origin `feature:pr-review`)
-//!   est spawnée dans un worktree FRAIS détaché au `headRefOid` exact
+//!   est spawnée dans un worktree FRAIS détaché au head SHA exact
+//!   (fetché via la ref de change de la forge — `pull/N/head`,
+//!   `merge-requests/<iid>/head`, patchset gerrit — avec fallback SHA)
 //!   — read-only, elle REND son verdict en A2A natif via le tool MCP
 //!   `agentcontrol_report_verdict` (push direct au démon, plus de
 //!   polling) ; le bloc `REVIEW_RESULT_BEGIN … END` scanné à idle
-//!   reste le filet de secours si le tool est indisponible.
-//! - Le DÉMON poste le verdict (compte gh local = OWNER, accepté par
-//!   `.devin/hooks/block-merge.py`) avec le SHA reviewé en pied ;
-//!   head déplacé avant le post → titre `## Verdict: stale` (jamais
-//!   `APPROVED`) ; échec définitif → `review failed: <kind>` (ni
-//!   `#`/`*` ni « Verdict » → jamais pris pour une review par le
-//!   hook). Session supprimée et worktree retiré à la fin de passe.
+//!   reste le filet de secours si le tool est indisponible. Le prompt
+//!   reviewer est `review_prompt` (global ou override `[review.<repo>]`
+//!   — template intégré `REVIEW_PROMPT` sinon).
+//! - Le DÉMON poste le verdict par `post_comment` du transport
+//!   (commentaire PR, note MR, review-message gerrit — compte gh local
+//!   = OWNER pour `.devin/hooks/block-merge.py` sur github) sous le
+//!   titre `## <label>` — labels `verdict_approved`/`verdict_changes`
+//!   configurables (défauts « Verdict: APPROVED » /
+//!   « Verdict: CHANGES_REQUESTED » ; le mot de protocole rendu par
+//!   le reviewer est mappé sur le label du repo) — avec le SHA
+//!   reviewé en pied ; head déplacé avant le post → titre
+//!   `## Verdict: stale` (jamais le label approved) ; échec
+//!   définitif → `review failed: <kind>` (ni `#`/`*` ni « Verdict »
+//!   → jamais pris pour une review par le hook). Session supprimée
+//!   et worktree retiré à la fin de passe.
 //! - Les échecs transitoires (spawn KO — rate limit en tête, reviewer
-//!   mort ou idle sans bloc, timeout, verdict malformé) sont REJOUÉS
+//!   mort ou idle sans bloc, timeout, verdict malformé, session en
+//!   erreur sans reprise provider — `error:<kind>` après une courte
+//!   grâce) sont REJOUÉS
 //!   en backoff borné (2 min/10 min/30 min, 3 retries) : l'entrée
 //!   passe `retry_wait` avec `retry_at` et `attempts`, hors du pool et
 //!   sans masquer un nouveau déclencheur ; `review failed` n'arrive
@@ -54,18 +81,18 @@ pub(crate) const PR_REVIEW_ORIGIN: &str = "feature:pr-review";
 /// Préfixe de titre des sessions reviewer PR — `Backlog-PR` rejeté :
 /// `Backlog-P` est le préfixe planificateur du pipeline.
 pub(crate) const PR_REVIEW_PREFIX: &str = "PRReview-";
-/// Base autorisée — allowlist : jamais de review vers `main` ni toute
-/// autre base (la release PR `next_release → main` est à l'utilisateur).
-const ALLOWED_BASE: &str = "next_release";
 /// Fenêtre de journal relue pour le bloc verdict (scan borné — même
 /// borne que le pipeline).
 const REVIEW_JOURNAL_SCAN: usize = 150;
 /// Marqueurs du bloc verdict rendu par le reviewer.
 const VERDICT_BEGIN: &str = "REVIEW_RESULT_BEGIN";
 const VERDICT_END: &str = "REVIEW_RESULT_END";
-/// Le trigger externe matche `contains` — jamais de mention littérale
-/// dans un texte publié (stale, échec, pied de verdict).
-const TRIGGER_ESCAPED: &str = "/mr&#32;review";
+/// Le trigger mentionné dans un texte publié est échappé (`&#32;` par
+/// espace) — le corps exact `pr_review_trigger` ne doit jamais
+/// apparaître tel quel (stale, échec, pied de verdict).
+fn esc_trigger(cfg: &cfg::OrchCfg, repo: &str) -> String {
+    cfg.review_trigger_for(repo).replace(' ', "&#32;")
+}
 /// Auteurs acceptés pour le commentaire déclencheur.
 const TRIGGER_AUTHORS: &[&str] = &["OWNER", "MEMBER", "COLLABORATOR"];
 /// Ack d'une automatisation externe — sa présence après le trigger
@@ -79,6 +106,12 @@ const REVIEW_MAX_ATTEMPTS: u64 = 4;
 /// Backoff entre tentatives (indice = tentative échouée - 1) :
 /// 2 min, 10 min, 30 min — borné, jamais de boucle infinie.
 const REVIEW_RETRY_DELAYS: [u64; 3] = [120, 600, 1800];
+/// Grâce avant de déclarer morte une session reviewer en erreur sans
+/// reprise provider (kind `model`/`auth`/`other` — item #381) : une
+/// erreur déjà résorbée (forced send, set_model, resume) n'est pas
+/// punie d'une tentative ; passé ce délai la session ne repartira
+/// jamais seule → transient_fail borné.
+const REVIEW_ERR_GRACE_SECS: f64 = 60.0;
 
 /// État d'une entrée `pr_reviews` — persisté claim-first. `RetryWait`
 /// = échec transitoire soldé provisoirement : la prochaine tentative
@@ -90,6 +123,11 @@ pub(crate) enum EntryState {
     RetryWait,
     Done,
     Failed,
+    /// Change non fiable mémorisé (item #330 — modes auto) : la
+    /// décision n'est pas réévaluée à chaque tick ; `auto_push` la
+    /// réévalue à chaque head, un trigger commentaire ou une demande
+    /// interne passent toujours (déclencheur humain = validation).
+    SkippedUntrusted,
 }
 
 impl EntryState {
@@ -99,6 +137,7 @@ impl EntryState {
             EntryState::RetryWait => "retry_wait",
             EntryState::Done => "done",
             EntryState::Failed => "failed",
+            EntryState::SkippedUntrusted => "skipped_untrusted",
         }
     }
     pub(crate) fn of(v: &Value) -> Self {
@@ -106,6 +145,7 @@ impl EntryState {
             Some("retry_wait") => EntryState::RetryWait,
             Some("done") => EntryState::Done,
             Some("failed") => EntryState::Failed,
+            Some("skipped_untrusted") => EntryState::SkippedUntrusted,
             _ => EntryState::Running,
         }
     }
@@ -120,6 +160,94 @@ fn is_trigger(body: &str, trigger: &str) -> bool {
 /// Le commentaire vient-il d'un auteur autorisé ?
 fn trigger_author_ok(assoc: &str) -> bool {
     TRIGGER_AUTHORS.contains(&assoc)
+}
+
+/// Le change est-il « de confiance » pour un lancement auto ? Fiable
+/// si la branche source vit dans le même dépôt (`cross_repo ==
+/// Some(false)`) OU si l'auteur est OWNER/MEMBER/COLLABORATOR — toute
+/// information inconnue compte comme NON fiable (fail-closed : jamais
+/// de session reviewer sur la PR d'un inconnu sans validation
+/// explicite).
+fn change_trusted(c: &forgesync::ChangeInfo) -> bool {
+    c.cross_repo == Some(false) || trigger_author_ok(&c.author_assoc)
+}
+
+/// L'entrée `pr_reviews` autorise-t-elle un (re)déclenchement en mode
+/// auto ? `None` = première vue du change. Une entrée
+/// `skipped_untrusted` n'est rejouée QUE si le filtre a été relâché
+/// entre-temps (`allow_untrusted` — la confiance n'est alors plus
+/// évaluée, la PR externe redevient candidate). Sinon la
+/// (ré)évaluation n'a lieu que sur head différent en `auto_push` —
+/// `auto_open` ne refeuille jamais une entrée connue (done, failed,
+/// retry_wait ou skipped).
+fn auto_refire(
+    entry: Option<&Value>,
+    mode: cfg::ReviewTriggerMode,
+    head: &str,
+    allow_untrusted: bool,
+) -> bool {
+    let Some(e) = entry else {
+        return true;
+    };
+    if EntryState::of(e) == EntryState::SkippedUntrusted && allow_untrusted {
+        return true;
+    }
+    // head vide = illisible → conservateur, pas de re-review en
+    // boucle ; `skipped` non relâché : l'auto_push réévalue la
+    // confiance sur le nouvel head (l'auteur a pu devenir membre).
+    mode == cfg::ReviewTriggerMode::AutoPush
+        && !head.is_empty()
+        && head != e.get("sha").and_then(Value::as_str).unwrap_or("")
+}
+
+/// Décision du scan pour UN candidat auto — la séquence exacte du
+/// tick (`auto_refire` → gate de confiance) factorisée pour les
+/// tests. `ResolveAssoc` demande au scan de compléter
+/// `change.author_assoc` via `change_author_assoc` (lazy, un appel
+/// forge — jamais pour un same-repo, déjà `Fire` par
+/// `change_trusted`) puis de rejouer `auto_decision` : un assoc
+/// toujours vide retombe `SkipUntrusted` (fail-closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoDecision {
+    /// Lancer la review.
+    Fire,
+    /// Rien à faire ce tick (entrée connue sans refire).
+    Idle,
+    /// `author_assoc` à résoudre par la forge puis réévaluer.
+    ResolveAssoc,
+    /// Non fiable → mémoriser `skipped_untrusted`.
+    SkipUntrusted,
+}
+
+fn auto_decision(
+    entry: Option<&Value>,
+    mode: cfg::ReviewTriggerMode,
+    c: &forgesync::ChangeInfo,
+    allow_untrusted: bool,
+) -> AutoDecision {
+    if !auto_refire(entry, mode, &c.head_sha, allow_untrusted) {
+        return AutoDecision::Idle;
+    }
+    if allow_untrusted || change_trusted(c) {
+        return AutoDecision::Fire;
+    }
+    if c.author_assoc.is_empty() {
+        return AutoDecision::ResolveAssoc;
+    }
+    AutoDecision::SkipUntrusted
+}
+
+/// Entrée `skipped_untrusted` écrite quand `auto_decision` conclut
+/// `SkipUntrusted` — forme unique partagée scan/test.
+fn skipped_entry(last_trigger: u64, head_sha: &str, now: f64, mode: &str) -> Value {
+    json!({
+        "last_trigger_id": last_trigger,
+        "sid": "",
+        "sha": head_sha,
+        "started": now,
+        "state": EntryState::SkippedUntrusted.as_str(),
+        "origin": mode,
+    })
 }
 
 /// Extrait le contenu du bloc `REVIEW_RESULT_BEGIN … END` — recherché
@@ -145,19 +273,56 @@ fn extract_verdict_block(events: &[proto::Event]) -> Option<String> {
     None
 }
 
-/// Le commentaire final posté est-il acceptable ? Le titre doit être
-/// `## Verdict: APPROVED` ou `## Verdict: CHANGES_REQUESTED` — toute
-/// autre forme est rejetée plutôt que mal postée.
-fn verdict_body_ok(body: &str) -> bool {
-    let first = body.lines().next().unwrap_or("").trim();
-    first == "## Verdict: APPROVED" || first == "## Verdict: CHANGES_REQUESTED"
+/// Famille de verdict lue en position de titre `## <t>` : labels
+/// configurés du repo (`verdict_approved`/`verdict_changes`) OU
+/// formes canoniques du protocole (`Verdict: APPROVED` /
+/// `Verdict: CHANGES_REQUESTED` — le prompt intégré et l'enum MCP
+/// les rendent toujours). Toute autre forme est rejetée plutôt que
+/// mal postée.
+fn verdict_kind(first: &str, cfg: &cfg::OrchCfg, repo: &str) -> Option<cfg::ReviewVerdict> {
+    use cfg::ReviewVerdict::*;
+    let first = first.trim();
+    if first == format!("## {}", cfg.verdict_label_for(Approved, repo))
+        || first == "## Verdict: APPROVED"
+    {
+        Some(Approved)
+    } else if first == format!("## {}", cfg.verdict_label_for(Changes, repo))
+        || first == "## Verdict: CHANGES_REQUESTED"
+    {
+        Some(Changes)
+    } else {
+        None
+    }
+}
+
+/// Le bloc verdict extrait est-il acceptable ?
+fn verdict_body_ok(body: &str, cfg: &cfg::OrchCfg, repo: &str) -> bool {
+    verdict_kind(body.lines().next().unwrap_or(""), cfg, repo).is_some()
+}
+
+/// Normalise le corps persisté : la première ligne devient
+/// `## <label configuré>` quelle que soit la forme rendue (canonique
+/// ou label) — un bloc `## Verdict: APPROVED` est publié
+/// `## LGTM` quand `verdict_approved = "LGTM"`. None si le titre
+/// n'est pas un verdict accepté.
+fn normalize_verdict_body(body: &str, cfg: &cfg::OrchCfg, repo: &str) -> Option<String> {
+    let first = body.lines().next().unwrap_or("");
+    let kind = verdict_kind(first, cfg, repo)?;
+    Some(format!(
+        "## {}{}",
+        cfg.verdict_label_for(kind, repo),
+        &body[first.len()..]
+    ))
 }
 
 /// Message d'« échec » publié : ne commence jamais par `#`/`*` et ne
 /// contient pas le mot Verdict — le hook de merge ne doit jamais le
 /// lire comme une review.
-fn fail_comment(kind: &str) -> String {
-    format!("review failed: {kind} — reposter le déclencheur ({TRIGGER_ESCAPED}) pour relancer")
+fn fail_comment(kind: &str, cfg: &cfg::OrchCfg, repo: &str) -> String {
+    format!(
+        "review failed: {kind} — repost the trigger ({}) to relaunch",
+        esc_trigger(cfg, repo)
+    )
 }
 
 /// Note de reprogrammation postée quand un retry est armé — même
@@ -165,7 +330,7 @@ fn fail_comment(kind: &str) -> String {
 /// review ni pour un échec définitif par les workers qui pollent.
 fn retry_comment(kind: &str, delay_secs: u64) -> String {
     format!(
-        "review retry scheduled in ~{} min ({kind}) — déclencheur déjà consommé, relance automatique",
+        "review retry scheduled in ~{} min ({kind}) — trigger already consumed, auto relaunch",
         delay_secs.div_ceil(60)
     )
 }
@@ -181,18 +346,27 @@ fn ack_comment(model: &str, sid: &str) -> String {
 }
 
 /// Texte final du commentaire de verdict — reconstruit à chaque
-/// tentative : `APPROVED`/`CHANGES_REQUESTED` seulement si le head
-/// courant est EXACTEMENT celui reviewé, sinon titre `stale` (jamais
-/// de `APPROVED` si le head a bougé ou est illisible).
-fn verdict_comment(body: &str, sha: &str, head: Option<&str>) -> String {
+/// tentative : le corps (déjà titré `## <label>`) seulement si le
+/// head courant est EXACTEMENT celui reviewé, sinon titre `stale`
+/// (jamais le label approved si le head a bougé ou est illisible —
+/// « Verdict: stale » reste le marqueur fixe, quel que soit le
+/// label configuré).
+fn verdict_comment(
+    body: &str,
+    sha: &str,
+    head: Option<&str>,
+    cfg: &cfg::OrchCfg,
+    repo: &str,
+) -> String {
     if head == Some(sha) {
         format!("{body}\n\nReviewed head: {sha}")
     } else {
         format!(
             "## Verdict: stale — head changed, re-run \
-             {TRIGGER_ESCAPED}\n\n(review rendue pour \
-             {sha}, head courant {})",
-            head.unwrap_or("inconnu")
+             {}\n\n(review rendered for \
+             {sha}, current head {})",
+            esc_trigger(cfg, repo),
+            head.unwrap_or("unknown")
         )
     }
 }
@@ -221,17 +395,6 @@ fn pick_trigger(comments: &[(u64, String, String)], trigger: &str, last: u64) ->
     Some(tid)
 }
 
-/// `owner/repo` normalisé d'une URL remote (`git@h:o/r.git`,
-/// `https://h/o/r`, …) — comparaison exacte, pas un `contains`.
-fn remote_nwo(url: &str) -> Option<String> {
-    let p = url.trim().trim_end_matches(".git");
-    let path = p.rsplit_once(':').map(|(_, r)| r).unwrap_or(p);
-    let mut it = path.trim_matches('/').rsplit('/');
-    let name = it.next()?;
-    let owner = it.next()?;
-    (!name.is_empty() && !owner.is_empty()).then(|| format!("{owner}/{name}"))
-}
-
 /// Nom de repo court (`owner/<name>` → `<name>`) — clé de
 /// `repo_workspaces`.
 fn repo_short(repo: &str) -> &str {
@@ -249,51 +412,115 @@ fn ws_of<'a>(cfg: &'a cfg::OrchCfg, repo: &str) -> &'a str {
         .unwrap_or(&cfg.workspace)
 }
 
-const REVIEW_PROMPT: &str = r#"[Session creee automatiquement par l'orchestrateur AgentControl — review de PR native.]
+/// Échec DÉFINITIF du fetch de tête de PR : la ref de change de la
+/// forge est absente sur origin (anomalie connue — ex. GitHub qui ne
+/// matérialise que `pull/N/merge`) ET le fetch par SHA a échoué
+/// aussi. Un retry buterait pareil — downcasté par les appelants pour
+/// un fail-fast plutôt que le retry borné des erreurs transitoires.
+#[derive(Debug)]
+pub(super) struct RefMissingError(pub(super) String);
 
-Tu es le REVIEWER de la PR #{PR} du repo {REPO} (session $AGENTCONTROL_SESSION). Ton cwd est un worktree detache au head exact {SHA} de la PR (base : {BASE}).
+impl std::fmt::Display for RefMissingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for RefMissingError {}
+
+/// Fetch de la tête de change dans `ws` : la ref de la forge
+/// (`pull/<N>/head` github, `merge-requests/<N>/head` gitlab, ref de
+/// patchset gerrit — `head_ref` du transport) d'abord, puis fallback
+/// sur le SHA direct (sha-in-want) quand la ref n'est pas
+/// matérialisée. Le worktree se détache ensuite au même SHA : le
+/// fetch ne sert qu'à rendre l'objet disponible localement.
+/// `RefMissingError` uniquement quand l'absence de ref est explicite
+/// (« couldn't find remote ref ») ET le SHA échoue — une erreur
+/// réseau reste transitoire.
+async fn fetch_pr_head(ws: &Path, refname: Option<&str>, sha: &str, key: &str) -> Result<()> {
+    let ws_s = ws.to_str().context("workspace path non utf8")?;
+    let mut ref_missing = false;
+    let mut ref_err = String::new();
+    if let Some(r) = refname {
+        let (rc, _o, e) = run_out(&["git", "-C", ws_s, "fetch", "origin", r], ws)
+            .await
+            .unwrap_or((-1, String::new(), "spawn".into()));
+        if rc == 0 {
+            return Ok(());
+        }
+        ref_missing = e.contains("couldn't find remote ref");
+        ref_err = e;
+        warn!(
+            "orchestrator: review {key}: git fetch {r} KO (rc={rc}) — \
+             fallback fetch sha {sha} direct : {ref_err}"
+        );
+    }
+    let (rc2, _o2, e2) = run_out(&["git", "-C", ws_s, "fetch", "origin", sha], ws)
+        .await
+        .unwrap_or((-1, String::new(), "spawn".into()));
+    if rc2 == 0 {
+        return Ok(());
+    }
+    if ref_missing {
+        return Err(RefMissingError(format!(
+            "{} missing on origin and fetching {sha} failed: {e2} — \
+             push a new commit to the branch to recreate the ref",
+            refname.unwrap_or("change ref")
+        ))
+        .into());
+    }
+    anyhow::bail!(
+        "git fetch {}: {ref_err} ; fetch {sha}: {e2}",
+        refname.unwrap_or("head")
+    )
+}
+
+const REVIEW_PROMPT: &str = r#"[Session created automatically by the AgentControl orchestrator — native PR review.]
+
+You are the REVIEWER of PR #{PR} of repo {REPO} (session $AGENTCONTROL_SESSION). Your cwd is a worktree detached at the exact head {SHA} of the PR (base: {BASE}).
 
 ## PR
 {TITLE}
 
 {BODY}
 
-## MISSION — LECTURE SEULE, STRICTE
+## MISSION — STRICT READ-ONLY
 
-Relis le diff `origin/{BASE}...HEAD` (git show/git diff --stat puis fichiers) EN REGARDANT LE CODE autour dans ce worktree. Verifie le fond : bugs, regressions, respect des regles du repo ({WS}/AGENTS.md), tests/verifs demandes, coherence des docs. NE MODIFIE AUCUN FICHIER, ne pousse rien, ne commente la PR sous aucune forme, n'execute aucun code issu de la PR — voir INTERDIT.
+Review the diff `origin/{BASE}...HEAD` (git show/git diff --stat then files) BY READING the surrounding code in this worktree. Check the substance: bugs, regressions, compliance with the repo's rules ({RULES}), requested tests/checks, docs consistency. DO NOT MODIFY ANY FILE, push nothing, do not comment the PR in any form, do not run any code from the PR — see FORBIDDEN.
 
-## INTERDIT — lecture seule stricte
+## FORBIDDEN — strict read-only
 
-Ton travail est la RELISE du diff et du code environnant. La compilation et les tests sont garantis par la CI (6 check-runs) au moment du ready — les lancer ici ne fait que bruler du temps et des tokens :
+Your job is REVIEWING the diff and the surrounding code. Compilation and tests are guaranteed by CI (6 check-runs) at ready time — running them here only burns time and tokens:
 
-- NE PAS compiler, builder ni tester : aucun `cargo build/check/test`, `npm install/build`, `tsc`, `go build/test`, `pytest`, etc. — pas pour verifier que ca compile, pas pour reproduire un bug.
-- NE PAS executer de code issu de la PR : ni binaires, ni scripts, ni hooks.
-- Si le code ne semble pas compiler, ou si un test parait faux a la lecture, NOTE-le comme finding de relecture — ne lance pas le build pour le prouver.
-- Lire un fichier de test pour juger sa pertinence est autorise — l'executer ne l'est pas.
+- DO NOT compile, build or test: no `cargo build/check/test`, `npm install/build`, `tsc`, `go build/test`, `pytest`, etc. — not to check it compiles, not to reproduce a bug.
+- DO NOT run code from the PR: no binaries, no scripts, no hooks.
+- If the code does not seem to compile, or a test looks wrong on reading, NOTE it as a review finding — do not run the build to prove it.
+- Reading a test file to judge its relevance is allowed — running it is not.
 
-Verdicts : APPROVED si la PR est mergeable en l'etat ; CHANGES_REQUESTED s'il y a des findings bloquants (precis, actionnables, references fichier:ligne).
+Verdicts: APPROVED if the PR is mergeable as is; CHANGES_REQUESTED if there are blocking findings (precise, actionable, file:line references).
 
-## SORTIE OBLIGATOIRE
+Steps: publish your task's step list via `acctl steps set` (ac-steps skill, provisioned in your workspace) — the list from the start, then an update at each step completed; the client's "Steps" panel shows it to the user.
 
-Quand ton analyse est finie, rends ton verdict via l'outil MCP `agentcontrol_report_verdict` :
-- verdict : `APPROVED` ou `CHANGES_REQUESTED`
-- body : le corps du commentaire de review (findings, points verifies, non-bloquants — en francais)
+## MANDATORY OUTPUT
 
-Le demon poste lui-meme le commentaire `## Verdict:` sur la PR puis termine ta session — rien d'autre a faire apres l'appel.
+When your analysis is done, report your verdict via the MCP tool `agentcontrol_report_verdict`:
+- verdict: `APPROVED` or `CHANGES_REQUESTED`
+- body: the review comment body (findings, checked points, non-blocking notes)
 
-Secours (uniquement si l'outil est indisponible) : termine ton tour par exactement ce bloc (rien apres) :
+The daemon posts the `## Verdict:` comment on the PR itself then ends your session — nothing else to do after the call.
+
+Fallback (only if the tool is unavailable): end your turn with exactly this block (nothing after):
 
 REVIEW_RESULT_BEGIN
 ## Verdict: APPROVED
 
-<corps du commentaire de review — findings, points verifies, non-bloquants>
+<review comment body — findings, checked points, non-blocking notes>
 REVIEW_RESULT_END
 
-La premiere ligne du bloc est exactement l'une de ces deux lignes :
-`## Verdict: APPROVED` ou `## Verdict: CHANGES_REQUESTED` — jamais
-l'alternance litterale ni un autre titre.
+The block's first line is exactly one of these two lines:
+`## Verdict: APPROVED` or `## Verdict: CHANGES_REQUESTED` — never
+the literal alternation nor any other title.
 
-Reponds en francais dans le corps du verdict."#;
+Write the review comment body in the repository's language."#;
 
 fn fill_pr(tpl: &str, pairs: &[(&str, String)]) -> String {
     let mut s = tpl.to_string();
@@ -313,12 +540,60 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
+/// Kind d'erreur « backoff provider » : la session reprend seule
+/// (`rate_limit` = timer de retry armé) ou le failover provider la
+/// remplace sur drift de profil (`quota` = forfait épuisé, même
+/// besoin de bascule). Partagé avec `orch_failover` — les autres
+/// kinds (`model`/`auth`/`other`) relèvent d'une intervention,
+/// jamais d'un respawn automatique (items #193/#381).
+pub(crate) fn err_kind_backoff(kind: &str) -> bool {
+    matches!(kind, "rate_limit" | "quota")
+}
+
+/// Verdict de la passe running sur l'état `error` de la session
+/// reviewer — kind-aware (item #381). Seuls `rate_limit`/`quota`
+/// ont une sémantique de backoff (attente ou échec quota dédié) et
+/// suspendent le timeout ; tout autre kind ne repart JAMAIS seul :
+/// grâce `err_since` puis retry borné `error:<kind>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReviewErrVerdict {
+    /// Pas d'erreur à traiter (session vivante, ou `error` sans
+    /// `last_error` — le timeout seul borne ce cas).
+    None,
+    /// Backoff provider : attendre — timeout suspendu.
+    Wait,
+    /// Erreur sans reprise dans sa grâce : armer `err_since` au
+    /// premier tick, rien d'autre.
+    Grace,
+    /// Grâce écoulée → `transient_fail` borné `error:<kind>`.
+    Retry(String),
+}
+
+fn review_err_verdict(meta: &SessionMeta, err_since: Option<f64>, now: f64) -> ReviewErrVerdict {
+    if meta.state != "error" {
+        return ReviewErrVerdict::None;
+    }
+    let Some(kind) = meta.last_error.as_ref().map(|le| le.kind.as_str()) else {
+        return ReviewErrVerdict::None;
+    };
+    if err_kind_backoff(kind) {
+        return ReviewErrVerdict::Wait;
+    }
+    match err_since {
+        Some(s) if now - s >= REVIEW_ERR_GRACE_SECS => {
+            ReviewErrVerdict::Retry(format!("error:{kind}"))
+        }
+        _ => ReviewErrVerdict::Grace,
+    }
+}
+
 impl Daemon {
     /// Failover provider (item #193) — voir server/orch_failover.rs.
-    /// Une session `PRReview-*` en backoff `rate_limit` sur un profil
-    /// `pr_reviewer_agent` remplacé → détruite ; l'entrée `pr_reviews`
-    /// correspondante repasse en `retry_wait` immédiat et la passe
-    /// retry la relance sur le profil courant (head SHA revérifié).
+    /// Une session `PRReview-*` en backoff `rate_limit` ou bloquée
+    /// `quota` sur un profil `pr_reviewer_agent` remplacé → détruite ;
+    /// l'entrée `pr_reviews` correspondante repasse en `retry_wait`
+    /// immédiat et la passe retry la relance sur le profil courant
+    /// (head SHA revérifié).
     /// Self-healing : le drift `meta.agent` ≠ `agent_or(pr_reviewer_agent)`
     /// est le déclencheur — un restart entre le `comp set` et le tick
     /// est rattrapé sans file d'événements.
@@ -332,9 +607,11 @@ impl Daemon {
         if effective.is_empty() {
             return;
         }
-        // Candidates : origin PRReview + error/rate_limit + agent ≠
-        // profil courant + pas de waiter ac-wait vivant (le ping du
-        // waiter la réveillera sur l'ancien provider — inchangée).
+        // Candidates : origin PRReview + error/rate_limit|quota +
+        // agent ≠ profil courant + pas de waiter ac-wait vivant (le
+        // ping du waiter la réveillera sur l'ancien provider —
+        // inchangée). `quota` = forfait épuisé : le changement de
+        // profil est la sortie — même traitement que rate_limit.
         let stale: Vec<String> = metas
             .iter()
             .filter(|m| {
@@ -342,7 +619,7 @@ impl Daemon {
                     && m.state == "error"
                     && m.last_error
                         .as_ref()
-                        .is_some_and(|e| e.kind == "rate_limit")
+                        .is_some_and(|e| err_kind_backoff(&e.kind))
                     && m.agent != effective
                     && !acwait_pending(&m.id)
             })
@@ -354,7 +631,7 @@ impl Daemon {
         let stale_set: HashSet<&str> = stale.iter().map(String::as_str).collect();
         for sid in &stale {
             if let Err(e) = self.h_delete_session(sid.clone()).await {
-                warn!("orchestrateur: failover rm {sid}: {e:#}");
+                warn!("orchestrator: failover rm {sid}: {e:#}");
             }
         }
         // Entrées running dont la session vient d'être détruite →
@@ -380,7 +657,7 @@ impl Daemon {
                 if let Ok(pr_n) = pr.parse::<u64>() {
                     remove_review_worktree(
                         Path::new(ws_of(cfg, repo)),
-                        &pr_review_dir(pr_n, sha),
+                        &pr_review_dir(cfg, pr_n, sha),
                     );
                 }
             }
@@ -390,7 +667,7 @@ impl Daemon {
                 e.insert("sid".into(), json!(""));
                 e.insert("denied".into(), json!(0));
             }
-            info!("orchestrateur: review PR {key} — failover provider, retry sur « {effective} »");
+            info!("orchestrator: PR review {key} — provider failover, retry on « {effective} »");
         }
     }
 
@@ -398,7 +675,14 @@ impl Daemon {
     /// `cfg.pr_review`. Jamais fatale au tick : les erreurs par PR
     /// sont loguées, la passe continue.
     pub(crate) async fn orch_pr_review_tick(self: &Arc<Self>) -> Result<()> {
-        let cfg = self.orch.cfg.read().unwrap().clone();
+        let cfg = self.orch_cfg_snapshot().await;
+        // Profil reviewer PR introuvable → chaque spawn échouerait
+        // « unknown agent » : erreur claire plutôt que du churn.
+        anyhow::ensure!(
+            !cfg.agent_or(&cfg.pr_reviewer_agent).is_empty(),
+            "no available agent profile — declare an [agents.*] \
+             profile or set `agent`/`pr_reviewer_agent` explicitly"
+        );
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
         // Snapshot `pr_reviews`/`pr_review_requests` au clone : les
@@ -440,12 +724,12 @@ impl Daemon {
             }
             match self.h_delete_session(sid.clone()).await {
                 Ok(_) => {
-                    info!("orchestrateur: rm reviewer {sid} (review {key}) retenté avec succès");
+                    info!("orchestrator: rm reviewer {sid} (review {key}) retry succeeded");
                     if let Some(e) = st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut) {
                         e.remove("rm_sid");
                     }
                 }
-                Err(e) => warn!("orchestrateur: rm reviewer {sid} (review {key}): {e:#}"),
+                Err(e) => warn!("orchestrator: rm reviewer {sid} (review {key}): {e:#}"),
             }
         }
         // Sortie rapide : mécanisme coupé et rien en vol → pas même le
@@ -457,11 +741,13 @@ impl Daemon {
         if !cfg.pr_review
             && !swept_rm
             && !st.pr_reviews.values().any(|v| {
-                matches!(EntryState::of(v), EntryState::Running | EntryState::RetryWait)
-                    || v
-                        .get("rm_sid")
-                        .and_then(Value::as_str)
-                        .is_some_and(|s| !s.is_empty())
+                matches!(
+                    EntryState::of(v),
+                    EntryState::Running | EntryState::RetryWait
+                ) || v
+                    .get("rm_sid")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
             })
             && st.pr_review_requests.is_empty()
         {
@@ -484,7 +770,10 @@ impl Daemon {
                 .pr_reviews
                 .iter()
                 .filter(|(_, v)| {
-                    matches!(EntryState::of(v), EntryState::Running | EntryState::RetryWait)
+                    matches!(
+                        EntryState::of(v),
+                        EntryState::Running | EntryState::RetryWait
+                    )
                 })
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
@@ -502,14 +791,14 @@ impl Daemon {
                 }
                 remove_review_worktree(
                     Path::new(ws_of(&cfg, repo)),
-                    &pr_review_dir(pr_n, sha),
+                    &pr_review_dir(&cfg, pr_n, sha),
                 );
-                self.gh_comment(repo, pr_n, &fail_comment("disabled"), &cfg)
+                self.pr_comment(repo, pr_n, &fail_comment("disabled", &cfg, repo), &cfg)
                     .await;
                 if let Some(e) = st.pr_reviews.get_mut(&key) {
                     e["state"] = json!(EntryState::Failed.as_str());
                 }
-                info!("orchestrateur: review PR {key} soldée (pr_review off)");
+                info!("orchestrator: PR review {key} settled (pr_review off)");
                 let by = entry
                     .get("requested_by")
                     .and_then(Value::as_str)
@@ -518,7 +807,7 @@ impl Daemon {
                 if !by.is_empty() {
                     self.pr_review_notify(
                         &by,
-                        format!("[AgentControl] review {key} soldée — pr_review désactivé"),
+                        format!("[AgentControl] review {key} settled — pr_review disabled"),
                     )
                     .await;
                 }
@@ -532,7 +821,10 @@ impl Daemon {
                 .map(|(k, v)| {
                     (
                         k.clone(),
-                        v.get("by").and_then(Value::as_str).unwrap_or("").to_string(),
+                        v.get("by")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
                     )
                 })
                 .collect();
@@ -541,7 +833,7 @@ impl Daemon {
                 if !by.is_empty() {
                     self.pr_review_notify(
                         &by,
-                        format!("[AgentControl] review {key} refusée — pr_review désactivé"),
+                        format!("[AgentControl] review {key} refused — pr_review disabled"),
                     )
                     .await;
                 }
@@ -552,10 +844,10 @@ impl Daemon {
         }
 
         // Failover provider (item #193) : reviews PR dont la session
-        // `PRReview-*` est en backoff rate_limit sur un profil
-        // `pr_reviewer_agent` qui n'est plus celui configuré → session
-        // détruite, entrée repassée en retry immédiat — la passe
-        // retry ci-dessous la relance sur le nouveau profil.
+        // `PRReview-*` est en backoff rate_limit ou bloquée quota sur
+        // un profil `pr_reviewer_agent` qui n'est plus celui configuré
+        // → session détruite, entrée repassée en retry immédiat — la
+        // passe retry ci-dessous la relance sur le nouveau profil.
         self.orch_failover_pr_reviews(&metas, &mut st, &cfg).await;
 
         // Balayage des worktrees orphelins — une fois par process
@@ -583,16 +875,12 @@ impl Daemon {
             let Ok(pr_n) = pr.parse::<u64>() else {
                 continue;
             };
-            let wt = pr_review_dir(pr_n, sha);
+            let wt = pr_review_dir(&cfg, pr_n, sha);
             // Verdict extrait mais post échoué au tick précédent →
             // retry borné. Le body brut est persisté : le texte final
             // est RECONSTRUIT à chaque tentative (head re-vérifié —
             // un APPROVED sur head déplacé devient stale, jamais posté).
-            if entry
-                .get("pending_body")
-                .and_then(Value::as_str)
-                .is_some()
-            {
+            if entry.get("pending_body").and_then(Value::as_str).is_some() {
                 self.pr_review_post_attempt(&key, repo, pr_n, sha, &mut st, &cfg, &wt)
                     .await;
                 continue;
@@ -615,31 +903,64 @@ impl Daemon {
                 self.orch_save(&st);
                 continue;
             }
-            // Timeout → kill + retry borné (un reviewer trop lent est
-            // souvent un symptôme de rate limit ambiant). Une session
-            // en `error` (rate limit) attend sa reprise : le temps de
-            // backoff ne compte pas dans le timeout.
-            let rate_limited = metas
-                .iter()
-                .any(|m| m.id == sid && m.state == "error");
-            if !rate_limited && now - started > cfg.pr_review_timeout as f64 {
-                warn!("orchestrateur: review PR {key} timeout → retry");
-                self.pr_review_transient_fail(
-                    &key,
-                    "timeout",
-                    repo,
-                    pr_n,
-                    &mut st,
-                    &wt,
-                    &cfg,
-                )
-                .await;
-                self.orch_save(&st);
-                continue;
-            }
             let Some(meta) = metas.iter().find(|m| m.id == sid) else {
                 continue;
             };
+            // Erreur session sans reprise provider (model/auth/other —
+            // ni timer de retry ni failover, item #381) : la session
+            // ne repartira JAMAIS seule. Grâce `err_since` (~1-2
+            // ticks) puis transient_fail borné « error:<kind> », comme
+            // une interruption — le retry relance une session fraîche
+            // sur le profil courant. Le verdict est rendu AVANT le
+            // timeout : le kind d'erreur est plus parlant que
+            // « timeout ».
+            let err_since = entry.get("err_since").and_then(Value::as_f64);
+            let verdict = review_err_verdict(meta, err_since, now);
+            match &verdict {
+                ReviewErrVerdict::Retry(kind) => {
+                    warn!("orchestrator: PR review {key} reviewer {kind} → retry");
+                    self.pr_review_transient_fail(&key, kind, repo, pr_n, &mut st, &wt, &cfg)
+                        .await;
+                    self.orch_save(&st);
+                    continue;
+                }
+                ReviewErrVerdict::Grace => {
+                    // Premier tick de l'erreur : armer la grâce — le
+                    // prochain tick sans changement produit Retry.
+                    if err_since.is_none() {
+                        if let Some(e) = st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut)
+                        {
+                            e.insert("err_since".into(), json!(now));
+                        }
+                    }
+                    continue;
+                }
+                _ => {
+                    // Session sortie de l'erreur (ou backoff provider) :
+                    // la grâce repart à zéro si un autre kind d'erreur
+                    // survient plus tard.
+                    if err_since.is_some() {
+                        if let Some(e) = st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut)
+                        {
+                            e.remove("err_since");
+                        }
+                    }
+                }
+            }
+            // Timeout → kill + retry borné (un reviewer trop lent est
+            // souvent un symptôme de rate limit ambiant). Seules les
+            // erreurs à backoff provider (rate_limit/quota) suspendent
+            // le timeout : leur attente est calée sur la reprise
+            // provider, pas sur la review (item #381).
+            if !matches!(verdict, ReviewErrVerdict::Wait)
+                && now - started > cfg.pr_review_timeout as f64
+            {
+                warn!("orchestrator: review PR {key} timeout → retry");
+                self.pr_review_transient_fail(&key, "timeout", repo, pr_n, &mut st, &wt, &cfg)
+                    .await;
+                self.orch_save(&st);
+                continue;
+            }
             // Requêtes pendantes → refus immédiat (le reviewer est en
             // lecture seule, aucune interaction légitime). Après 2
             // refus sans déblocage → échec « blocked on request ».
@@ -648,9 +969,14 @@ impl Daemon {
                 let pending = s.pending_requests();
                 if !pending.is_empty() {
                     if denied >= 2 {
-                        warn!("orchestrateur: review PR {key} bloquée sur requête → failed");
-                        self.gh_comment(repo, pr_n, &fail_comment("blocked on request"), &cfg)
-                            .await;
+                        warn!("orchestrator: PR review {key} blocked on request → failed");
+                        self.pr_comment(
+                            repo,
+                            pr_n,
+                            &fail_comment("blocked on request", &cfg, repo),
+                            &cfg,
+                        )
+                        .await;
                         self.pr_review_finish(
                             &key,
                             EntryState::Failed,
@@ -671,6 +997,42 @@ impl Daemon {
                     continue;
                 }
             }
+            // Forfait épuisé (kind=quota) : la session ne reprendra
+            // JAMAIS seule (pas de retry auto) — attendre la laisserait
+            // « running » éternelle et occuperait un slot du pool.
+            // Échec explicite avec l'erreur provider en commentaire ;
+            // un nouveau trigger relance après changement de
+            // plan/profil (le failover couvre le drift de profil).
+            if meta.state == "error"
+                && meta
+                    .last_error
+                    .as_ref()
+                    .is_some_and(|le| le.kind == "quota")
+            {
+                let detail = meta
+                    .last_error
+                    .as_ref()
+                    .map(|le| clip(&le.message, 160))
+                    .unwrap_or_default();
+                warn!("orchestrator: PR review {key} reviewer quota exhausted → failed");
+                self.pr_comment(
+                    repo,
+                    pr_n,
+                    &fail_comment(&format!("quota exhausted — {detail}"), &cfg, repo),
+                    &cfg,
+                )
+                .await;
+                self.pr_review_finish(
+                    &key,
+                    EntryState::Failed,
+                    &mut st,
+                    &wt,
+                    Path::new(ws_of(&cfg, repo)),
+                )
+                .await;
+                self.orch_save(&st);
+                continue;
+            }
             // En vol : working/compacting/starting → attendre ; error
             // (rate limit, reprise automatique) et waiting_input aussi.
             // Idle : le tour est fini — le bloc doit être là, sinon échec.
@@ -687,12 +1049,15 @@ impl Daemon {
                 .and_then(|s| s.journal.read_page(&s.dir, None, REVIEW_JOURNAL_SCAN).ok())
                 .and_then(|ev| extract_verdict_block(&ev));
             match block {
-                Some(body) if verdict_body_ok(&body) => {
-                    // Le body brut du bloc est persisté AVANT le post
-                    // — si le commentaire échoue il est reposté au
-                    // tick suivant (jamais perdu silencieusement). Le
-                    // head est re-vérifié à CHAQUE tentative : un
-                    // APPROVED sur head déplacé devient stale.
+                Some(body) if verdict_body_ok(&body, &cfg, repo) => {
+                    // Le body du bloc est NORMALISÉ sous le label
+                    // configuré du repo (`## <label>`) puis persisté
+                    // AVANT le post — si le commentaire échoue il est
+                    // reposté au tick suivant (jamais perdu
+                    // silencieusement). Le head est re-vérifié à
+                    // CHAQUE tentative : un APPROVED sur head déplacé
+                    // devient stale.
+                    let body = normalize_verdict_body(&body, &cfg, repo).unwrap_or(body);
                     if let Some(e) = st.pr_reviews.get_mut(&key) {
                         e["pending_body"] = json!(body);
                         e["sid"] = json!("");
@@ -708,7 +1073,7 @@ impl Daemon {
                         .await;
                 }
                 Some(_) => {
-                    warn!("orchestrateur: review PR {key} bloc verdict malformé → retry");
+                    warn!("orchestrator: PR review {key} malformed verdict block → retry");
                     self.pr_review_transient_fail(
                         &key,
                         "malformed verdict block",
@@ -732,11 +1097,11 @@ impl Daemon {
                         .filter(|le| le.kind == "rate_limit")
                         .map(|_| "rate_limit")
                         .unwrap_or("no verdict block");
-                    info!("orchestrateur: review PR {key} idle sans bloc verdict ({kind}) → retry");
-                    self.pr_review_transient_fail(
-                        &key, kind, repo, pr_n, &mut st, &wt, &cfg,
-                    )
-                    .await;
+                    info!(
+                        "orchestrator: PR review {key} idle without verdict block ({kind}) → retry"
+                    );
+                    self.pr_review_transient_fail(&key, kind, repo, pr_n, &mut st, &wt, &cfg)
+                        .await;
                     self.orch_save(&st);
                 }
             }
@@ -785,11 +1150,16 @@ impl Daemon {
             let Ok(pr_n) = pr.parse::<u64>() else {
                 continue;
             };
-            let wt = pr_review_dir(pr_n, &sha);
-            if let Some(h) = self.gh_pr_head(repo, pr_n, &cfg).await {
+            let wt = pr_review_dir(&cfg, pr_n, &sha);
+            if let Some(h) = self.pr_head(repo, pr_n, &cfg).await {
                 if h != sha {
-                    self.gh_comment(repo, pr_n, &fail_comment("stale — head changed"), &cfg)
-                        .await;
+                    self.pr_comment(
+                        repo,
+                        pr_n,
+                        &fail_comment("stale — head changed", &cfg, repo),
+                        &cfg,
+                    )
+                    .await;
                     self.pr_review_finish(
                         &key,
                         EntryState::Failed,
@@ -827,38 +1197,19 @@ impl Daemon {
                         e["sid"] = json!(sid.clone());
                     }
                     self.orch_save(&st);
-                    self.gh_comment(
+                    self.pr_comment(
                         repo,
                         pr_n,
-                        &ack_comment(
-                            if cfg.pr_reviewer_model.is_empty() {
-                                &cfg.model
-                            } else {
-                                &cfg.pr_reviewer_model
-                            },
-                            &sid,
-                        ),
+                        &ack_comment(cfg.model_or(&cfg.pr_reviewer_model), &sid),
                         &cfg,
                     )
                     .await;
                     free -= 1;
                 }
                 Err(e) => {
-                    warn!("orchestrateur: retry launch review {key}: {e:#}");
-                    remove_review_worktree(
-                        Path::new(ws_of(&cfg, repo)),
-                        &pr_review_dir(pr_n, &sha),
-                    );
-                    self.pr_review_transient_fail(
-                        &key,
-                        "spawn failed",
-                        repo,
-                        pr_n,
-                        &mut st,
-                        &wt,
-                        &cfg,
-                    )
-                    .await;
+                    warn!("orchestrator: retry launch review {key}: {e:#}");
+                    self.pr_review_launch_fail(&key, &e, repo, pr_n, &mut st, &wt, &cfg)
+                        .await;
                 }
             }
             self.orch_save(&st);
@@ -901,6 +1252,19 @@ impl Daemon {
                 continue;
             };
             let repo = repo.to_string();
+            // `review_trigger_mode=off` sur ce repo (override ou
+            // global — la demande peut avoir été posée avant un flip
+            // de config) → refusée et soldée comme une demande sur
+            // mécanisme coupé.
+            if cfg.review_mode_for(&repo) == cfg::ReviewTriggerMode::Off {
+                st.pr_review_requests.remove(&key);
+                self.pr_review_notify(
+                    &by,
+                    format!("[AgentControl] review {key} refused — review_trigger_mode=off"),
+                )
+                .await;
+                continue;
+            }
             // Review déjà en cours → la demande attend son terme.
             if st
                 .pr_reviews
@@ -913,14 +1277,10 @@ impl Daemon {
             // couvre déjà (trigger commentaire ou autre voie entre-temps)
             // — la solder sans relancer une review/redondante.
             let req_at = req.get("at").and_then(Value::as_f64).unwrap_or(0.0);
-            if st
-                .pr_reviews
-                .get(&key)
-                .is_some_and(|e| {
-                    EntryState::of(e) == EntryState::Done
-                        && e.get("started").and_then(Value::as_f64).unwrap_or(0.0) >= req_at
-                })
-            {
+            if st.pr_reviews.get(&key).is_some_and(|e| {
+                EntryState::of(e) == EntryState::Done
+                    && e.get("started").and_then(Value::as_f64).unwrap_or(0.0) >= req_at
+            }) {
                 st.pr_review_requests.remove(&key);
                 continue;
             }
@@ -936,16 +1296,16 @@ impl Daemon {
                 st.pr_review_requests.remove(&key);
                 self.pr_review_notify(
                     &by,
-                    format!("[AgentControl] review {key} refusée — pr_rereview désactivé, verdict déjà posté"),
+                    format!("[AgentControl] review {key} refused — pr_rereview disabled, verdict already posted"),
                 )
                 .await;
                 continue;
             }
-            let Some(head_sha) = self.gh_pr_head(&repo, pr_n, &cfg).await else {
+            let Some(head_sha) = self.pr_head(&repo, pr_n, &cfg).await else {
                 st.pr_review_requests.remove(&key);
                 self.pr_review_notify(
                     &by,
-                    format!("[AgentControl] review {key} refusée — PR introuvable ou fermée"),
+                    format!("[AgentControl] review {key} refused — PR not found or closed"),
                 )
                 .await;
                 continue;
@@ -995,25 +1355,18 @@ impl Daemon {
                         e["sid"] = json!(sid.clone());
                     }
                     self.orch_save(&st);
-                    self.gh_comment(
+                    self.pr_comment(
                         &repo,
                         pr_n,
-                        &ack_comment(
-                            if cfg.pr_reviewer_model.is_empty() {
-                                &cfg.model
-                            } else {
-                                &cfg.pr_reviewer_model
-                            },
-                            &sid,
-                        ),
+                        &ack_comment(cfg.model_or(&cfg.pr_reviewer_model), &sid),
                         &cfg,
                     )
                     .await;
                     self.pr_review_notify(
                         &by,
                         format!(
-                            "[AgentControl] review {key} acceptée — session {sid} lancée \
-                             (worktree au head {})",
+                            "[AgentControl] review {key} accepted — session {sid} launched \
+                             (worktree at head {})",
                             &head_sha[..head_sha.len().min(7)]
                         ),
                     )
@@ -1021,18 +1374,14 @@ impl Daemon {
                     free -= 1;
                 }
                 Err(e) => {
-                    warn!("orchestrateur: launch review {key} (demande interne): {e:#}");
-                    remove_review_worktree(
-                        Path::new(ws_of(&cfg, &repo)),
-                        &pr_review_dir(pr_n, &head_sha),
-                    );
-                    self.pr_review_transient_fail(
+                    warn!("orchestrator: launch review {key} (internal request): {e:#}");
+                    self.pr_review_launch_fail(
                         &key,
-                        "spawn failed",
+                        &e,
                         &repo,
                         pr_n,
                         &mut st,
-                        &pr_review_dir(pr_n, &head_sha),
+                        &pr_review_dir(&cfg, pr_n, &head_sha),
                         &cfg,
                     )
                     .await;
@@ -1041,14 +1390,26 @@ impl Daemon {
             self.orch_save(&st);
         }
 
-        // 2b. Triggers nouveaux sur les PR ouvertes.
-        for (repo, pr_n, _head) in self.pr_review_candidates(&cfg).await {
+        // 2b. Triggers nouveaux sur les PR ouvertes — la source
+        // dépend du `review_trigger_mode` effectif du repo (override
+        // `[review.<repo>]` sinon global) : `comment` = scan des
+        // commentaires forge ; `auto_open`/`auto_push` = détection sur
+        // le head listé, SANS lire les commentaires (forges sans cap
+        // `comments` exclues en amont par `list_changes` de toute
+        // façon) ; `manual`/`off` = aucun scan — les demandes
+        // internes de 2a.5 restent la seule voie (`off` les refuse).
+        for (repo, change) in self.pr_review_candidates(&cfg).await {
             if free == 0 {
                 break;
             }
             if !self.orch.is_enabled() {
                 break;
             }
+            let mode = cfg.review_mode_for(&repo);
+            if !mode.scans() {
+                continue;
+            }
+            let pr_n = change.number;
             let key = format!("{repo}#{pr_n}");
             let last_trigger = st
                 .pr_reviews
@@ -1077,11 +1438,76 @@ impl Daemon {
             {
                 continue;
             }
-            let Some((trigger_id, head_sha)) = self
-                .pr_review_find_trigger(&repo, pr_n, &cfg, last_trigger)
-                .await
-            else {
-                continue;
+            let (trigger_id, head_sha) = match mode {
+                cfg::ReviewTriggerMode::Comment => {
+                    let Some(t) = self
+                        .pr_review_find_trigger(&repo, pr_n, &cfg, last_trigger)
+                        .await
+                    else {
+                        continue;
+                    };
+                    t
+                }
+                // auto_open : première apparition du change ouvert
+                // (aucune entrée connue) → review du head courant.
+                // auto_push : idem, OU head listé différent du sha
+                // reviewé → re-review (entry done/failed/retry_wait —
+                // running déjà filtré). Watermark synthétique
+                // `last_trigger+1` : il ne matche aucun commentaire.
+                _ => {
+                    let entry = st.pr_reviews.get(&key);
+                    let allow_untrusted = cfg.auto_review_untrusted_for(&repo);
+                    // Gate de confiance des modes auto (item #330) :
+                    // une review ne se lance que sur un change fiable
+                    // — same-repo ou auteur OWNER/MEMBER/COLLABORATOR
+                    // (l'assoc est résolue à la demande, jamais pour
+                    // un same-repo). Inconnu = non fiable
+                    // (fail-closed) ; l'entrée `skipped_untrusted`
+                    // mémorise la décision — pas de réévaluation à
+                    // chaque tick. Le mode `comment` et les demandes
+                    // internes ne sont pas filtrés : le déclencheur
+                    // humain fait déjà office de validation.
+                    let mut c = change.clone();
+                    if auto_decision(entry, mode, &c, allow_untrusted) == AutoDecision::ResolveAssoc
+                    {
+                        c.author_assoc = self.pr_change_assoc(&repo, &c, &cfg).await;
+                    }
+                    match auto_decision(entry, mode, &c, allow_untrusted) {
+                        AutoDecision::Idle => continue,
+                        AutoDecision::SkipUntrusted | AutoDecision::ResolveAssoc => {
+                            // ResolveAssoc impossible : assoc a été
+                            // résolu juste au-dessus — "" retombe
+                            // SkipUntrusted. Filet de sécurité quand
+                            // même : traiter comme non fiable.
+                            info!(
+                                "orchestrator: review {key} skipped — \
+                                 untrusted change (mode {}, cross_repo={:?}, \
+                                 author «{}» assoc «{}»)",
+                                mode.as_str(),
+                                c.cross_repo,
+                                c.author,
+                                c.author_assoc
+                            );
+                            st.pr_reviews.insert(
+                                key.clone(),
+                                skipped_entry(last_trigger, &change.head_sha, now, mode.as_str()),
+                            );
+                            continue;
+                        }
+                        AutoDecision::Fire => {}
+                    }
+                    // Sha de vérité : `list_changes` peut le laisser
+                    // vide selon la forge → relecture exacte.
+                    let head_sha = if change.head_sha.is_empty() {
+                        match self.pr_head(&repo, pr_n, &cfg).await {
+                            Some(h) => h,
+                            None => continue,
+                        }
+                    } else {
+                        change.head_sha.clone()
+                    };
+                    (last_trigger + 1, head_sha)
+                }
             };
             // Claim-first : l'état running est persisté AVANT le spawn
             // — un crash entre les deux ne relance rien en double.
@@ -1104,6 +1530,7 @@ impl Daemon {
                     "started": now,
                     "state": EntryState::Running.as_str(),
                     "denied": 0,
+                    "origin": mode.as_str(),
                 }),
             );
             self.orch_save(&st);
@@ -1117,38 +1544,27 @@ impl Daemon {
                         e["sid"] = json!(sid.clone());
                     }
                     self.orch_save(&st);
-                    self.gh_comment(
+                    self.pr_comment(
                         &repo,
                         pr_n,
-                        &ack_comment(
-                            if cfg.pr_reviewer_model.is_empty() {
-                                &cfg.model
-                            } else {
-                                &cfg.pr_reviewer_model
-                            },
-                            &sid,
-                        ),
+                        &ack_comment(cfg.model_or(&cfg.pr_reviewer_model), &sid),
                         &cfg,
                     )
                     .await;
                     free -= 1;
                 }
                 Err(e) => {
-                    warn!("orchestrateur: launch review {key}: {e:#}");
+                    warn!("orchestrator: launch review {key}: {e:#}");
                     // Worktree éventuellement créé avant l'échec (ex.
                     // h_new_session KO) — sinon « already exists » au
                     // retry sur le même sha jusqu'au sweep.
-                    remove_review_worktree(
-                        Path::new(ws_of(&cfg, &repo)),
-                        &pr_review_dir(pr_n, &head_sha),
-                    );
-                    self.pr_review_transient_fail(
+                    self.pr_review_launch_fail(
                         &key,
-                        "spawn failed",
+                        &e,
                         &repo,
                         pr_n,
                         &mut st,
-                        &pr_review_dir(pr_n, &head_sha),
+                        &pr_review_dir(&cfg, pr_n, &head_sha),
                         &cfg,
                     )
                     .await;
@@ -1180,7 +1596,7 @@ impl Daemon {
                 }
             }
             Err(e) => {
-                warn!("orchestrateur: rm reviewer {sid} (review {key}): {e:#} — retry au prochain tick");
+                warn!("orchestrator: rm reviewer {sid} (review {key}): {e:#} — retry next tick");
                 if let Some(e) = st.pr_reviews.get_mut(key).and_then(Value::as_object_mut) {
                     e.insert("rm_sid".into(), json!(sid));
                 }
@@ -1225,6 +1641,7 @@ impl Daemon {
             e.remove("pending_body");
             e.remove("post_tries");
             e.remove("reported_by");
+            e.remove("err_since");
         }
         if !sid.is_empty() {
             self.pr_review_rm_session(key, &sid, st).await;
@@ -1236,13 +1653,49 @@ impl Daemon {
         // une session disparue ne casse jamais la review.
         if !by.is_empty() && matches!(end, EntryState::Done | EntryState::Failed) {
             let text = if end == EntryState::Done {
-                format!("[AgentControl] review {key} terminée — verdict posté sur la PR : {verdict}")
+                format!("[AgentControl] review {key} done — verdict posted on the PR: {verdict}")
             } else {
-                format!(
-                    "[AgentControl] review {key} échouée — voir le commentaire d'échec sur la PR"
-                )
+                format!("[AgentControl] review {key} failed — see the failure comment on the PR")
             };
             self.pr_review_notify(&by, text).await;
+        }
+    }
+
+    /// Échec du `pr_review_launch` : worktree retiré puis — ref
+    /// `pull/N/head` absente ET fetch sha impossible (`RefMissingError`)
+    /// = cause DÉFINITIVE, fail-fast `review failed` sans retry (la
+    /// ref ne réapparaîtra pas seule — pousser un commit la recrée) ;
+    /// toute autre erreur = transitoire bornée.
+    #[allow(clippy::too_many_arguments)]
+    async fn pr_review_launch_fail(
+        self: &Arc<Self>,
+        key: &str,
+        err: &anyhow::Error,
+        repo: &str,
+        pr_n: u64,
+        st: &mut OrchPersist,
+        wt: &Path,
+        cfg: &cfg::OrchCfg,
+    ) {
+        remove_review_worktree(Path::new(ws_of(cfg, repo)), wt);
+        if err.downcast_ref::<RefMissingError>().is_some() {
+            warn!("orchestrator: PR review {key} ref pull/{pr_n}/head absente → failed");
+            self.pr_comment(
+                repo,
+                pr_n,
+                &fail_comment(
+                    &format!("pull/{pr_n}/head missing on origin, sha fetch failed"),
+                    cfg,
+                    repo,
+                ),
+                cfg,
+            )
+            .await;
+            self.pr_review_finish(key, EntryState::Failed, st, wt, Path::new(ws_of(cfg, repo)))
+                .await;
+        } else {
+            self.pr_review_transient_fail(key, "spawn failed", repo, pr_n, st, wt, cfg)
+                .await;
         }
     }
 
@@ -1255,6 +1708,7 @@ impl Daemon {
     /// Pendant `retry_wait` l'entrée ne compte ni dans le pool ni comme
     /// review en cours : un NOUVEAU trigger est servi immédiatement —
     /// le retry ne masque jamais une commande explicite.
+    #[allow(clippy::too_many_arguments)]
     async fn pr_review_transient_fail(
         self: &Arc<Self>,
         key: &str,
@@ -1277,28 +1731,29 @@ impl Daemon {
                 .get((attempts - 1) as usize)
                 .copied()
                 .unwrap_or(REVIEW_RETRY_DELAYS[REVIEW_RETRY_DELAYS.len() - 1]);
-            self.pr_review_finish(key, EntryState::RetryWait, st, wt, Path::new(ws_of(cfg, repo)))
-                .await;
+            self.pr_review_finish(
+                key,
+                EntryState::RetryWait,
+                st,
+                wt,
+                Path::new(ws_of(cfg, repo)),
+            )
+            .await;
             if let Some(e) = st.pr_reviews.get_mut(key).and_then(Value::as_object_mut) {
                 e.insert("attempts".into(), json!(attempts));
                 e.insert("retry_at".into(), json!(now_secs() + delay as f64));
                 e.insert("sid".into(), json!(""));
                 e.insert("denied".into(), json!(0));
             }
-            self.gh_comment(repo, pr_n, &retry_comment(kind, delay), cfg)
+            self.pr_comment(repo, pr_n, &retry_comment(kind, delay), cfg)
                 .await;
-            info!("orchestrateur: review PR {key} {kind} → retry #{attempts} dans {delay}s");
+            info!("orchestrator: PR review {key} {kind} → retry #{attempts} in {delay}s");
         } else {
-            warn!("orchestrateur: review PR {key} {kind} — tentatives épuisées → failed");
-            self.gh_comment(repo, pr_n, &fail_comment(kind), cfg).await;
-            self.pr_review_finish(
-                key,
-                EntryState::Failed,
-                st,
-                wt,
-                Path::new(ws_of(cfg, repo)),
-            )
-            .await;
+            warn!("orchestrator: PR review {key} {kind} — attempts exhausted → failed");
+            self.pr_comment(repo, pr_n, &fail_comment(kind, cfg, repo), cfg)
+                .await;
+            self.pr_review_finish(key, EntryState::Failed, st, wt, Path::new(ws_of(cfg, repo)))
+                .await;
         }
     }
 
@@ -1306,6 +1761,7 @@ impl Daemon {
     /// texte reconstruit contre le head COURANT (jamais d'APPROVED
     /// stale), retry borné à 4 — abandon → `Failed` + tentative de
     /// commentaire d'échec.
+    #[allow(clippy::too_many_arguments)]
     async fn pr_review_post_attempt(
         self: &Arc<Self>,
         key: &str,
@@ -1325,18 +1781,12 @@ impl Daemon {
         else {
             return;
         };
-        let head = self.gh_pr_head(repo, pr_n, cfg).await;
-        let text = verdict_comment(&body, sha, head.as_deref());
-        if self.gh_comment(repo, pr_n, &text, cfg).await {
-            info!("orchestrateur: verdict review PR {key} posté");
-            self.pr_review_finish(
-                key,
-                EntryState::Done,
-                st,
-                wt,
-                Path::new(ws_of(cfg, repo)),
-            )
-            .await;
+        let head = self.pr_head(repo, pr_n, cfg).await;
+        let text = verdict_comment(&body, sha, head.as_deref(), cfg, repo);
+        if self.pr_comment(repo, pr_n, &text, cfg).await {
+            info!("orchestrator: PR review {key} verdict posted");
+            self.pr_review_finish(key, EntryState::Done, st, wt, Path::new(ws_of(cfg, repo)))
+                .await;
         } else {
             let tries = st
                 .pr_reviews
@@ -1345,18 +1795,17 @@ impl Daemon {
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             if tries >= 3 {
-                warn!("orchestrateur: verdict PR {key} impossible à poster → failed");
+                warn!("orchestrator: PR {key} verdict could not be posted → failed");
                 let _ = self
-                    .gh_comment(repo, pr_n, &fail_comment("verdict post failed"), cfg)
+                    .pr_comment(
+                        repo,
+                        pr_n,
+                        &fail_comment("verdict post failed", cfg, repo),
+                        cfg,
+                    )
                     .await;
-                self.pr_review_finish(
-                    key,
-                    EntryState::Failed,
-                    st,
-                    wt,
-                    Path::new(ws_of(cfg, repo)),
-                )
-                .await;
+                self.pr_review_finish(key, EntryState::Failed, st, wt, Path::new(ws_of(cfg, repo)))
+                    .await;
             } else if let Some(e) = st.pr_reviews.get_mut(key) {
                 e["post_tries"] = json!(tries + 1);
             }
@@ -1387,30 +1836,39 @@ impl Daemon {
         let meta = s.meta_snapshot();
         anyhow::ensure!(
             meta.origin.as_deref() == Some(PR_REVIEW_ORIGIN),
-            "verdict refusé : {session} hors pipeline pr-review"
+            "verdict refused: {session} outside the pr-review pipeline"
         );
         anyhow::ensure!(
             verdict == "APPROVED" || verdict == "CHANGES_REQUESTED",
-            "verdict inconnu: {verdict}"
+            "unknown verdict: {verdict}"
         );
-        let body = format!("## Verdict: {verdict}\n\n{body}");
+        let cfg = self.orch.cfg.read().unwrap().clone();
         {
             let mut live = self.orch.state.lock().unwrap();
             let found = live.pr_reviews.iter().find_map(|(k, v)| {
                 let mine = v.get("sid").and_then(Value::as_str) == Some(session.as_str())
-                    || v.get("reported_by").and_then(Value::as_str)
-                        == Some(session.as_str());
+                    || v.get("reported_by").and_then(Value::as_str) == Some(session.as_str());
                 (EntryState::of(v) == EntryState::Running && mine)
                     .then(|| (k.clone(), v.get("pending_body").is_some()))
             });
             let Some((key, duplicate)) = found else {
-                anyhow::bail!("aucune review en cours pour {session}");
+                anyhow::bail!("no review in progress for {session}");
             };
             if duplicate {
                 // Verdict déjà posé (journal ou premier appel) —
                 // idempotent : le second appel n'écrase rien.
                 return Ok(json!({"received": true, "duplicate": true}));
             }
+            // Le mot de protocole est traduit en titre `## <label
+            // configuré du repo>` dès l'écriture — le post du tick
+            // republie `pending_body` tel quel.
+            let kind = if verdict == "APPROVED" {
+                cfg::ReviewVerdict::Approved
+            } else {
+                cfg::ReviewVerdict::Changes
+            };
+            let repo = key.rsplit('#').nth(1).unwrap_or("");
+            let body = format!("## {}\n\n{body}", cfg.verdict_label_for(kind, repo));
             if let Some(e) = live.pr_reviews.get_mut(&key) {
                 e["pending_body"] = json!(body);
                 e["reported_by"] = json!(session.clone());
@@ -1436,16 +1894,15 @@ impl Daemon {
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             if let Err(e) = d.h_delete_session(session.clone()).await {
-                warn!("orchestrateur: suppression reviewer {session} post-verdict: {e:#}");
+                warn!("orchestrator: post-verdict reviewer removal {session}: {e:#}");
                 // Delete avorté : `rm_sid` sur l'entrée encore Running
                 // (pending_body posé) → le sweeper retente au prochain
                 // tick ; la GC composant prend le relais si l'entrée a
                 // été soldée entre-temps (item #250).
                 let mut live = d.orch.state.lock().unwrap();
                 let key = live.pr_reviews.iter().find_map(|(k, v)| {
-                    (v.get("reported_by").and_then(Value::as_str)
-                        == Some(session.as_str()))
-                    .then(|| k.clone())
+                    (v.get("reported_by").and_then(Value::as_str) == Some(session.as_str()))
+                        .then(|| k.clone())
                 });
                 if let Some(k) = key {
                     if let Some(e) = live.pr_reviews.get_mut(&k).and_then(Value::as_object_mut) {
@@ -1478,11 +1935,20 @@ impl Daemon {
         pr: u64,
     ) -> Result<Value> {
         let cfg = self.orch.cfg.read().unwrap().clone();
-        anyhow::ensure!(cfg.pr_review, "pr_review désactivé (orchestrateur)");
-        anyhow::ensure!(pr > 0, "numéro de PR invalide");
+        anyhow::ensure!(cfg.pr_review, "pr_review disabled (orchestrator)");
+        anyhow::ensure!(pr > 0, "invalid PR number");
+        // `group/sub/proj` GitLab comme `proj` Gerrit sont valides —
+        // seul le format « pas de chemin du tout » est rejeté.
         anyhow::ensure!(
-            repo.contains('/') && !repo.contains(char::is_whitespace),
-            "repo attendu au format owner/name"
+            !repo.is_empty() && !repo.contains(char::is_whitespace),
+            "repo expected in path/name format"
+        );
+        // `review_trigger_mode=off` (global ou override repo) coupe
+        // AUSSI les demandes internes — `manual` reste le mode « RPC
+        // seule ».
+        anyhow::ensure!(
+            cfg.review_mode_for(&repo) != cfg::ReviewTriggerMode::Off,
+            "review_trigger_mode=off on {repo} — reviews refused"
         );
         // Demandeur A2A : la session doit exister (traçabilité de la
         // notification verdict — jamais de notification vers un
@@ -1490,15 +1956,20 @@ impl Daemon {
         if let Some(sid) = &session {
             self.get_session(sid).await?;
         }
-        // PR cible : ouverte + base allowlistée — les mêmes gardes
-        // que le chemin commentaire (jamais `main`).
-        let Some((state, base, _head)) = self.gh_pr_info(&repo, pr, &cfg).await else {
-            anyhow::bail!("PR {repo}#{pr} introuvable");
+        // PR cible : ouverte + base allowlistée (branche d'intégration
+        // configurée) — les mêmes gardes que le chemin commentaire,
+        // toutes forges (state normalisé open|draft|merged|closed).
+        let Some((state, base, _head)) = self.pr_change_info(&repo, pr, &cfg).await else {
+            anyhow::bail!("PR {repo}#{pr} not found");
         };
-        anyhow::ensure!(state == "OPEN", "PR {repo}#{pr} fermée ({state})");
         anyhow::ensure!(
-            base == ALLOWED_BASE,
-            "PR {repo}#{pr} : base «{base}» ≠ {ALLOWED_BASE} — review refusée"
+            state == "open" || state == "draft",
+            "PR {repo}#{pr} closed ({state})"
+        );
+        anyhow::ensure!(
+            base == cfg.pr_base(),
+            "PR {repo}#{pr}: base «{base}» ≠ {} — review refused",
+            cfg.pr_base()
         );
         let key = format!("{repo}#{pr}");
         let by = session.unwrap_or_default();
@@ -1513,9 +1984,7 @@ impl Daemon {
                     .get(&key)
                     .is_some_and(|v| EntryState::of(v) == EntryState::Done)
             {
-                anyhow::bail!(
-                    "pr_rereview désactivé — une review a déjà été rendue sur {key}"
-                );
+                anyhow::bail!("pr_rereview disabled — a review was already delivered on {key}");
             }
             // Upsert : le plus récent gagne (même règle que les
             // triggers commentaire) — une demande en file est
@@ -1550,40 +2019,124 @@ impl Daemon {
         }))
     }
 
-    /// `gh pr view` → (state, baseRefName, headRefOid) — validation
-    /// d'une demande interne (ouverte + base allowlistée).
-    async fn gh_pr_info(
+    /// Client forge résolu pour `repo` — (kind, host, repo) de
+    /// l'entrée registre portant ce repo (la cible explicite prime),
+    /// sinon du remote `origin` du workspace routé (vérité du clone),
+    /// sinon github.com implicite.
+    /// Le transport vient de `[[forges]]` (`spec_for`) — `gh` n'est
+    /// requis que si la forge résolue est github sans autre
+    /// transport. Le `spawn_blocking` absorbe les probes `auto`
+    /// (`gh auth status`) et le `git remote` du routage.
+    pub(crate) async fn forge_client(
+        &self,
+        repo: &str,
+        cfg: &cfg::OrchCfg,
+    ) -> Option<Arc<dyn forgesync::ForgeClient>> {
+        let ws = ws_of(cfg, repo).to_string();
+        let repo = repo.to_string();
+        let forges = Arc::clone(&self.forges);
+        let registry: Vec<(String, String, String)> = self
+            .prs
+            .list()
+            .iter()
+            .map(|p| {
+                (
+                    p.repo.clone(),
+                    proto::forge_kind(&p.forge).to_string(),
+                    if p.host.is_empty() {
+                        proto::forge_default_host(&p.forge).to_string()
+                    } else {
+                        p.host.clone()
+                    },
+                )
+            })
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            let f = forges.read().unwrap();
+            let set = f.set.list_json();
+            let set = set.as_array()?;
+            // Registre D'ABORD : `repo` est la cible explicite (entrée
+            // connue → sa forge fait foi) ; le remote ne sert que pour
+            // un repo jamais enregistré (PR du workspace).
+            let (kind, host, r) = registry
+                .iter()
+                .find(|(rr, _, _)| rr == &repo)
+                .map(|(_, k, h)| (k.clone(), h.clone(), repo.clone()))
+                .or_else(|| crate::forges::remote_forge(&f.set, Path::new(&ws)))
+                .unwrap_or_else(|| ("github".into(), "github.com".into(), repo));
+            forgesync::client_for(set, &kind, &host, &r, Path::new(&ws))
+        })
+        .await
+        .ok()?
+    }
+
+    /// Client forge direct depuis (kind, host, repo) — résolution
+    /// « registre » sans consulter le remote (entrée `PrEntry` qui
+    /// porte déjà forge/host/repo). `spawn_blocking` pour les probes
+    /// `auto`.
+    pub(crate) async fn forge_client_of(
+        &self,
+        kind: &str,
+        host: &str,
+        repo: &str,
+        ws: &Path,
+    ) -> Option<Arc<dyn forgesync::ForgeClient>> {
+        let forges = Arc::clone(&self.forges);
+        let ws = ws.to_path_buf();
+        let (kind, host, repo) = (kind.to_string(), host.to_string(), repo.to_string());
+        tokio::task::spawn_blocking(move || {
+            let f = forges.read().unwrap();
+            let set = f.set.list_json();
+            forgesync::client_for(set.as_array()?, &kind, &host, &repo, &ws)
+        })
+        .await
+        .ok()?
+    }
+
+    /// Client du repo du WORKSPACE (release PR, garde draft) — tout
+    /// vient du remote `origin`, sans `gh` ni registre.
+    pub(crate) async fn forge_client_at(
+        &self,
+        ws: &Path,
+    ) -> Option<Arc<dyn forgesync::ForgeClient>> {
+        let forges = Arc::clone(&self.forges);
+        let ws = ws.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let f = forges.read().unwrap();
+            let (kind, host, repo) = crate::forges::remote_forge(&f.set, &ws)?;
+            let set = f.set.list_json();
+            forgesync::client_for(set.as_array()?, &kind, &host, &repo, &ws)
+        })
+        .await
+        .ok()?
+    }
+
+    /// `get_change` du transport résolu — (state, base, head, title,
+    /// body…) normalisé `ChangeInfo`.
+    async fn pr_change(
+        &self,
+        repo: &str,
+        id: &str,
+        cfg: &cfg::OrchCfg,
+    ) -> Option<forgesync::ChangeInfo> {
+        let c = self.forge_client(repo, cfg).await?;
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || c.get_change(&id))
+            .await
+            .ok()?
+    }
+
+    /// (state, baseRefName, headRefOid) — validation d'une demande
+    /// interne (ouverte + base allowlistée), toutes forges.
+    async fn pr_change_info(
         &self,
         repo: &str,
         pr_n: u64,
         cfg: &cfg::OrchCfg,
     ) -> Option<(String, String, String)> {
-        let (rc, out, _e) = run_out(
-            &[
-                "gh",
-                "pr",
-                "view",
-                &pr_n.to_string(),
-                "-R",
-                repo,
-                "--json",
-                "state,baseRefName,headRefOid",
-                "-q",
-                "[.state, .baseRefName, .headRefOid] | @tsv",
-            ],
-            Path::new(&cfg.workspace),
-        )
-        .await
-        .unwrap_or((-1, String::new(), String::new()));
-        if rc != 0 {
-            return None;
-        }
-        let mut f = out.trim().splitn(3, '\t');
-        Some((
-            f.next()?.to_string(),
-            f.next()?.to_string(),
-            f.next().unwrap_or("").to_string(),
-        ))
+        self.pr_change(repo, &pr_n.to_string(), cfg)
+            .await
+            .map(|c| (c.state, c.base, c.head_sha))
     }
 
     /// Notification A2A au demandeur d'une review interne — même
@@ -1601,86 +2154,98 @@ impl Daemon {
         {
             return;
         }
-        if self.h_resume_session(by.to_string(), None).await.is_ok() {
+        if self
+            .h_resume_session(by.to_string(), None, false)
+            .await
+            .is_ok()
+        {
             let _ = self.h_send(by.to_string(), text, false, false).await;
         }
     }
 
-    /// PR ouvertes à reviewer : `gh pr list --base next_release` par
-    /// repo routé (registre ∪ origin du workspace), chaque numéro une
-    /// seule fois — la liste forge fait foi pour le statut.
-    async fn pr_review_candidates(&self, cfg: &cfg::OrchCfg) -> Vec<(String, u64, String)> {
-        let mut repos: HashSet<String> = self
-            .prs
-            .list()
-            .iter()
-            .filter(|p| p.forge.is_empty() || p.forge == "github")
-            .map(|p| p.repo.clone())
-            .collect();
-        let (rc, out, _e) = run_out(
-            &[
-                "gh",
-                "repo",
-                "view",
-                "--json",
-                "nameWithOwner",
-                "-q",
-                ".nameWithOwner",
-            ],
-            Path::new(&cfg.workspace),
-        )
-        .await
-        .unwrap_or((-1, String::new(), String::new()));
-        if rc == 0 {
-            let r = out.trim().to_string();
-            if !r.is_empty() {
-                repos.insert(r);
+    /// Changes ouverts à reviewer : `list_changes` du transport résolu
+    /// filtré à base `integration_branch` par repo routé (registre ∪
+    /// remote du workspace), chaque numéro une seule fois — la liste
+    /// forge fait foi pour le statut. Le `ChangeInfo` complet est
+    /// rendu : le gate de confiance des modes auto lit
+    /// `cross_repo`/`author`/`author_assoc` dessus. Toutes forges à
+    /// `caps.list` ; git nu est exclu (pas de lecture automatique).
+    async fn pr_review_candidates(
+        &self,
+        cfg: &cfg::OrchCfg,
+    ) -> Vec<(String, forgesync::ChangeInfo)> {
+        // (repo, kind, host) côté client : les entrées du registre
+        // portent forge+host directement ; le workspace entre via son
+        // remote (pas besoin de `gh repo view`).
+        let mut targets: Vec<(String, String, String)> = Vec::new();
+        // Dédup sur (kind, host, repo) : le même chemin peut exister
+        // sur deux hôtes d'un type (gitlab.com + self-hosted).
+        let mut seen: HashSet<(String, String, String)> = HashSet::new();
+        for p in self.prs.list() {
+            let kind = proto::forge_kind(&p.forge).to_string();
+            let host = if p.host.is_empty() {
+                proto::forge_default_host(&p.forge).to_string()
+            } else {
+                p.host.clone()
+            };
+            if seen.insert((kind.clone(), host.clone(), p.repo.clone())) {
+                targets.push((p.repo.clone(), kind, host));
             }
         }
-        let mut out_v: Vec<(String, u64, String)> = Vec::new();
-        for repo in repos {
-            let (rc, out, _e) = run_out(
-                &[
-                    "gh",
-                    "pr",
-                    "list",
-                    "-R",
-                    &repo,
-                    "--state",
-                    "open",
-                    "--base",
-                    ALLOWED_BASE,
-                    "--json",
-                    "number,headRefOid",
-                ],
-                Path::new(&cfg.workspace),
-            )
-            .await
-            .unwrap_or((-1, String::new(), String::new()));
-            if rc != 0 {
-                continue;
-            }
-            let Ok(list) = serde_json::from_str::<Vec<Value>>(&out) else {
-                continue;
+        let base = cfg.pr_base().to_string();
+        let forges = Arc::clone(&self.forges);
+        let wss: Vec<String> = std::iter::once(cfg.workspace.clone())
+            .chain(cfg.repo_workspaces.values().cloned())
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            let f = forges.read().unwrap();
+            let set = f.set.list_json();
+            let Some(set) = set.as_array() else {
+                return Vec::new();
             };
-            for pr in list {
-                if let Some(n) = pr.get("number").and_then(Value::as_u64) {
-                    let head = pr
-                        .get("headRefOid")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    out_v.push((repo.clone(), n, head));
+            // Remote du workspace principal puis de chaque workspace
+            // routé — le repo de la forge fait foi pour l'appel API.
+            for ws in &wss {
+                if let Some((kind, host, r)) = crate::forges::remote_forge(&f.set, Path::new(ws)) {
+                    if seen.insert((kind.clone(), host.clone(), r.clone())) {
+                        targets.push((r, kind, host));
+                    }
                 }
             }
-        }
-        out_v
+            let mut out_v = Vec::new();
+            for (repo, kind, host) in &targets {
+                let Some(client) = forgesync::client_for(set, kind, host, repo, Path::new(&wss[0]))
+                else {
+                    continue;
+                };
+                let caps = client.caps();
+                if !caps.list || !client.available() {
+                    continue;
+                }
+                let Some(list) = client.list_changes(&forgesync::ListQuery::open(200)) else {
+                    continue;
+                };
+                for c in list {
+                    // Base allowlistée — même garde que `--base` de
+                    // `gh pr list` (filtre côté client, les API ne
+                    // filtrent pas toutes pareil).
+                    if (base.is_empty() || c.base.eq_ignore_ascii_case(&base)) && c.number > 0 {
+                        out_v.push((repo.clone(), c));
+                    }
+                }
+            }
+            out_v
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// Dernier trigger non traité d'une PR → (comment id, head sha).
     /// Retourne None si : pas de trigger plus récent que
     /// `last_trigger`, trigger d'un tiers, ou un ack d'automatisation
-    /// externe suit le trigger.
+    /// externe suit le trigger. Toutes forges : les notes système
+    /// (events GitLab, messages autogenerated Gerrit) sont ignorées,
+    /// l'autorisation passe par `author_assoc` du transport.
     async fn pr_review_find_trigger(
         &self,
         repo: &str,
@@ -1688,88 +2253,84 @@ impl Daemon {
         cfg: &cfg::OrchCfg,
         last_trigger: u64,
     ) -> Option<(u64, String)> {
-        let ep = format!("repos/{repo}/issues/{pr_n}/comments?per_page=100");
-        let (rc, out, _e) = run_out(
-            &[
-                "gh",
-                "api",
-                "--paginate",
-                &ep,
-                "--jq",
-                ".[] | [.id, .created_at, .author_association, (.body | @base64)] | @tsv",
-            ],
-            Path::new(&cfg.workspace),
-        )
-        .await
-        .unwrap_or((-1, String::new(), String::new()));
-        if rc != 0 {
+        let client = self.forge_client(repo, cfg).await?;
+        if !client.caps().comments {
             return None;
         }
-        let mut comments: Vec<(u64, String, String)> = Vec::new();
-        for line in out.lines() {
-            let mut f = line.splitn(4, '\t');
-            let (Some(id), Some(_ts), Some(assoc), Some(b64)) =
-                (f.next(), f.next(), f.next(), f.next())
-            else {
-                continue;
-            };
-            let Ok(id) = id.parse::<u64>() else { continue };
-            let body = String::from_utf8(base64_decode(b64.trim())).unwrap_or_default();
-            comments.push((id, assoc.trim().to_string(), body));
-        }
-        let tid = pick_trigger(&comments, &cfg.pr_review_trigger, last_trigger)?;
-        // Head courant — lu frais (la liste batch peut être pire).
-        self.gh_pr_head(repo, pr_n, cfg).await.map(|h| (tid, h))
+        let id = pr_n.to_string();
+        let trig = cfg.review_trigger_for(repo).to_string();
+        tokio::task::spawn_blocking(move || {
+            let cs = client.list_comments(&id, None)?;
+            // `author_assoc` n'est résolu que sur les notes candidates
+            // au trigger (GitLab = 1 GET members/<id> par note — ~0-1
+            // appel par tick au lieu d'un par note du fil) ; hors de
+            // cet ensemble `pick_trigger` ne lit jamais l'assoc, "" y
+            // suffit.
+            let comments: Vec<(u64, String, String)> = cs
+                .iter()
+                .filter(|c| !c.system)
+                .map(|c| {
+                    let assoc = if c.id > last_trigger && is_trigger(&c.body, &trig) {
+                        client.author_assoc(c)
+                    } else {
+                        String::new()
+                    };
+                    (c.id, assoc, c.body.clone())
+                })
+                .collect();
+            let tid = pick_trigger(&comments, &trig, last_trigger)?;
+            // Head courant — lu frais (la liste batch peut être pire).
+            client
+                .get_change(&id)
+                .and_then(|c| (!c.head_sha.is_empty()).then_some((tid, c.head_sha)))
+        })
+        .await
+        .ok()?
     }
 
-    /// `gh pr view` → headRefOid courant (frais, décide stale).
-    async fn gh_pr_head(&self, repo: &str, pr_n: u64, cfg: &cfg::OrchCfg) -> Option<String> {
-        let (rc, out, _e) = run_out(
-            &[
-                "gh",
-                "pr",
-                "view",
-                &pr_n.to_string(),
-                "-R",
-                repo,
-                "--json",
-                "headRefOid,baseRefName",
-                "-q",
-                ".headRefOid",
-            ],
-            Path::new(&cfg.workspace),
-        )
-        .await
-        .unwrap_or((-1, String::new(), String::new()));
-        if rc != 0 {
-            return None;
-        }
-        let h = out.trim().to_string();
-        (!h.is_empty()).then_some(h)
+    /// Head SHA courant du change (frais, décide stale) — `head_sha`
+    /// normalisé du transport (pull head / MR sha / patchset courant).
+    async fn pr_head(&self, repo: &str, pr_n: u64, cfg: &cfg::OrchCfg) -> Option<String> {
+        self.pr_change(repo, &pr_n.to_string(), cfg)
+            .await
+            .and_then(|c| (!c.head_sha.is_empty()).then_some(c.head_sha))
     }
 
-    /// Commentaire sur la PR via gh (compte local = OWNER pour le
-    /// hook) → posté ?
-    async fn gh_comment(&self, repo: &str, pr_n: u64, body: &str, cfg: &cfg::OrchCfg) -> bool {
-        let (rc, _o, e) = run_out(
-            &[
-                "gh",
-                "pr",
-                "comment",
-                &pr_n.to_string(),
-                "-R",
-                repo,
-                "--body",
-                body,
-            ],
-            Path::new(&cfg.workspace),
-        )
-        .await
-        .unwrap_or((-1, String::new(), "spawn impossible".into()));
-        if rc != 0 {
-            warn!("orchestrateur: comment {repo}#{pr_n} rc={rc} {e}");
+    /// Association de l'auteur d'un change — `change_author_assoc` du
+    /// transport (résolution lazy : un appel forge, uniquement pour
+    /// les candidats non same-repo du gate de confiance). "" =
+    /// inconnu → non fiable au `change_trusted` (fail-closed).
+    async fn pr_change_assoc(
+        &self,
+        repo: &str,
+        change: &forgesync::ChangeInfo,
+        cfg: &cfg::OrchCfg,
+    ) -> String {
+        let Some(client) = self.forge_client(repo, cfg).await else {
+            return String::new();
+        };
+        let c = change.clone();
+        tokio::task::spawn_blocking(move || client.change_author_assoc(&c))
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Commentaire/note/review-message sur le change (compte local
+    /// pour le hook github) → posté ? false si le transport ne sait
+    /// pas écrire (anonyme, git nu) — les appelants dégradent.
+    async fn pr_comment(&self, repo: &str, pr_n: u64, body: &str, cfg: &cfg::OrchCfg) -> bool {
+        let Some(c) = self.forge_client(repo, cfg).await else {
+            return false;
+        };
+        let id = pr_n.to_string();
+        let body = body.to_string();
+        let ok = tokio::task::spawn_blocking(move || c.post_comment(&id, &body))
+            .await
+            .unwrap_or(false);
+        if !ok {
+            warn!("orchestrator: comment {repo}#{pr_n} refused by transport");
         }
-        rc == 0
+        ok
     }
 
     /// Worktree frais au SHA + spawn `PRReview-<N>` → sid.
@@ -1784,31 +2345,37 @@ impl Daemon {
         let ws = ws_of(cfg, repo);
         let ws_path = Path::new(ws);
         // Remote du clone = repo de la PR, sinon review sur le mauvais
-        // dépôt (skip silencieux, pas de boucle).
+        // dépôt (skip silencieux, pas de boucle). Le chemin complet du
+        // remote est comparé — sous-groupes GitLab compris.
         let (rc, out, _e) = run_out(&["git", "-C", ws, "remote", "get-url", "origin"], ws_path)
             .await
             .context("git remote get-url")?;
         anyhow::ensure!(
-            rc == 0 && remote_nwo(&out).is_some_and(|nwo| nwo.eq_ignore_ascii_case(repo)),
+            rc == 0
+                && crate::forges::remote_parts(&out).is_some_and(|(_, p)| {
+                    p.eq_ignore_ascii_case(repo)
+                        || p.trim_start_matches("a/").eq_ignore_ascii_case(repo)
+                }),
             "workspace {ws} : remote origin ≠ {repo}"
         );
-        // Ref de la PR fetchée puis worktree détaché au SHA exact.
-        let wt = pr_review_dir(pr_n, sha);
-        let _ = std::fs::create_dir_all(pr_reviews_root());
-        let (rc, _o, e) = run_out(
-            &[
-                "git",
-                "-C",
-                ws,
-                "fetch",
-                "origin",
-                &format!("pull/{pr_n}/head"),
-            ],
-            ws_path,
-        )
-        .await
-        .unwrap_or((-1, String::new(), "spawn".into()));
-        anyhow::ensure!(rc == 0, "git fetch pull/{pr_n}/head: {e}");
+        // Ref de change de la forge (`pull/N/head`, `merge-requests/
+        // N/head`, ref de patchset gerrit) fetchée — fallback SHA si
+        // absente — puis worktree détaché au SHA exact. La métadonnée
+        // (titre/body) arrive par le même `get_change`.
+        let id = pr_n.to_string();
+        let client = self.forge_client(repo, cfg).await;
+        let (head_ref, meta) = match client {
+            Some(c) => {
+                let id2 = id.clone();
+                tokio::task::spawn_blocking(move || (c.head_ref(&id2), c.get_change(&id2)))
+                    .await
+                    .unwrap_or((None, None))
+            }
+            None => (None, None),
+        };
+        let wt = pr_review_dir(cfg, pr_n, sha);
+        let _ = std::fs::create_dir_all(pr_reviews_root(cfg));
+        fetch_pr_head(Path::new(ws), head_ref.as_deref(), sha, key).await?;
         let (rc, _o, e) = run_out(
             &[
                 "git",
@@ -1825,47 +2392,58 @@ impl Daemon {
         .await
         .unwrap_or((-1, String::new(), "spawn".into()));
         anyhow::ensure!(rc == 0, "git worktree add: {e}");
-        // Métadonnées de la PR pour le prompt.
-        let (_rc, meta, _e) = run_out(
-            &[
-                "gh",
-                "pr",
-                "view",
-                &pr_n.to_string(),
-                "-R",
-                repo,
-                "--json",
-                "title,body",
-                "-q",
-                ".title + \"\\n\\n\" + .body",
-            ],
-            ws_path,
-        )
-        .await
-        .unwrap_or((-1, String::new(), String::new()));
+        // Métadonnées du change pour le prompt (dégradé : titre seul
+        // si le transport ne lit pas — le SHA+diff restent reviewés).
+        let meta = meta
+            .map(|c| format!("{}\n\n{}", c.title, c.body))
+            .unwrap_or_default();
         let meta = meta.trim().to_string();
         let (title, body) = meta.split_once('\n').unwrap_or((&meta, ""));
+        // Template : `review_prompt` du repo (override `[review.<repo>]`
+        // sinon global) — surcharge TOTALE du built-in `REVIEW_PROMPT`,
+        // même mécanique de placeholders ({PR}…{BODY} + {TRIGGER},
+        // {VERDICT_APPROVED}/{VERDICT_CHANGES} pour rester aligné sur
+        // les labels configurés et le déclencheur du repo, {RULES}
+        // pour le fichier de règles effectif du workspace).
         let prompt = fill_pr(
-            REVIEW_PROMPT,
+            cfg.review_prompt_for(repo).unwrap_or(REVIEW_PROMPT),
             &[
                 ("PR", pr_n.to_string()),
                 ("REPO", repo.to_string()),
                 ("SHA", sha.to_string()),
-                ("BASE", ALLOWED_BASE.to_string()),
+                ("BASE", cfg.pr_base().to_string()),
                 ("WS", ws.to_string()),
                 ("TITLE", title.to_string()),
                 ("BODY", clip(body, 8000)),
+                ("TRIGGER", cfg.review_trigger_for(repo).to_string()),
+                ("RULES", crate::server::orch_plan::rules_text(cfg, repo, ws)),
+                (
+                    "VERDICT_APPROVED",
+                    cfg.verdict_label_for(cfg::ReviewVerdict::Approved, repo)
+                        .to_string(),
+                ),
+                (
+                    "VERDICT_CHANGES",
+                    cfg.verdict_label_for(cfg::ReviewVerdict::Changes, repo)
+                        .to_string(),
+                ),
             ],
         );
-        let n: u64 = st_counter(&key);
-        let model = if cfg.pr_reviewer_model.is_empty() {
-            cfg.model.clone()
-        } else {
-            cfg.pr_reviewer_model.clone()
-        };
+        let n: u64 = st_counter(key);
+        // `*_model`/`*_effort` par rôle : vide → repli global (même
+        // sémantique que les autres rôles pipeline).
+        let model = cfg.model_or(&cfg.pr_reviewer_model).to_string();
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
         let agent = cfg.agent_or(&cfg.pr_reviewer_agent);
-        self.warn_spawn_cfg(agent, &model, &cfg.pr_reviewer_mode);
+        // Le `thought_level` global est un réglage de l'agent global :
+        // le reprendre pour un autre profil fait échouer set_config_option.
+        let effort = if cfg.pr_reviewer_effort.is_empty() && agent != cfg.agent {
+            String::new()
+        } else {
+            cfg.effort_or(&cfg.pr_reviewer_effort).to_string()
+        };
+        self.warn_spawn_cfg(agent, &model, &cfg.pr_reviewer_mode)
+            .await;
         let v = self
             .h_new_session(
                 agent.to_string(),
@@ -1882,10 +2460,11 @@ impl Daemon {
         let sid = v
             .get("session")
             .and_then(Value::as_str)
-            .context("spawn sans session")?
+            .context("spawn without session")?
             .to_string();
+        self.apply_spawn_cfg(&sid, &effort).await;
         info!(
-            "orchestrateur: review PR {key} → {sid} (sha {})",
+            "orchestrator: review PR {key} → {sid} (sha {})",
             &sha[..7.min(sha.len())]
         );
         Ok(sid)
@@ -1895,7 +2474,7 @@ impl Daemon {
     /// démon redémarré) : `git worktree remove --force` + `prune`, puis
     /// suppression du répertoire.
     async fn pr_review_sweep_orphans(self: &Arc<Self>, cfg: &cfg::OrchCfg) {
-        let root = pr_reviews_root();
+        let root = pr_reviews_root(cfg);
         let Ok(rd) = std::fs::read_dir(&root) else {
             return;
         };
@@ -1931,15 +2510,15 @@ pub(super) fn remove_review_worktree(ws: &Path, wt: &Path) {
     let _ = std::fs::remove_dir_all(wt);
 }
 
-/// Racine des worktrees de review (hors checkout — `state_dir`).
-pub(super) fn pr_reviews_root() -> PathBuf {
-    state_dir().join("pr-reviews")
+/// Racine des worktrees de review (hors checkout — `state_dir` configuré).
+pub(super) fn pr_reviews_root(cfg: &OrchCfg) -> PathBuf {
+    cfg.state_dir().join("pr-reviews")
 }
 
 /// Worktree d'une review : `pr-<N>-<sha7>` sous la racine dédiée.
-fn pr_review_dir(pr_n: u64, sha: &str) -> PathBuf {
+fn pr_review_dir(cfg: &OrchCfg, pr_n: u64, sha: &str) -> PathBuf {
     let s7: String = sha.chars().take(7).collect();
-    pr_reviews_root().join(format!("pr-{pr_n}-{s7}"))
+    pr_reviews_root(cfg).join(format!("pr-{pr_n}-{s7}"))
 }
 
 /// Numéro de titre dérivé du numéro de PR (stable, pas de compteur
@@ -1951,232 +2530,5 @@ fn st_counter(key: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Décodage base64 minimal (std seul — pas de dépendance suppl.).
-fn base64_decode(s: &str) -> Vec<u8> {
-    fn val(c: u8) -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    let bytes: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    for chunk in bytes.chunks(4) {
-        let mut acc = 0u32;
-        let mut n = 0;
-        for (i, &c) in chunk.iter().enumerate() {
-            if c == b'=' {
-                break;
-            }
-            if let Some(v) = val(c) {
-                acc |= (v as u32) << (18 - 6 * i);
-                n += 1;
-            }
-        }
-        match n {
-            4 => {
-                out.push((acc >> 16) as u8);
-                out.push((acc >> 8) as u8);
-                out.push(acc as u8);
-            }
-            3 => {
-                out.push((acc >> 16) as u8);
-                out.push((acc >> 8) as u8);
-            }
-            2 => out.push((acc >> 16) as u8),
-            _ => {}
-        }
-    }
-    out
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ev(seq: u64, text: &str) -> proto::Event {
-        proto::Event {
-            seq,
-            ts: "2026-01-01T00:00:00Z".into(),
-            kind: EventKind::AgentText { text: text.into() },
-        }
-    }
-
-    #[test]
-    fn trigger_exact() {
-        assert!(is_trigger("/mr review", "/mr review"));
-        assert!(is_trigger("  /mr review  \n", "/mr review"));
-        assert!(!is_trigger("/mr review svp", "/mr review"));
-        // Une citation ne relance pas (contains rejeté).
-        assert!(!is_trigger("> /mr review\nréponse", "/mr review"));
-        assert!(!is_trigger("utilise /mr review", "/mr review"));
-    }
-
-    #[test]
-    fn gate_auteur() {
-        for a in TRIGGER_AUTHORS {
-            assert!(trigger_author_ok(a));
-        }
-        for a in ["CONTRIBUTOR", "NONE", "", "FIRST_TIMER"] {
-            assert!(!trigger_author_ok(a));
-        }
-    }
-
-    #[test]
-    fn verdict_bloc() {
-        // Dernier AgentText contenant le bloc gagne.
-        let events = vec![
-            ev(
-                1,
-                "notes\nREVIEW_RESULT_BEGIN\n## Verdict: CHANGES_REQUESTED\n\nX\nREVIEW_RESULT_END",
-            ),
-            ev(2, "bruit"),
-            ev(
-                3,
-                "REVIEW_RESULT_BEGIN\n## Verdict: APPROVED\n\nOK\nREVIEW_RESULT_END",
-            ),
-        ];
-        let b = extract_verdict_block(&events).unwrap();
-        assert!(b.starts_with("## Verdict: APPROVED"));
-        // Tronqué (pas de END) → ignoré.
-        assert_eq!(
-            extract_verdict_block(&[ev(1, "REVIEW_RESULT_BEGIN\n## Verdict: APPROVED")]),
-            None
-        );
-        assert_eq!(extract_verdict_block(&[ev(1, "pas de bloc")]), None);
-    }
-
-    #[test]
-    fn verdict_titre() {
-        assert!(verdict_body_ok("## Verdict: APPROVED\n\ncorps"));
-        assert!(verdict_body_ok("## Verdict: CHANGES_REQUESTED\nfix X"));
-        assert!(!verdict_body_ok("## Verdict: stale"));
-        assert!(!verdict_body_ok("# Review\n## Verdict: APPROVED"));
-        assert!(!verdict_body_ok(""));
-    }
-
-    #[test]
-    fn formats_hook() {
-        // L'ack et l'échec ne matchent pas `^[*#]+ ?(Review|Verdict)`.
-        let re = regex_lite("^[*#]+ ?(Review|Verdict)");
-        assert!(!re.is_match(&ack_comment("swe-2-high", "s-x")));
-        assert!(!re.is_match(&fail_comment("timeout")));
-        assert!(!fail_comment("x").contains("Verdict"));
-        assert!(!ack_comment("m", "s").contains("/mr review"));
-        // Stale : titre Verdict mais jamais APPROVED dans le texte.
-        let stale = "## Verdict: stale — head changed, re-run /mr&#32;review";
-        assert!(!stale.contains("APPROVED"));
-    }
-
-    fn cm(id: u64, assoc: &str, body: &str) -> (u64, String, String) {
-        (id, assoc.to_string(), body.to_string())
-    }
-
-    #[test]
-    fn pick_trigger_choix() {
-        let t = "/mr review";
-        // Dernier trigger valide retenu ; tiers ignorés.
-        let cs = vec![
-            cm(1, "MEMBER", t),
-            cm(2, "NONE", t),
-            cm(3, "OWNER", "  /mr review \n"),
-            cm(4, "MEMBER", "utilise /mr review"),
-        ];
-        assert_eq!(pick_trigger(&cs, t, 0), Some(3));
-        // Watermark : trigger ≤ last ignoré.
-        assert_eq!(pick_trigger(&cs, t, 3), None);
-        assert_eq!(pick_trigger(&cs, t, 1), Some(3));
-    }
-
-    #[test]
-    fn pick_trigger_ack_externe() {
-        let t = "/mr review";
-        // Ack postérieur au trigger candidat → dispensé.
-        let cs = vec![
-            cm(1, "MEMBER", t),
-            cm(2, "MEMBER", "Launching a review — external bot"),
-        ];
-        assert_eq!(pick_trigger(&cs, t, 0), None);
-        // Ack plus ancien qu'un NOUVEAU trigger → n'étouffe pas.
-        let cs2 = vec![
-            cm(1, "MEMBER", t),
-            cm(2, "MEMBER", "Launching a review — external bot"),
-            cm(3, "OWNER", t),
-        ];
-        assert_eq!(pick_trigger(&cs2, t, 0), Some(3));
-        // Ack intercalé entre deux triggers → seul le dernier compte.
-        let cs3 = vec![
-            cm(1, "MEMBER", t),
-            cm(2, "MEMBER", "Launching a review — external bot"),
-            cm(3, "OWNER", t),
-            cm(4, "MEMBER", "Launching a review — external bot"),
-        ];
-        assert_eq!(pick_trigger(&cs3, t, 0), None);
-    }
-
-    #[test]
-    fn remote_nwo_urls() {
-        assert_eq!(
-            remote_nwo("git@github.com:Wameuh/AgentControl.git\n"),
-            Some("Wameuh/AgentControl".to_string())
-        );
-        assert_eq!(
-            remote_nwo("https://github.com/Wameuh/AgentControl"),
-            Some("Wameuh/AgentControl".to_string())
-        );
-        assert_eq!(
-            remote_nwo("ssh://git@github.com/Wameuh/AgentControl.git"),
-            Some("Wameuh/AgentControl".to_string())
-        );
-        // Pas de match souple : « Agent » ≠ « Wameuh/AgentControl ».
-        assert_ne!(
-            remote_nwo("https://github.com/Wameuh/Agent.git"),
-            Some("Wameuh/AgentControl".to_string())
-        );
-    }
-
-    #[test]
-    fn verdict_comment_head() {
-        let body = "## Verdict: APPROVED\n\nok";
-        // Head inchangé → verdict posté avec l'ancre.
-        let t = verdict_comment(body, "abc123", Some("abc123"));
-        assert!(t.starts_with("## Verdict: APPROVED"));
-        assert!(t.contains("Reviewed head: abc123"));
-        // Head déplacé → stale, JAMAIS APPROVED dans le texte.
-        for h in [Some("def456"), None] {
-            let s = verdict_comment(body, "abc123", h);
-            assert!(s.starts_with("## Verdict: stale"));
-            assert!(!s.contains("APPROVED"));
-        }
-    }
-
-    #[test]
-    fn b64_roundtrip() {
-        assert_eq!(
-            String::from_utf8(base64_decode("L21yIHJldmlldw==")).unwrap(),
-            "/mr review"
-        );
-        assert_eq!(
-            String::from_utf8(base64_decode("aGVsbG8gd29ybGQ=")).unwrap(),
-            "hello world"
-        );
-    }
-
-    // Mini regex maison pour les tests de format (évite une dépendance).
-    struct RegexLite(&'static str);
-    fn regex_lite(p: &'static str) -> RegexLite {
-        RegexLite(p)
-    }
-    impl RegexLite {
-        fn is_match(&self, s: &str) -> bool {
-            // Supporte exactement le motif du hook.
-            let first = s.lines().next().unwrap_or("");
-            let t = first.trim_start_matches(['*', '#']).trim_start();
-            t.starts_with("Review") || t.starts_with("Verdict")
-        }
-    }
-}
+mod tests;

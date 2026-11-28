@@ -47,9 +47,7 @@ async fn main() -> Result<()> {
             let (user, host) = auth
                 .split_once('@')
                 .map(|(u, h)| (u.to_string(), h.to_string()))
-                .unwrap_or_else(|| {
-                    (std::env::var("USER").unwrap_or_else(|_| "dev".into()), auth)
-                });
+                .unwrap_or_else(|| (std::env::var("USER").unwrap_or_else(|_| "dev".into()), auth));
             let key_path = args
                 .iter()
                 .position(|a| a == "-k")
@@ -63,13 +61,17 @@ async fn main() -> Result<()> {
                 password: None,
                 key_path,
                 expected_hk: None,
+                // Sonde non interactive — pas de dialogue TOFU.
+                accept_unknown_hostkey: true,
             }
         }
-        "tcp" | "close" => Transport::Tcp(
-            args.get(1)
+        "tcp" | "close" => Transport::Tcp {
+            addr: args
+                .get(1)
                 .context("usage: conn_probe tcp|close <addr>")?
                 .clone(),
-        ),
+            token: std::env::var("AGENTCONTROL_TOKEN").ok(),
+        },
         _ => {
             eprintln!("usage: conn_probe ssh <host> [-- args] | native <u@h[:p]> [-k clé] | tcp <addr> | close <addr>");
             std::process::exit(2);
@@ -80,7 +82,11 @@ async fn main() -> Result<()> {
         // Vérifie que close() solde les appels et libère le transport.
         c.call(ReqKind::DaemonStatus).await?;
         c.close();
-        println!("close(): dead={} why={:?}", *c.dead.borrow(), c.death_reason());
+        println!(
+            "close(): dead={} why={:?}",
+            *c.dead.borrow(),
+            c.death_reason()
+        );
         match c.call(ReqKind::DaemonStatus).await {
             Err(e) => println!("call post-close: {e:#} (attendu)"),
             Ok(_) => println!("call post-close: réponse inattendue"),

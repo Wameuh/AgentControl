@@ -5,6 +5,7 @@
 use anyhow::Context;
 use client_core::Client;
 use serde::Deserialize;
+use serde_json::Value;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tauri::State;
@@ -43,6 +44,15 @@ pub(crate) struct AppState {
     /// pas repayer l'aller-retour à chaque refresh). Absent = inconnu
     /// → on essaie la page d'abord, fallback propre.
     pub(crate) list_page: Mutex<std::collections::HashMap<String, bool>>,
+    /// Capacité `pr_list_page` par clé de connexion — même motif que
+    /// `list_page` (item #367 : le registre PR dépassait 1,9 Mo en une
+    /// ligne → saturation transport).
+    pub(crate) pr_page: Mutex<std::collections::HashMap<String, bool>>,
+    /// Dernier `pr_list` fusionné par clé "conn\0session" : (version,
+    /// tableau). `if_version` du prochain appel → `unchanged` rend le
+    /// cache sans aucun transfert quand registre + reviews n'ont pas
+    /// bougé — le poll badge 60 s devient une sonde de ~100 octets.
+    pub(crate) pr_cache: Mutex<std::collections::HashMap<String, (String, Value)>>,
 }
 
 /// Clé de connexion résolue comme `get_conn` (explicite, défaut, ou
@@ -65,7 +75,7 @@ pub(crate) async fn resolve_conn_key(
         .keys()
         .next()
         .cloned()
-        .context("non connecté — configurez la connexion")
+        .context("not connected — configure the connection")
         .map_err(|e| e.to_string())
 }
 
@@ -74,14 +84,14 @@ pub(crate) async fn get_conn(state: &State<'_, AppState>, key: Option<&str>) -> 
     let map = state.conns.lock().await;
     map.get(&k)
         .map(|c| c.client.clone())
-        .context(format!("connexion inconnue: {k}"))
+        .context(format!("unknown connection: {k}"))
         .map_err(|e| e.to_string())
 }
 
 pub(crate) fn conn_key(cfg: &ConnectCfg) -> String {
     match cfg {
         ConnectCfg::Local {} => "local".into(),
-        ConnectCfg::Tcp { addr } => format!("tcp:{addr}"),
+        ConnectCfg::Tcp { addr, .. } => format!("tcp:{addr}"),
         ConnectCfg::Ssh {
             host, port, native, ..
         } => format!(
@@ -100,7 +110,14 @@ pub(crate) fn conn_key(cfg: &ConnectCfg) -> String {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ConnectCfg {
     Local {},
-    Tcp { addr: String },
+    Tcp {
+        addr: String,
+        /// Jeton `daemon.token` pour l'auth TCP (1re ligne) — pas de
+        /// canal SSH en connexion directe : saisi par l'utilisateur
+        /// (persisté dans connections.json — chiffré par la SecretBox
+        /// sur Android). Optionnel : démons pré-B1 sans.
+        token: Option<String>,
+    },
     Ssh {
         /// `user@host` ou host nu (user demandé côté natif).
         host: String,
@@ -136,7 +153,7 @@ pub(crate) fn split_user_host<'a>(host: &'a str, user: Option<&'a str>) -> Resul
             .ok()
             .filter(|u| !u.is_empty() && cfg!(not(target_os = "android")))
             .map(|u| (u, h))
-            .ok_or_else(|| "user@ requis pour SSH natif".to_string()),
+            .ok_or_else(|| "user@ required for native SSH".to_string()),
     }
 }
 

@@ -9,9 +9,11 @@ import { fmtDur } from "../core/format";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid, meshSetMood } from "../core/chrome";
+import { connLabel } from "../core/conn";
 import type { PrEntry, SessionMeta } from "../core/types";
-import { t } from "../i18n";
-import { dotCls, dotIcon, setAppIcon } from "./status";
+import { getLang, t } from "../i18n";
+import { gemSVG } from "../crystal";
+import { aggregateIcon, AGG_ICON_ROLE, dotCls, dotIcon, setAppIcon } from "./status";
 import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
@@ -43,6 +45,34 @@ function waitTip(s: SessionMeta): string {
   const name = w.name ? ` · ${w.name}` : "";
   const max = w.timeout ? ` · ${t("wait_max", { d: fmtDur(w.timeout) })}` : "";
   return ` · ${age}${name}${max}`;
+}
+
+/** Âge dans l'état courant en secondes (meta.state_since, #383) —
+ *  null sur un vieux démon sans le champ : rien n'est affiché. */
+function stateAgeSecs(s: SessionMeta): number | null {
+  if (s.state_since == null) return null;
+  return Math.max(0, Date.now() / 1000 - s.state_since);
+}
+
+/** Segment « · depuis 3 h » de l'âge d'état — même formulation que
+ *  waitTip (#189), calculé côté client depuis state_since. */
+function stateAgeTip(s: SessionMeta): string {
+  const age = stateAgeSecs(s);
+  if (age == null) return "";
+  return ` · ${age < 1 ? t("just_now") : t("wait_for", { d: fmtDur(age) })}`;
+}
+
+/** Terme d'âge pour renderSig : le HTML des sessions endormies dépend
+ *  de l'âge écoulé (badge + tooltip), pas de state_since figé — sans
+ *  un terme variant la durée n'avancerait qu'au prochain changement
+ *  d'état. Granularité calée sur fmtDur : 5 s (<2 min), 30 s (<1 h),
+ *  60 s au-delà → un rebuild de liste au plus par minute tant
+ *  qu'au moins une session dort (#383). */
+function stateAgeBucket(s: SessionMeta): number {
+  if (s.state !== "asleep") return 0;
+  const age = stateAgeSecs(s);
+  if (age == null) return 0;
+  return Math.floor(age / (age < 120 ? 5 : age < 3600 ? 30 : 60));
 }
 
 /** Charge d'un drag interne à l'arbre : session (id) ou sous-arbre de
@@ -239,26 +269,40 @@ export class Sidebar {
     ]);
     this.applyPrRows(prRes.rows, prRes.failed);
     // Marqueur Rust `conn_error` : la sonde list_sessions d'une conn a
-    // échoué (timeout 8 s) → la marquer down (une seule fois : déjà down,
-    // markDead re-rendererait refresh en boucle). Gen périmée = résultat
-    // d'un client remplacé au reconnect → ignoré (sinon down immédiat
-    // après « reconnect ok » avec le why par défaut trompeur).
+    // échoué → probeListError applique la même politique que les sondes
+    // (strikes + excuse « transport vivant ») : UN timeout de la sonde
+    // lourde paginée sur un démon lent ne doit plus tuer la conn —
+    // c'était le cycle down/reconnect → badge « déconnecté » persistant
+    // après un « reconnect ok » alors que le transport était vivant.
+    // Gen périmée = résultat d'un client remplacé au reconnect → ni
+    // strike ni repli (isFresh dans probeFailed).
+    // Les conns en conn_error rejoignent le repli cache ci-dessous :
+    // la conn peut rester « ok » (transport vivant) sans que ses
+    // sessions arrivent — sans ça elles disparaîtraient de la liste.
+    const errConns = new Set<string>();
     const list = raw.filter((s) => {
       if (this.pendingDel.has(s.id)) return false;
       if (!(s as { conn_error?: boolean }).conn_error) return true;
       const k = s.conn ?? "";
       const gen = (s as { gen?: number }).gen;
+      // Gen périmée = client remplacé au reconnect : ni strike ni repli
+      // (la gen fraîche a sa propre sonde).
       if (!this.conns.isFresh(k, gen)) return false;
+      errConns.add(k);
       if ((this.conns.state(k) ?? "ok") === "ok") {
-        this.conns.markDead(k, "list_sessions: conn_error",
+        this.conns.probeListError(k, gen,
           (s as { _ac_transport?: AcTransport })._ac_transport);
       }
       return false;
     });
-    // Conn down : ses sessions n'arrivent plus — réafficher le dernier cache
-    // connu (grisé) au lieu de faire disparaître le serveur.
+    // Conn down ou list_sessions en échec (conn_error) : ses sessions
+    // n'arrivent plus — réafficher le dernier cache connu (grisé) au
+    // lieu de faire disparaître le serveur. `offline` garde l'état
+    // connu pour stateDiff/spawnWatch — une transition pendant la
+    // fenêtre n'est pas perdue au retour de la sonde.
     for (const [k, st] of this.conns.liveEntries()) {
-      if (st !== "ok" && !list.some((s) => (s.conn ?? "default") === k)) {
+      if ((st !== "ok" || errConns.has(k)) &&
+          !list.some((s) => (s.conn ?? "default") === k)) {
         for (const s of app.lastSessions.filter(
           (x) => (x.conn ?? "default") === k && !this.pendingDel.has(x.id),
         )) {
@@ -304,23 +348,14 @@ export class Sidebar {
     // fusionnées (cache offline inclus) + compteur sur l'onglet.
     this.prsView.setData(this.prRows, list, this.prFailed);
     this.renderPrBadge();
-    const live = list.filter((s) =>
-      !s.offline && s.state !== "dead" && s.state !== "interrupted" &&
-      s.state !== "asleep" && s.state !== "wait-asleep");
-    setAppIcon(
-      live.some((s) => s.state === "waiting_input")
-        ? "red"
-        : live.some(
-              (s) =>
-                s.state === "working" ||
-                s.state === "running" ||
-                s.state === "starting",
-            )
-          ? "gold"
-          : live.some((s) => s.state === "compacting")
-            ? "violet"
-            : live.length > 0 ? "base" : "grey",
-    );
+    const agg = aggregateIcon(list);
+    setAppIcon(agg);
+    // Onglet « Agents » de la barre basse : sa pastille porte la gemme
+    // agrégée de la flotte (rouge question, dorée en cours…).
+    if (isAndroid()) {
+      const ic = $("sv-agents").querySelector(".sv-ic");
+      if (ic) ic.innerHTML = gemSVG(AGG_ICON_ROLE[agg] ?? "neutral");
+    }
     // Session courante disparue alors que sa connexion répond encore
     // (sessions du même serveur présentes) → supprimée côté serveur.
     this.chat.markGoneIfMissing(list);
@@ -547,6 +582,13 @@ export class Sidebar {
     $("pr-list").hidden = v !== "repos";
     $("backlog-list").hidden = v !== "backlog";
     $("btn-new-session").hidden = v !== "agents";
+    // Titre de la barre d'accueil mobile : libellé de la vue courante.
+    if (isAndroid()) {
+      $("m-home-title").textContent = t(
+        m ? "map_title" : v === "repos" ? "view_repos" : v === "backlog" ? "view_backlog" : "view_agents",
+      );
+      this.onViewChanged?.(v === "agents" && !m);
+    }
     // L'onglet backlog pilote sa cadence de fetch (rapide actif, lente
     // pour le badge inactif) — la bascule se fait ici. Pareil pour
     // le poll pr_sync de l'onglet repos (arrêté hors de la vue).
@@ -570,6 +612,12 @@ export class Sidebar {
 
   /** Filtre de l'arbre (normalisé : trim + bas de casse) — vide = tout. */
   private filter = "";
+  /** Accueil mobile (N3) : notifié à chaque re-rendu effectif de
+   *  #session-list — la vue « par état » s'y synchronise. */
+  onListRendered?: (list: SessionMeta[]) => void;
+  /** Accueil mobile (N3) : notifié des bascules vue/onglet/map —
+   *  `true` = onglet Agents visible (hors diagramme). */
+  onViewChanged?: (agentsHome: boolean) => void;
 
   /** Surligne la 1re occurrence du filtre dans un libellé (HTML sûr :
    *  chaque segment passe par esc(), seul le <mark> est injecté). */
@@ -581,6 +629,118 @@ export class Sidebar {
     if (i < 0) return esc(txt);
     return esc(txt.slice(0, i)) + "<mark>" + esc(txt.slice(i, i + f.length)) + "</mark>" +
       esc(txt.slice(i + f.length));
+  }
+
+  /** Signature du dernier rendu de renderList() — voir renderSig(). */
+  private listSig: string | null = null;
+
+  /** Clés `ac-grp-*` lues lors du dernier rendu — renderSig() n'a pas
+   *  besoin de scanner tout localStorage à chaque appel (#369) : seules
+   *  ces clés gouvernent le HTML produit (les autres sont des restes
+   *  de groupes dissous, sans effet sur le DOM). */
+  private foldKeys = new Set<string>();
+
+  /** Par clé de pliage : éléments dont la visibilité dépend d'elle.
+   *  `chain` = TOUTES les clés ac-grp-* gouvernant l'élément (conn +
+   *  groupes ancêtres + groupe porteur pour les sessions) — l'état
+   *  courant n'y figure pas : un toggle recalcule le display depuis
+   *  localStorage, donc un groupe replié le reste même si un ancêtre
+   *  se déplie. Rempli pendant renderList(), vidé à chaque rebuild. */
+  private foldSubs = new Map<string, { el: HTMLElement; chain: string[] }[]>();
+
+  /** display:none si une clé de pliage gouvernante est « 1 » — jamais
+   *  sous filtre (l'arbre y est forcé déplié). */
+  private foldHidden(chain: string[]): boolean {
+    return !this.filter && chain.some((k) => localStorage.getItem(k) === "1");
+  }
+
+  /** Enregistre un élément sous chaque clé de sa chaîne de pliage —
+   *  appelé pour tout nœud rendu (headers de groupe ET sessions). */
+  private foldReg(chain: string[], el: HTMLElement) {
+    for (const k of chain) this.foldSubs.get(k)?.push({ el, chain });
+  }
+
+  /** Toggle de pliage ciblé (#369) : le pliage est un état purement
+   *  local — ni RPC ni rebuild. On inverse la clé, on bascule la
+   *  classe/chevron du header et on recalcule le display des éléments
+   *  indexés (chaque élément revalide sa chaîne entière : un groupe
+   *  replié reste caché quand un ancêtre se déplie). Repli sur
+   *  renderList() si la liste a changé depuis le dernier rendu (sig≠)
+   *  ou qu'un rebuild est déjà différé (édition de titre / drag). */
+  private toggleFold(key: string, head: HTMLElement) {
+    const flipped = localStorage.getItem(key) !== "1";
+    if (this.editCount > 0 || this.dragging > 0 || this.renderSig() !== this.listSig) {
+      localStorage.setItem(key, flipped ? "1" : "0");
+      this.renderList();
+      return;
+    }
+    localStorage.setItem(key, flipped ? "1" : "0");
+    head.classList.toggle("closed", flipped);
+    const arrow = head.querySelector(".grp-arrow");
+    if (arrow) arrow.innerHTML = icon(flipped ? "chev-right" : "chev-down");
+    const cache = new Map<string, boolean>();
+    const isFolded = (k: string) => {
+      let v = cache.get(k);
+      if (v === undefined) {
+        v = localStorage.getItem(k) === "1";
+        cache.set(k, v);
+      }
+      return v;
+    };
+    for (const it of this.foldSubs.get(key) ?? []) {
+      it.el.style.display = it.chain.some(isFolded) ? "none" : "";
+    }
+    // Les clés ac-grp-* font partie de renderSig() : resynchroniser la
+    // signature pour qu'un refresh() sans autre changement ne déclenche
+    // pas un rebuild complet pour ce seul toggle.
+    this.listSig = this.renderSig();
+  }
+
+  /** Tous les intrants dont dépend le HTML produit par renderList(),
+   *  sérialisés : sessions (champs réellement affichés — ni cwd ni
+   *  timestamps), état/nom des conns, groupes stockés, badges PR,
+   *  tombstones de suppression, clés de pliage `ac-grp-*`, langue et
+   *  filtre. refresh() est rappelé à chaque status_changed et par le
+   *  watchdog des conns : sans ce garde-fou chaque tick reconstruisait
+   *  tout le DOM de la liste (innerHTML + N nœuds + listeners) — le
+   *  plus gros chunk de main-thread récurrent hors frappe (#294). */
+  private renderSig(): string {
+    const sess = app.lastSessions.map((s) => [
+      s.conn ?? "", s.id, s.title, s.agent, s.group ?? "", s.state,
+      s.offline ? 1 : 0, s.origin ?? "", s.spawned_by ?? "",
+      s.last_error ?? null, s.wait ?? null, stateAgeBucket(s),
+    ]);
+    const connKeys = [
+      ...new Set([
+        ...this.conns.knownConns(),
+        ...app.lastSessions.map((s) => s.conn ?? "default"),
+      ]),
+    ].sort();
+    const conns = connKeys.map((k) => {
+      const st = this.conns.state(k) ?? "ok";
+      return [k, st, this.conns.hasCfg(k), this.conns.tip(st, k)];
+    });
+    const groups = connKeys.map((k) => [k, this.groups.stored(k)]);
+    const prs = [...this.prBySess.entries()].map(([k, v]) => [
+      k,
+      v.map((p) => [
+        p.repo, p.host ?? "", p.forge ?? "", p.pr, p.change_id ?? "",
+        p.title ?? "", p.status ?? "", p.url ?? "",
+      ]),
+    ]);
+    // Seules les clés vues au dernier rendu comptent (foldKeys) — voir
+    // le champ : un scan de tout localStorage à chaque appel était le
+    // 3e coût du toggle de groupe (#369).
+    const fold: Record<string, string> = {};
+    for (const k of this.foldKeys) {
+      const v = localStorage.getItem(k);
+      if (v !== null) fold[k] = v;
+    }
+    return JSON.stringify([
+      this.filter, getLang(), app.current?.id ?? "", sess, conns,
+      groups, prs, [...this.pendingDel].sort(), fold,
+      isAndroid() ? 1 : 0,
+    ]);
   }
 
   /** Rendu de #session-list depuis app.lastSessions — appelé par refresh()
@@ -599,7 +759,14 @@ export class Sidebar {
       this.rebuildPending = true;
       return;
     }
+    const sig = this.renderSig();
     this.rebuildPending = false;
+    if (sig === this.listSig) return; // DOM déjà à jour — rien à refaire
+    this.listSig = sig;
+    // Index de pliage ciblé (#369) : reconstruit avec le DOM — les
+    // handlers de toggle et renderSig() suivante lisent cet état.
+    this.foldKeys = new Set();
+    this.foldSubs = new Map();
     const el = $("session-list");
     el.innerHTML = "";
     const f = this.filter;
@@ -679,23 +846,31 @@ export class Sidebar {
       shown += plain.length + treeRows;
 
       const key = `ac-grp-${conn}`;
+      this.foldKeys.add(key);
+      if (!this.foldSubs.has(key)) this.foldSubs.set(key, []);
       const connClosed = !f && localStorage.getItem(key) === "1";
+      // Toutes les clés gouvernant les descendants de la connexion :
+      // le pli de la conn masque l'arbre entier, celui d'un groupe
+      // masque son sous-arbre (renderNode ajoute sa propre clé).
+      const connChain = [key];
       const st = this.conns.state(conn) ?? "ok";
       const ch = document.createElement("div");
-      ch.className = "grp-head" + (connClosed ? " closed" : "");
+      ch.className = "grp-head grp-conn" + (connClosed ? " closed" : "");
       const badge = this.conns.hasCfg(conn)
         ? `<span class="conn-st ${st === "ok" ? "ok" : st === "reconnecting" ? "warn" : "bad"}"` +
           ` title="${q(esc(this.conns.tip(st, conn)))}">${st === "reconnecting" ? icon("refresh") : icon("dot")}</span> `
         : "";
-      ch.innerHTML = `<span class="grp-arrow">${icon(connClosed ? "chev-right" : "chev-down")}</span> ${badge}<span class="grp-name">${this.hl(conn)}</span>` +
+      // Mobile : le libellé humain de la connexion (cfg.label) plutôt que
+      // la clé brute — l'en-tête garde sa casse (CSS text-transform:none).
+      const connName = isAndroid() ? connLabel(conn) : conn;
+      ch.innerHTML = `<span class="grp-arrow">${icon(connClosed ? "chev-right" : "chev-down")}</span> ${badge}<span class="grp-name">${this.hl(connName)}</span>` +
         `<button class="grp-add" title="${esc(t("new_group"))}">${icon("folder-plus")}` +
         `<span class="grp-add-lbl">${esc(t("new_group_lbl"))}</span></button>`;
       ch.onclick = () => {
         // Sous filtre l'arbre est forcé déplié : toggler persisterait un
-        // état invisible à l'écran (+ RPC refresh inutile).
+        // état invisible à l'écran.
         if (this.filter) return;
-        localStorage.setItem(key, connClosed ? "0" : "1");
-        void this.refresh();
+        this.toggleFold(key, ch);
       };
       ch.querySelector(".grp-add")!.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -726,12 +901,18 @@ export class Sidebar {
         }
         return undefined;
       };
-      const renderNode = (n: GNode, gDepth: number, foldedAbove: boolean) => {
+      // `chain` = toutes les clés de pliage gouvernant ce nœud et sa
+      // descendance (conn + groupes ancêtres — sa propre clé est ajoutée
+      // pour les enfants). Un nœud est masqué dès qu'une clé de sa
+      // chaîne vaut "1" ; son propre pli ne masque que ses enfants.
+      const renderNode = (n: GNode, gDepth: number, chain: string[]) => {
         const gkey = `ac-grp-${conn}::${n.path}`;
+        this.foldKeys.add(gkey);
         const folded = !f && localStorage.getItem(gkey) === "1";
+        if (!this.foldSubs.has(gkey)) this.foldSubs.set(gkey, []);
         const g = document.createElement("div");
         g.className = "grp-sub" + (folded ? " closed" : "");
-        if (foldedAbove) g.style.display = "none";
+        if (this.foldHidden(chain)) g.style.display = "none";
         if (gDepth > 0) g.style.paddingLeft = `${18 + 14 * gDepth}px`;
         g.title = t("drop_to_group"); // tooltip hors nom (le nom porte le chemin)
         g.innerHTML = `<span class="grp-arrow">${icon(folded ? "chev-right" : "chev-down")}</span> ` +
@@ -740,9 +921,11 @@ export class Sidebar {
           `<span class="grp-add-lbl">${esc(t("new_sess_grp_lbl"))}</span></button>`;
         g.onclick = () => {
           if (this.filter) return; // idem : pas de toggle invisible sous filtre
-          localStorage.setItem(gkey, localStorage.getItem(gkey) === "1" ? "0" : "1");
-          void this.refresh();
+          this.toggleFold(gkey, g);
         };
+        // Le header n'est masqué que par ses ancêtres (sa propre clé ne
+        // le gouverne pas) ; les enfants porteront [...chain, gkey].
+        this.foldReg(chain, g);
         // + : nouvel agent dans le groupe — agent + workspace du 1er
         // membre du sous-arbre préremplis (tri titre → "premier affiché").
         const ref = firstMember(n);
@@ -756,19 +939,21 @@ export class Sidebar {
         this.bindDropTarget(g, conn, n.path);
         this.bindGroupDrag(g, conn, n.path);
         el.appendChild(g);
-        const innerFolded = foldedAbove || folded;
+        // Enfants : la clé du nœud s'ajoute à la chaîne de pliage —
+        // qu'il soit plié ou non (le toggle la relira dans localStorage).
+        const childChain = [...chain, gkey];
         for (const k of [...n.kids.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-          renderNode(k, gDepth + 1, innerFolded);
+          renderNode(k, gDepth + 1, childChain);
         }
         for (const { s, depth } of nestSessions(n.rows)) {
-          el.appendChild(this.sessRow(s, conn, gDepth + 1, innerFolded, depth));
+          el.appendChild(this.sessRow(s, conn, gDepth + 1, childChain, depth));
         }
       };
       for (const n of [...gRoot.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-        renderNode(n, 0, connClosed);
+        renderNode(n, 0, connChain);
       }
       for (const { s, depth } of nestSessions(plain)) {
-        el.appendChild(this.sessRow(s, conn, 0, connClosed, depth));
+        el.appendChild(this.sessRow(s, conn, 0, connChain, depth));
       }
     }
     if (f && !shown) {
@@ -777,6 +962,13 @@ export class Sidebar {
       none.textContent = t("sess_filter_none");
       el.appendChild(none);
     }
+    this.onListRendered?.(
+      app.lastSessions.filter((s) => !this.pendingDel.has(s.id)),
+    );
+    // listSig a été calculé avec les foldKeys du rendu PRÉCÉDENT :
+    // le recalculer maintenant que l'index reflète ce DOM, sinon le
+    // 1er toggle après un rendu pourrait croire la liste périmée.
+    this.listSig = this.renderSig();
   }
 
   /** Payload du drag en cours — renseigné au dragstart (ligne session ou
@@ -848,6 +1040,29 @@ export class Sidebar {
     });
   }
 
+  /** Actions session partagées entre le menu contextuel et le glisser des
+   *  lignes de l'accueil mobile (N3/N4) : mêmes effets que les entrées
+   *  « Endormir » et « Supprimer la session » (flux optimiste compris). */
+  sessionAction(s: SessionMeta, action: "sleep" | "delete", row?: HTMLElement) {
+    if (action === "sleep") {
+      void call("sleep_session", { session: s.id, conn: s.conn })
+        .then(() => this.refresh())
+        .catch((e) => showErr(String(e)));
+      return;
+    }
+    row?.remove();
+    void this.refresh();
+    void this.deleteSessionNow(s)
+      .catch((er) => showErr(String(er)))
+      .finally(() => void this.refresh());
+  }
+
+  /** Ligne session standalone pour l'accueil « par état » (N3) : même
+   *  clic, même appui long, même gemme que l'arbre, sans indentation. */
+  buildRow(s: SessionMeta): HTMLElement {
+    return this.sessRow(s, s.conn ?? "default", 0, []);
+  }
+
   /** Menu contextuel session (clic droit / appui long) : rename / fork /
    *  groupe / exit — fixe au point cliqué sur desktop, action-sheet ancrée
    *  en bas sur Android. */
@@ -880,9 +1095,7 @@ export class Sidebar {
     // session n'a déjà plus de process (dead/interrupted/asleep).
     const sleepBtn = menuBtn(this.ctx, t("ctx_sleep"), "", () => {
       hideSessCtx();
-      void call("sleep_session", { session: s.id, conn: s.conn })
-        .then(() => this.refresh())
-        .catch((e) => showErr(String(e)));
+      this.sessionAction(s, "sleep");
     });
     sleepBtn.disabled = !!s.offline ||
       s.state === "asleep" || s.state === "wait-asleep" ||
@@ -903,6 +1116,19 @@ export class Sidebar {
         .then(() => this.refresh())
         .catch((e) => showErr(String(e)));
     });
+    if (isAndroid()) {
+      // Seul chemin de suppression sur mobile (.sess-del masqué) —
+      // même double-tap armé et même flux optimiste que le ✕ desktop.
+      menuBtn(this.ctx, t("ctx_delete_sess"), "danger", (b) => {
+        if (!b.dataset.armed) {
+          b.dataset.armed = "1";
+          b.textContent = t("ctx_confirm");
+          return;
+        }
+        hideSessCtx();
+        this.sessionAction(s, "delete", row);
+      });
+    }
     placeMenu(this.ctx, "sctx", x, y);
   }
 
@@ -1042,12 +1268,15 @@ export class Sidebar {
     inp.addEventListener("blur", () => done(true));
   }
 
-  private sessRow(s: SessionMeta, conn: string, gDepth: number, closed: boolean, depth = 0): HTMLElement {
+  private sessRow(s: SessionMeta, conn: string, gDepth: number, chain: string[], depth = 0): HTMLElement {
     const div = document.createElement("div");
     div.dataset.sid = s.id;
     div.className = "sess" + (gDepth ? " in-grp" : "") + (depth > 0 ? " sub" : "") +
       (s.offline ? " offline" : "") + (app.current?.id === s.id ? " active" : "");
-    if (closed) div.style.display = "none";
+    // `chain` = clés de pliage gouvernant la ligne (conn + groupe
+    // porteur + ancêtres) — indexées pour le toggle ciblé (#369).
+    if (this.foldHidden(chain)) div.style.display = "none";
+    this.foldReg(chain, div);
     // Indentation = profondeur de groupe (14px/niveau) + profondeur de
     // sous-agent (14px/niveau, cap visuel — les arbres de délégation
     // restent peu profonds), tooltip = provenance.
@@ -1068,19 +1297,30 @@ export class Sidebar {
       : "";
     const dotTip =
       s.state === "error" && s.last_error
-        ? `error: ${s.last_error.kind} · ${s.last_error.message} · x${s.last_error.count} · ${s.last_error.at}`
+        ? `error: ${s.last_error.kind} · ${s.last_error.message} · x${s.last_error.count} · ${s.last_error.at}` +
+          (s.last_error.retry_at
+            ? ` · retry ${new Date(s.last_error.retry_at * 1000).toLocaleTimeString()}`
+            : "")
         : s.state === "asleep"
-          ? `asleep · ${t("dot_asleep_tip")}`
+          ? `asleep${stateAgeTip(s)} · ${t("dot_asleep_tip")}`
           : s.state === "wait-asleep"
             ? `asleep · wait${waitTip(s)} · ${t("dot_wait_tip")}`
             : s.state === "wait"
               ? `wait${waitTip(s)} · ${t("dot_wait_tip")}`
               : s.state;
-    div.innerHTML = `<span class="dot st-${dotCls(s.state, s.last_error)}" title="${q(esc(dotTip))}">${dotIcon(s.state, s.last_error)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
+    // Badge visible « 3 h » pour une session endormie (#383) —
+    // wait-asleep garde le rendu existant (l'âge du waiter fait déjà
+    // foi dans le tooltip, pas de double comptage).
+    const sleepAge = s.state === "asleep" ? stateAgeSecs(s) : null;
+    const sleepHtml = sleepAge != null
+      ? `<span class="sess-age" title="${q(esc(dotTip))}">${this.hl(fmtDur(sleepAge))}</span>`
+      : "";
+    div.innerHTML = `<span class="dot st-${dotCls(s.state, s.last_error)}" title="${q(esc(dotTip))}">${dotIcon(s.state, s.last_error)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span>${sleepHtml}<button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);
-      // Mobile : fermer le drawer après sélection.
-      nav.closeDrawer();
+      // Mobile : l'écran Session glisse depuis la droite (retour ← /
+      // système ramène à l'accueil).
+      nav.enterSession();
     };
     bindCtx(div, (x, y) => this.openSessionCtx(x, y, s, div));
     if (!isAndroid()) {

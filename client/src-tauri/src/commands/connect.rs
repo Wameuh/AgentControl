@@ -1,14 +1,16 @@
 //! Connexions au démon : établissement (unix/tcp/ssh), déconnexion,
-//! subscribe (push → events Tauri), ensure_daemon (install via ssh).
+//! subscribe (push → events Tauri). ensure_daemon vit dans
+//! commands/ensure_daemon.rs (install via ssh + artefact vérifié, I1).
 
 use anyhow::Result;
-use client_core::{Client, Level, Transport};
+use client_core::{sanitize_ssh_args, Client, Level, Transport};
 use proto::ReqKind;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::commands::pair::effective_hk;
 use crate::state::{
     conn_key, get_conn, split_user_host, AppState, ConnCtx, ConnectCfg,
 };
@@ -33,7 +35,7 @@ enum SshDiag {
 
 /// Extrait ce qu'il faut pour le diag post-mortem — `None` pour les
 /// transports non-ssh (pas de serveur ssh à interroger).
-fn ssh_diag(cfg: &ConnectCfg) -> Result<Option<SshDiag>, String> {
+async fn ssh_diag(cfg: &ConnectCfg) -> Result<Option<SshDiag>, String> {
     let ConnectCfg::Ssh {
         host,
         args,
@@ -50,17 +52,15 @@ fn ssh_diag(cfg: &ConnectCfg) -> Result<Option<SshDiag>, String> {
     };
     if native.unwrap_or(false) || cfg!(target_os = "android") {
         let (user, h) = split_user_host(host, user.as_deref())?;
+        let port = port.unwrap_or(22);
+        let expected_hk = effective_hk(host_keys.clone(), &h, port).await;
         Ok(Some(SshDiag::Native {
             host: h,
-            port: port.unwrap_or(22),
+            port,
             user,
             password: password.clone(),
             key: key.as_deref().map(PathBuf::from),
-            expected_hk: host_keys
-                .clone()
-                .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
-                .filter(|s| !s.is_empty())
-                .map(Arc::new),
+            expected_hk: expected_hk.map(Arc::new),
         }))
     } else {
         Ok(Some(SshDiag::OpenSsh {
@@ -70,52 +70,17 @@ fn ssh_diag(cfg: &ConnectCfg) -> Result<Option<SshDiag>, String> {
     }
 }
 
-/// Les args de la cfg servent la joignabilité (`-p`, `-i`, `-o`,
-/// `-J`…) — ceux qui changent le mode de ssh sont retirés pour l'exec
-/// diag : `-N`/`-f`/`-T`/`-n` (pas de commande / pas de terminal /
-/// fond) et les forwards `-L`/`-R`/`-D` avec leur argument (un
-/// `-L…` glué seul suffirait à casser l'exec de toute façon, mais
-/// autant ne pas le passer). Tout autre token est conservé.
-fn sanitize_ssh_args(args: &[String]) -> Vec<String> {
-    let mut out = Vec::with_capacity(args.len());
-    let mut skip_next = false;
-    for a in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        match a.as_str() {
-            "-L" | "-R" | "-D" => {
-                skip_next = true;
-                continue;
-            }
-            s if s.starts_with("-L") || s.starts_with("-R") || s.starts_with("-D") => continue,
-            s => {
-                // Bundles de flags sans argument (-N, -f, -T, -n, -t
-                // et leurs combinaisons -NT, -tt…) — retirés : pas de
-                // commande, détachement ou tty forcé casseraient l'exec.
-                let f = s.strip_prefix('-').unwrap_or("");
-                if !f.is_empty() && f.chars().all(|c| "NfTnt".contains(c)) {
-                    continue;
-                }
-                out.push(a.clone());
-            }
-        }
-    }
-    out
-}
-
 /// Configure la connexion au démon.
 #[tauri::command]
 pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: ConnectCfg) -> Result<Value, String> {
     let key = conn_key(&cfg);
-    let diag = ssh_diag(&cfg)?;
+    let diag = ssh_diag(&cfg).await?;
     let t = match cfg {
         ConnectCfg::Local {} => {
             let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
             Transport::Unix(home.join(".agentcontrol/daemon.sock"))
         }
-        ConnectCfg::Tcp { addr } => Transport::Tcp(addr),
+        ConnectCfg::Tcp { addr, token } => Transport::Tcp { addr, token },
         ConnectCfg::Ssh {
             host,
             remote_port,
@@ -130,16 +95,19 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
             let native = native.unwrap_or(false) || cfg!(target_os = "android");
             if native {
                 let (user, host) = split_user_host(&host, user.as_deref())?;
+                let port = port.unwrap_or(22);
+                // Épinglage effectif : profil, sinon known_hosts —
+                // clé encore inconnue → `hostkey-unknown` (TOFU UI).
+                let expected_hk = effective_hk(host_keys, &host, port).await;
                 Transport::SshNative {
                     host,
-                    port: port.unwrap_or(22),
+                    port,
                     user,
                     remote_port: remote_port.unwrap_or(7331),
                     password,
                     key_path: key.map(PathBuf::from),
-                    expected_hk: host_keys
-                        .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
-                        .filter(|s| !s.is_empty()),
+                    expected_hk,
+                    accept_unknown_hostkey: false,
                 }
             } else {
                 Transport::Ssh {
@@ -150,12 +118,37 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
             }
         }
     };
-    let c = Client::connect(&t).await.map_err(|e| format!("{e:#}"))?;
-    let status = c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"))?;
+    let c = Client::connect(&t)
+        .await
+        .map_err(|e| client_core::classify_connect_stage1(&t, &format!("{e:#}")))?;
+    let status = match c.call(ReqKind::DaemonStatus).await {
+        Ok(s) => s,
+        Err(e) => {
+            // Laisser le drain stderr ssh se vider : la signature
+            // « channel N: open failed: connect failed: Connection
+            // refused » arrive quelques ms après la mort du canal
+            // forwardé — la lire trop tôt classerait à faux.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            return Err(client_core::classify_connect_stage2(
+                &t,
+                &format!("{e:#}"),
+                &c.death_reason().unwrap_or_default(),
+                &c.transport_err_tail(),
+            ));
+        }
+    };
     // Nouveau client = démon possiblement upgradé depuis le dernier
-    // verdict : on oublie la capacité list_sessions_page mémorisée —
+    // verdict : on oublie les capacités de pagination mémorisées —
     // un `false` hérité blacklisterait la pagination jusqu'au restart.
     state.list_page.lock().await.remove(&key);
+    state.pr_page.lock().await.remove(&key);
+    // Le cache pr_list est indexé par version : une nouvelle gen de
+    // client peut pointer sur un autre daemon/root — purge conservatrice.
+    state
+        .pr_cache
+        .lock()
+        .await
+        .retain(|k, _| !k.starts_with(&format!("{key}\u{0}")));
     // Liaison consignée : les appels suivants du cycle de vie doivent
     // pouvoir remonter à la conn qui les a portés — « transport ssh:…
     // ouvert » (client-core) ne porte pas la clé de conn du client.
@@ -371,6 +364,42 @@ async fn ssh_postmortem(conn: &str, d: SshDiag) {
     client_core::log(Level::Info, format!("post-mortem {conn}: {out}"));
 }
 
+/// Seuil « event géant » pour la pompe pushes → webview : au-delà, le
+/// payload est émis sous forme de marqueur `history_replayed` (le
+/// frontend recharge le journal via l'RPC `events`, borné) plutôt
+/// qu'en intégral — un event de plusieurs Mo sérialisé dans la file
+/// IPC du main process fait gonfler la RSS jusqu'au kill (même classe
+/// de mort que les giant lines pr_list, item #367).
+const PUSH_GIANT_BYTES: usize = 256 * 1024;
+
+/// Taille approximative (octets de chaînes + clés) d'un push —
+/// early-exit au seuil : le coût reste borné même sur un payload
+/// immense, et les events courants (~4 Kio d'excerpt) ne paient que
+/// leur parcours.
+fn push_payload_bytes(v: &Value) -> usize {
+    let mut total = 0usize;
+    let mut stack: Vec<&Value> = vec![v];
+    while let Some(x) = stack.pop() {
+        match x {
+            Value::String(s) => {
+                total += s.len();
+                if total > PUSH_GIANT_BYTES {
+                    return total;
+                }
+            }
+            Value::Array(a) => stack.extend(a.iter()),
+            Value::Object(o) => {
+                for (k, val) in o {
+                    total += k.len();
+                    stack.push(val);
+                }
+            }
+            _ => {}
+        }
+    }
+    total
+}
+
 /// Subscribe sur la connexion principale et re-émet les push
 /// comme events Tauri `session-event` ({session, event}).
 #[tauri::command]
@@ -450,6 +479,38 @@ pub(crate) async fn subscribe(
             if let Some(s) = v.pointer("/event/seq").and_then(Value::as_u64) {
                 last_seq = s;
             }
+            // Backpressure webview : un event géant ne part pas en
+            // intégral dans la file IPC — marqueur refetch à la place
+            // (le frontend recharge le journal borné via `events`).
+            // Le seq est conservé : le resync Lagged et le rendu
+            // gardent leur cohérence de cycle.
+            let payload_bytes = push_payload_bytes(&v);
+            if payload_bytes > PUSH_GIANT_BYTES {
+                let seq = v
+                    .pointer("/event/seq")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                client_core::log(
+                    Level::Warn,
+                    format!(
+                        "subscribe {sid_log}: event seq {seq} ≈{payload_bytes} o — marqueur refetch"
+                    ),
+                );
+                let _ = app.emit(
+                    "session-event",
+                    serde_json::json!({
+                        "push": "event",
+                        "session": v.get("session").cloned().unwrap_or(Value::Null),
+                        "event": {
+                            "seq": seq,
+                            "ts": proto::now_iso(),
+                            "type": "history_replayed",
+                            "events": 1,
+                        },
+                    }),
+                );
+                continue;
+            }
             let _ = app.emit("session-event", v);
         }
         client_core::log(Level::Debug, format!("subscribe {sid_log}: flux terminé"));
@@ -462,234 +523,7 @@ pub(crate) async fn subscribe(
     Ok(())
 }
 
-/// Vérifie/installe/maj le démon sur le serveur distant via SSH + curl.
-/// Pas de `gh` : télécharge la release GitHub par URL directe (repo public)
-/// — tag exact demandé, fallback "latest". Idempotent.
-/// `native` (auto sur Android) : exec via russh au lieu du binaire ssh.
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn ensure_daemon(
-    app: AppHandle,
-    host: String,
-    args: Option<Vec<String>>,
-    tag: String,
-    port: Option<u16>,
-    remote_port: Option<u16>,
-    user: Option<String>,
-    password: Option<String>,
-    key: Option<String>,
-    native: Option<bool>,
-    host_keys: Option<Vec<String>>,
-) -> Result<String, String> {
-    const BASE: &str = "https://github.com/Wameuh/AgentControl/releases";
-    // Script distant POSIX : check version via acctl status, sinon install.
-    // `ver` non vide = le démon répond — à jour quel que soit le
-    // superviseur (systemd, supervisord, lancé à la main). Gardes avant
-    // toute mutation : acctl via PATH en plus de ~/.local/bin (un démon
-    // installé par image/conteneur rapporte alors sa version), et probe
-    // du port daemon configuré — un listener ÉTRANGER sur ce port (démon
-    // publié par Docker, port forwardé, autre service) ne doit jamais
-    // être écrasé par l'artefact release. Le probe ne bloque pas notre
-    // propre démon : `ver` non vide = le nôtre répond en socket unix ;
-    // on re-sonde alors le port avec ce même acctl via AGENTCONTROL_TCP
-    // — une version identique prouve que le listener est le sien (bind
-    // TCP du même process) → l'upgrade continue ; une version différente
-    // (autre démon managé ailleurs) ou aucune réponse (service étranger,
-    // timeout 4 s si `timeout` existe) → busy.
-    // `rc=0; cmd || rc=$?` car `set -e` tue le shell sur tout échec de
-    // commande — `rc=$?` seul ne s'exécuterait jamais.
-    // `echo step:<id> >&2` : marqueurs de progression streamés sur
-    // stderr → events `daemon-step` côté client (stdout garde le
-    // résultat métier `ok:*`/`installed:*` en dernière ligne).
-    let script = format!(
-        "set -e; echo step:check >&2; arch=$(uname -m); \
-         case $arch in x86_64|aarch64) ;; *) echo \"arch non supportée: $arch\" >&2; exit 1;; esac; \
-         command -v curl >/dev/null 2>&1 || {{ echo \"curl absent sur l'hôte\" >&2; exit 1; }}; \
-         bin=$HOME/.local/bin/agentcontrol-daemon; \
-         ac=$(command -v acctl 2>/dev/null || true); [ -z \"$ac\" ] && [ -x \"$HOME/.local/bin/acctl\" ] && ac=\"$HOME/.local/bin/acctl\"; \
-         ver=$({{ [ -n \"$ac\" ] && \"$ac\" status 2>/dev/null || true; }} | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
-         if [ \"$ver\" = \"{t}\" ]; then echo ok:$ver; exit 0; fi; \
-         if [ -n \"$ver\" ] && [ \"$ver\" != \"{t}\" ] && \
-            [ \"$(printf '%s\\n%s\\n' \"{t}\" \"$ver\" | sed 's/-rc\\./~rc./g' | sort -V | tail -n1)\" = \"$(echo \"$ver\" | sed 's/-rc\\./~rc./g')\" ]; then \
-            echo newer:$ver; exit 0; fi; \
-         rc=0; curl -s -o /dev/null --max-time 2 http://127.0.0.1:{p} 2>/dev/null || rc=$?; \
-         if [ \"$rc\" -ne 7 ]; then \
-         own=\"\"; \
-         if [ -n \"$ver\" ]; then \
-         to=$(command -v timeout >/dev/null 2>&1 && echo \"timeout 4\" || true); \
-         own=$({{ AGENTCONTROL_TCP=127.0.0.1:{p} $to \"$ac\" status 2>/dev/null || true; }} | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
-         fi; \
-         if [ -z \"$own\" ] || [ \"$own\" != \"$ver\" ]; then echo busy:127.0.0.1:{p}; exit 0; fi; \
-         fi; \
-         echo step:download >&2; \
-         d=$HOME/.cache/agentcontrol-upd; rm -rf \"$d\"; mkdir -p \"$d\"; cd \"$d\" || exit 1; \
-         curl -fsSL -o acd.tgz \"{base}/download/v{t}/agentcontrol-server-$arch-linux.tar.gz\" || \
-         curl -fsSL -o acd.tgz \"{base}/latest/download/agentcontrol-server-$arch-linux.tar.gz\"; \
-         tar xzf acd.tgz; \
-         echo step:install >&2; \
-         install -Dm755 agentcontrol-daemon $bin; \
-         install -Dm755 acctl $HOME/.local/bin/acctl; \
-         echo step:service >&2; \
-         confs=\"/etc/supervisor/conf.d/*.conf /etc/supervisord.d/*.conf $HOME/.supervisor/conf.d/*.conf\"; \
-         ef=\"\"; for f in $confs; do [ -f \"$f\" ] && ef=\"$ef $f\"; done; \
-         prog=$({{ [ -n \"$ef\" ] && awk 'FNR==1 {{ p=\"\" }} /^\\[/ {{ p=\"\"; if ($0 ~ /^\\[program:/) {{ p=$0; sub(/.*\\[program:/,\"\",p); sub(/\\].*/,\"\",p) }} }} /^command[[:space:]]*=/ && /agentcontrol-daemon/ && p != \"\" {{ print p; exit }}' $ef 2>/dev/null || true; }}); \
-         if [ -n \"$prog\" ]; then \
-         svc=$(grep -h '^command[[:space:]]*=' $ef 2>/dev/null | grep agentcontrol-daemon | head -n1 | sed 's/^command[[:space:]]*=[[:space:]]*//' | cut -d' ' -f1); \
-         svc=$(command -v \"$svc\" 2>/dev/null || echo \"$svc\"); \
-         case $svc in /*/agentcontrol-daemon) ;; *) svc=\"\";; esac; \
-         if [ -n \"$svc\" ] && [ \"$svc\" != \"$bin\" ] && [ -w \"$(dirname \"$svc\")\" ]; then install -Dm755 agentcontrol-daemon \"$svc\"; fi; \
-         if [ -n \"$svc\" ] && {{ [ \"$svc\" = \"$bin\" ] || [ -w \"$(dirname \"$svc\")\" ]; }}; then supervisorctl restart \"$prog\" || true; fi; \
-         elif command -v systemctl >/dev/null 2>&1 && systemctl cat agentcontrol-daemon.service >/dev/null 2>&1; then \
-         :; \
-         elif command -v systemctl >/dev/null 2>&1 && systemctl --user list-units >/dev/null 2>&1; then \
-         install -Dm644 packaging/agentcontrol-daemon.service $HOME/.config/systemd/user/agentcontrol-daemon.service; \
-         systemctl --user daemon-reload; \
-         systemctl --user enable agentcontrol-daemon; \
-         pkill -x agentcontrol-da 2>/dev/null || true; sleep 1; \
-         systemctl --user restart agentcontrol-daemon; \
-         else \
-         pkill -x agentcontrol-da 2>/dev/null || true; sleep 2; \
-         pgrep -x agentcontrol-da >/dev/null 2>&1 || nohup \"$bin\" >/dev/null 2>&1 </dev/null & \
-         fi; \
-         rm -rf \"$d\"; \
-         echo step:verify >&2; \
-         v=\"\"; for i in 1 2 3; do \
-         v=$($HOME/.local/bin/acctl status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
-         [ -n \"$v\" ] && break; sleep 1; done; \
-         echo installed:$v",
-        base = BASE,
-        t = tag,
-        p = remote_port.unwrap_or(7331)
-    );
-    let t0 = std::time::Instant::now();
-    client_core::log(Level::Info, format!("ensure_daemon {host} tag={tag}"));
-    // Marqueurs `step:*` du script (stderr) → event `daemon-step` : le
-    // dialogue de progression les affiche au fil de l'eau. Le reste de
-    // stderr est conservé pour le rapport d'erreur. Chaque étape est
-    // aussi journalisée : une installation déclenchée par une AUTRE
-    // instance doit rester corrélable dans client.log au flap transport.
-    if native.unwrap_or(false) || cfg!(target_os = "android") {
-        let (user, h) = split_user_host(&host, user.as_deref())?;
-        let err_acc = std::sync::Mutex::new(String::new());
-        let app2 = app.clone();
-        let host_step = host.clone();
-        // Profil appairé → la host key est épinglée pour l'exec aussi.
-        let opts = client_core::ssh_native::Opts {
-            expected_hk: host_keys
-                .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
-                .filter(|s| !s.is_empty())
-                .map(Arc::new),
-            ..Default::default()
-        };
-        let (code, out, _err) = client_core::ssh_native::ssh_exec(
-            &h,
-            port.unwrap_or(22),
-            &user,
-            password.as_deref(),
-            key.map(PathBuf::from).as_deref(),
-            &script,
-            Some(&mut |line: &str| {
-                if let Some(s) = line.trim().strip_prefix("step:") {
-                    client_core::log(Level::Info, format!("ensure_daemon {host_step}: step {s}"));
-                    let _ = app2.emit("daemon-step", s.to_string());
-                } else {
-                    let mut g = err_acc.lock().unwrap();
-                    g.push_str(line);
-                    g.push('\n');
-                }
-            }),
-            &opts,
-        )
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-        let out = out.trim().to_string();
-        let err_buf = err_acc.into_inner().unwrap_or_default();
-        // Le stderr hors marqueurs est journalisé : en cas d'échec le
-        // log garde la cause (ssh, droits, download) qui sinon ne vit
-        // que dans le toast éphémère.
-        client_core::log(
-            if code == 0 { Level::Info } else { Level::Warn },
-            format!("ensure_daemon {host}: code={code} out={out} err={} ({} ms)",
-                err_buf.trim(), t0.elapsed().as_millis()),
-        );
-        if code != 0 {
-            return Err(if err_buf.trim().is_empty() { out } else { err_buf.trim().to_string() });
-        }
-        return Ok(out);
-    }
-    let mut cmd = tokio::process::Command::new("ssh");
-    cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
-        .args(&args.unwrap_or_default())
-        .arg(&host)
-        .arg(&script)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    client_core::hide_console(&mut cmd);
-    let mut child = cmd.spawn().map_err(|e| format!("ssh: {e}"))?;
-    // stderr streamé : marqueurs → events, le reste collecté pour
-    // l'erreur. kill_on_drop tue le ssh si le timeout le lâche.
-    let stderr_task = {
-        let app2 = app.clone();
-        let host2 = host.clone();
-        let pipe = child.stderr.take();
-        tauri::async_runtime::spawn(async move {
-            let mut buf = String::new();
-            if let Some(p) = pipe {
-                use tokio::io::AsyncBufReadExt;
-                let mut lines = tokio::io::BufReader::new(p).lines();
-                loop {
-                    match lines.next_line().await {
-                        Ok(Some(l)) => {
-                            if let Some(s) = l.trim().strip_prefix("step:") {
-                                client_core::log(Level::Info, format!("ensure_daemon {host2}: step {s}"));
-                                let _ = app2.emit("daemon-step", s.to_string());
-                            } else {
-                                buf.push_str(&l);
-                                buf.push('\n');
-                            }
-                        }
-                        Ok(None) => break,
-                        // Ligne non-UTF8 : le drain s'arrête mais la
-                        // coupure est tracée (et dans le buffer rendu).
-                        Err(e) => {
-                            client_core::log(
-                                Level::Warn,
-                                format!("ensure_daemon {host2}: drain stderr interrompu: {e}"),
-                            );
-                            buf.push_str(&format!("(stderr illisible: {e})\n"));
-                            break;
-                        }
-                    }
-                }
-            }
-            buf
-        })
-    };
-    let out = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| "ssh ensure_daemon timeout".to_string())?
-    .map_err(|e| format!("ssh: {e}"))?;
-    let stderr = stderr_task.await.unwrap_or_default();
-    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !out.status.success() {
-        let e = if stderr.trim().is_empty() {
-            stdout.clone()
-        } else {
-            stderr.trim().to_string()
-        };
-        // 255 = échec de ssh lui-même (transport) ; un autre code = le
-        // script distant a répondu en erreur, déjà remontée à
-        // l'utilisateur → Warn comme le chemin natif (code != 0).
-        let lv = if out.status.code() == Some(255) { Level::Error } else { Level::Warn };
-        client_core::log(lv, format!("ensure_daemon {host}: {e} ({} ms)", t0.elapsed().as_millis()));
-        return Err(e);
-    }
-    client_core::log(Level::Info, format!("ensure_daemon {host}: {stdout} ({} ms)", t0.elapsed().as_millis()));
-    Ok(stdout)
-}
+// `ensure_daemon` vit dans commands/ensure_daemon.rs — l'artefact est
+// téléchargé + vérifié côté app (SHA256SUMS signé minisign, I1) puis
+// poussé dans le stdin du script ssh, en OpenSSH comme en russh natif.
 

@@ -8,220 +8,276 @@ use crate::journal;
 use std::path::Path;
 
 impl Daemon {
-    pub(super) async fn h_read_file(self: &Arc<Self>, session: String, path: String, binary: bool, offset: u64, limit: Option<u64>) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let p = PathBuf::from(&path);
-                let full = if p.is_absolute() {
-                    p
-                } else if path.starts_with('~') {
-                    // `~`/`~user` ne sont pas relatifs au workspace :
-                    // même expansion que resolve_cwd (HOME, NSS), appliquée
-                    // au seul préfixe `~` — un `$VAR` seul reste relatif au
-                    // cwd (fichier littéral préservé). read_file n'étant
-                    // pas borné au cwd, un chemin ~ se résout comme un
-                    // absolu saisi directement.
-                    PathBuf::from(expand_cwd(&path)?)
-                } else {
-                    PathBuf::from(&s.meta_snapshot().cwd).join(p)
-                };
-                if let Some(limit) = limit {
-                    // Lecture bornée (streaming vidéo + chargement progressif
-                    // de l'éditeur côté client) — tranche brute base64,
-                    // plafonnée comme DL_CHUNK (~5,4 Mio JSON). `mtime_ms`
-                    // alimente la garde anti-écrasement de write_file.
-                    let (data, size) = read_slice(&full, offset, limit.min(DL_CHUNK))
-                        .with_context(|| format!("{}", full.display()))?;
-                    return Ok(json!({
-                        "path": full.display().to_string(),
-                        "offset": offset,
-                        "size": size,
-                        "data": b64(&data),
-                        "mtime_ms": mtime_ms(&full),
-                    }));
-                }
-                if binary {
-                    // Aperçu image : ~16 Mio de JSON base64 max ; `data` omis
-                    // si tronqué (le client n'affiche que « trop grosse »).
-                    const CAP: u64 = 12 * 1024 * 1024;
-                    let (data, size) = read_slice(&full, 0, CAP)
-                        .with_context(|| format!("{}", full.display()))?;
-                    let mut resp = json!({
-                        "path": full.display().to_string(),
-                        "size": size,
-                        "truncated": size > CAP,
-                    });
-                    if size <= CAP {
-                        resp["data"] = json!(b64(&data));
-                    }
-                    Ok(resp)
-                } else {
-                    const CAP: u64 = 512 * 1024;
-                    let (data, size) = read_slice(&full, 0, CAP)
-                        .with_context(|| format!("{}", full.display()))?;
-                    Ok(json!({
-                        "path": full.display().to_string(),
-                        "content": String::from_utf8_lossy(&data),
-                        "truncated": size > CAP,
-                    }))
-                }
+    pub(super) async fn h_read_file(
+        self: &Arc<Self>,
+        session: String,
+        path: String,
+        binary: bool,
+        offset: u64,
+        limit: Option<u64>,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let p = PathBuf::from(&path);
+        let full = if p.is_absolute() {
+            p
+        } else if path.starts_with('~') {
+            // `~`/`~user` ne sont pas relatifs au workspace :
+            // même expansion que resolve_cwd (HOME, NSS), appliquée
+            // au seul préfixe `~` — un `$VAR` seul reste relatif au
+            // cwd (fichier littéral préservé). read_file n'étant
+            // pas borné au cwd, un chemin ~ se résout comme un
+            // absolu saisi directement.
+            PathBuf::from(expand_cwd(&path)?)
+        } else {
+            PathBuf::from(&s.meta_snapshot().cwd).join(p)
+        };
+        if let Some(limit) = limit {
+            // Lecture bornée (streaming vidéo + chargement progressif
+            // de l'éditeur côté client) — tranche brute base64,
+            // plafonnée comme DL_CHUNK (~5,4 Mio JSON). `mtime_ms`
+            // alimente la garde anti-écrasement de write_file.
+            let (data, size) = read_slice(&full, offset, limit.min(DL_CHUNK))
+                .with_context(|| format!("{}", full.display()))?;
+            return Ok(json!({
+                "path": full.display().to_string(),
+                "offset": offset,
+                "size": size,
+                "data": b64(&data),
+                "mtime_ms": mtime_ms(&full),
+            }));
+        }
+        if binary {
+            // Aperçu image : la réponse part en base64 sur le fil NDJSON —
+            // le plafond couvre le payload ENCODÉ (~2 Mio de base64 =
+            // ~1,5 Mio bruts). L'ancien cap de 12 Mio produisait des
+            // frames de ~16 Mio : une ligne NDJSON géante monopolise le
+            // lien des secondes et affame tous les RPC (head-of-line
+            // blocking, #302). `data` omis si tronqué (le client
+            // n'affiche que « trop grosse » — une image partielle ne se
+            // rendrait pas de toute façon).
+            const CAP: u64 = 1536 * 1024;
+            let (data, size) =
+                read_slice(&full, 0, CAP).with_context(|| format!("{}", full.display()))?;
+            let mut resp = json!({
+                "path": full.display().to_string(),
+                "size": size,
+                "truncated": size > CAP,
+            });
+            if size <= CAP {
+                resp["data"] = json!(b64(&data));
+            }
+            Ok(resp)
+        } else {
+            const CAP: u64 = 512 * 1024;
+            let (data, size) =
+                read_slice(&full, 0, CAP).with_context(|| format!("{}", full.display()))?;
+            Ok(json!({
+                "path": full.display().to_string(),
+                "content": String::from_utf8_lossy(&data),
+                "truncated": size > CAP,
+            }))
+        }
     }
-    pub(super) async fn h_list_dir(self: &Arc<Self>, session: String, path: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let dir = resolve_in_cwd(&s, &path)?;
-                if !dir.is_dir() {
-                    anyhow::bail!("pas un dossier: {path}");
-                }
-                let mut ents: Vec<(bool, String, u64)> = Vec::new();
-                let mut truncated = false;
-                for e in std::fs::read_dir(&dir)? {
-                    if ents.len() >= 5000 {
-                        truncated = true;
-                        break;
-                    }
-                    let e = e?;
-                    let ft = e.file_type()?;
-                    ents.push((
-                        ft.is_dir(),
-                        e.file_name().to_string_lossy().into_owned(),
-                        e.metadata().map(|m| m.len()).unwrap_or(0),
-                    ));
-                }
-                ents.sort_by(|a, b| {
-                    b.0.cmp(&a.0)
-                        .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
-                });
-                let entries: Vec<Value> = ents
-                    .iter()
-                    .map(|(d, n, sz)| json!({"name": n, "dir": d, "size": sz}))
-                    .collect();
-                Ok(json!({
-                    "dir": dir.display().to_string(),
-                    "entries": entries,
-                    "truncated": truncated,
-                }))
+    pub(super) async fn h_list_dir(
+        self: &Arc<Self>,
+        session: String,
+        path: String,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let dir = resolve_in_cwd(&s, &path)?;
+        if !dir.is_dir() {
+            anyhow::bail!("not a directory: {path}");
+        }
+        let mut ents: Vec<(bool, String, u64)> = Vec::new();
+        let mut truncated = false;
+        for e in std::fs::read_dir(&dir)? {
+            if ents.len() >= 5000 {
+                truncated = true;
+                break;
+            }
+            let e = e?;
+            let ft = e.file_type()?;
+            ents.push((
+                ft.is_dir(),
+                e.file_name().to_string_lossy().into_owned(),
+                e.metadata().map(|m| m.len()).unwrap_or(0),
+            ));
+        }
+        ents.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+        });
+        let entries: Vec<Value> = ents
+            .iter()
+            .map(|(d, n, sz)| json!({"name": n, "dir": d, "size": sz}))
+            .collect();
+        Ok(json!({
+            "dir": dir.display().to_string(),
+            "entries": entries,
+            "truncated": truncated,
+        }))
     }
-    pub(super) async fn h_find_files(self: &Arc<Self>, session: String, path: String, query: String, limit: Option<u32>) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let root = resolve_in_cwd(&s, &path)?;
-                if !root.is_dir() {
-                    anyhow::bail!("pas un dossier: {path}");
-                }
-                let q = query.to_lowercase();
-                if q.is_empty() {
-                    return Ok(json!({"matches": [], "truncated": false, "scanned": 0}));
-                }
-                let cwd = resolve_in_cwd(&s, "")?;
-                let limit = limit.unwrap_or(200).clamp(1, 1000) as usize;
-                // Walk bloquant (read_dir récursif) → spawn_blocking, borné.
-                tokio::task::spawn_blocking(move || find_files(&cwd, &root, &q, limit))
-                    .await
-                    .context("find task")?
+    pub(super) async fn h_find_files(
+        self: &Arc<Self>,
+        session: String,
+        path: String,
+        query: String,
+        limit: Option<u32>,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let root = resolve_in_cwd(&s, &path)?;
+        if !root.is_dir() {
+            anyhow::bail!("not a directory: {path}");
+        }
+        let q = query.to_lowercase();
+        if q.is_empty() {
+            return Ok(json!({"matches": [], "truncated": false, "scanned": 0}));
+        }
+        let cwd = resolve_in_cwd(&s, "")?;
+        let limit = limit.unwrap_or(200).clamp(1, 1000) as usize;
+        // Walk bloquant (read_dir récursif) → spawn_blocking, borné.
+        tokio::task::spawn_blocking(move || find_files(&cwd, &root, &q, limit))
+            .await
+            .context("find task")?
     }
     /// Éditeur du client : remplace [offset, offset+delete_len) par `data`
     /// (base64) — atomique (.part + rename), borné workspace, garde mtime
-    /// optionnelle ("conflit: <mtime>" si le disque a changé).
-    pub(super) async fn h_write_file(self: &Arc<Self>, session: String, path: String, offset: u64, delete_len: u64, data: String, if_mtime_ms: Option<u64>) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let p = resolve_in_cwd_create(&s, &path)?;
-                if p.is_dir() {
-                    anyhow::bail!("cible est un dossier: {path}");
-                }
-                // data est une ligne JSON — ~12 Mio décodés max (le client
-                // envoie le buffer édité complet en une tranche).
-                const WRITE_CAP: usize = 16 * 1024 * 1024;
-                if data.len() > WRITE_CAP {
-                    anyhow::bail!("tranche trop grosse (> {} o)", WRITE_CAP);
-                }
-                use base64::Engine;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(&data)
-                    .context("data base64")?;
-                let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-                if let Some(want) = if_mtime_ms {
-                    match mtime_ms(&p) {
-                        Some(m) if m == want => {}
-                        Some(m) => anyhow::bail!("conflit: {m}"),
-                        None => anyhow::bail!("conflit: fichier supprimé"),
-                    }
-                }
-                if offset > len {
-                    anyhow::bail!("offset au-delà de la fin ({offset} > {len})");
-                }
-                let delete_len = delete_len.min(len - offset);
-                let data_len = bytes.len() as u64;
-                let p2 = p.clone();
-                // La copie de queue peut brasser un gros reliquat — hors de
-                // la boucle d'events tokio.
-                tokio::task::spawn_blocking(move || splice_write(&p2, offset, delete_len, &bytes))
-                    .await
-                    .context("write task")??;
-                Ok(json!({
-                    "path": p.display().to_string(),
-                    "size": len - delete_len + data_len,
-                    "mtime_ms": mtime_ms(&p),
-                }))
+    /// optionnelle ("conflict: <mtime>" if the disk changed).
+    pub(super) async fn h_write_file(
+        self: &Arc<Self>,
+        session: String,
+        path: String,
+        offset: u64,
+        delete_len: u64,
+        data: String,
+        if_mtime_ms: Option<u64>,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let p = resolve_in_cwd_create(&s, &path)?;
+        if p.is_dir() {
+            anyhow::bail!("target is a directory: {path}");
+        }
+        // data est une ligne JSON — ~12 Mio décodés max (le client
+        // envoie le buffer édité complet en une tranche).
+        const WRITE_CAP: usize = 16 * 1024 * 1024;
+        if data.len() > WRITE_CAP {
+            anyhow::bail!("slice too large (> {} bytes)", WRITE_CAP);
+        }
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&data)
+            .context("data base64")?;
+        let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        if let Some(want) = if_mtime_ms {
+            match mtime_ms(&p) {
+                Some(m) if m == want => {}
+                Some(m) => anyhow::bail!("conflict: {m}"),
+                None => anyhow::bail!("conflict: file deleted"),
+            }
+        }
+        if offset > len {
+            anyhow::bail!("offset past the end ({offset} > {len})");
+        }
+        let delete_len = delete_len.min(len - offset);
+        let data_len = bytes.len() as u64;
+        let p2 = p.clone();
+        // La copie de queue peut brasser un gros reliquat — hors de
+        // la boucle d'events tokio.
+        tokio::task::spawn_blocking(move || splice_write(&p2, offset, delete_len, &bytes))
+            .await
+            .context("write task")??;
+        Ok(json!({
+            "path": p.display().to_string(),
+            "size": len - delete_len + data_len,
+            "mtime_ms": mtime_ms(&p),
+        }))
     }
-    pub(super) async fn h_delete_path(self: &Arc<Self>, session: String, path: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let p = resolve_in_cwd(&s, &path)?;
-                if p == resolve_in_cwd(&s, "")? {
-                    anyhow::bail!("racine du workspace");
-                }
-                if p.is_dir() {
-                    std::fs::remove_dir_all(&p)?;
-                } else {
-                    std::fs::remove_file(&p)?;
-                }
-                Ok(json!({"deleted": p.display().to_string()}))
+    pub(super) async fn h_delete_path(
+        self: &Arc<Self>,
+        session: String,
+        path: String,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let p = resolve_in_cwd(&s, &path)?;
+        if p == resolve_in_cwd(&s, "")? {
+            anyhow::bail!("workspace root");
+        }
+        if p.is_dir() {
+            std::fs::remove_dir_all(&p)?;
+        } else {
+            std::fs::remove_file(&p)?;
+        }
+        Ok(json!({"deleted": p.display().to_string()}))
     }
     /// Création exclusive d'un fichier vide ou d'un dossier (explorateur
     /// « nouveau ») — même borne workspace que write_file. La cible ne
     /// doit exister sous aucune forme : create_new/O_EXCL garantit
     /// l'exclusivité même en cas de course (write_file, lui, écrirait
     /// sans broncher dans un fichier apparu entre-temps).
-    pub(super) async fn h_create_path(self: &Arc<Self>, session: String, path: String, dir: bool) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let p = resolve_in_cwd_create(&s, &path)?;
-                if p == resolve_in_cwd(&s, "")? {
-                    anyhow::bail!("racine du workspace");
-                }
-                // resolve_in_cwd_create renvoie la cible canonique quand la
-                // feuille existe (symlink suivi) → déjà là sous une forme ou
-                // une autre = collision explicite plutôt qu'erreur système
-                // (lien pendant : canonicalize échoue plus tôt — refus pareil).
-                if std::fs::symlink_metadata(&p).is_ok() {
-                    anyhow::bail!("existe déjà: {path}");
-                }
-                if dir {
-                    std::fs::create_dir(&p)
-                        .with_context(|| format!("{}", p.display()))?;
-                } else {
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&p)
-                        .with_context(|| format!("{}", p.display()))?;
-                }
-                Ok(json!({"path": p.display().to_string(), "dir": dir}))
+    pub(super) async fn h_create_path(
+        self: &Arc<Self>,
+        session: String,
+        path: String,
+        dir: bool,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let p = resolve_in_cwd_create(&s, &path)?;
+        if p == resolve_in_cwd(&s, "")? {
+            anyhow::bail!("workspace root");
+        }
+        // resolve_in_cwd_create renvoie la cible canonique quand la
+        // feuille existe (symlink suivi) → déjà là sous une forme ou
+        // une autre = collision explicite plutôt qu'erreur système
+        // (lien pendant : canonicalize échoue plus tôt — refus pareil).
+        if std::fs::symlink_metadata(&p).is_ok() {
+            anyhow::bail!("already exists: {path}");
+        }
+        if dir {
+            std::fs::create_dir(&p).with_context(|| format!("{}", p.display()))?;
+        } else {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&p)
+                .with_context(|| format!("{}", p.display()))?;
+        }
+        Ok(json!({"path": p.display().to_string(), "dir": dir}))
     }
-    pub(super) async fn h_download_path(self: &Arc<Self>, session: String, path: String, offset: u64, limit: u64, archive: Option<String>) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                download_path(&s, &path, offset, limit, archive.as_deref()).await
+    pub(super) async fn h_download_path(
+        self: &Arc<Self>,
+        session: String,
+        path: String,
+        offset: u64,
+        limit: u64,
+        archive: Option<String>,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        download_path(&s, &path, offset, limit, archive.as_deref()).await
     }
-    pub(super) async fn h_get_blob(self: &Arc<Self>, session: String, blob: String, offset: u64, limit: u64) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                // Lecture disque (jusqu'à 4 Mio) hors de l'executor.
-                let dir = s.dir.clone();
-                let (data, total) = tokio::task::spawn_blocking(move || {
-                    journal::read_blob(&dir, &blob, offset, limit)
-                })
+    pub(super) async fn h_get_blob(
+        self: &Arc<Self>,
+        session: String,
+        blob: String,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        // Lecture disque (jusqu'à 4 Mio) hors de l'executor.
+        let dir = s.dir.clone();
+        let (data, total) =
+            tokio::task::spawn_blocking(move || journal::read_blob(&dir, &blob, offset, limit))
                 .await
-                .context("lecture blob")??;
-                Ok(json!({
-                    "data": String::from_utf8_lossy(&data),
-                    "total": total,
-                    "offset": offset,
-                }))
+                .context("reading blob")??;
+        // `size` = octets réellement lus (data est du texte lossy — sa
+        // longueur ne permet pas de déduire la tranche couverte) : le
+        // client avance son curseur offset dessus (#302, diff blobs).
+        let size = data.len() as u64;
+        Ok(json!({
+            "data": String::from_utf8_lossy(&data),
+            "total": total,
+            "offset": offset,
+            "size": size,
+        }))
     }
 }
 
@@ -234,7 +290,7 @@ pub(crate) fn resolve_in_cwd(s: &Session, path: &str) -> Result<PathBuf> {
     let p = std::fs::canonicalize(cwd.join(path))
         .with_context(|| format!("{}", cwd.join(path).display()))?;
     if !p.starts_with(&cwd) {
-        anyhow::bail!("hors du workspace: {path}");
+        anyhow::bail!("outside the workspace: {path}");
     }
     Ok(p)
 }
@@ -305,22 +361,20 @@ fn resolve_in_cwd_create(s: &Session, path: &str) -> Result<PathBuf> {
     let joined = cwd.join(path);
     // symlink_metadata (pas exists()) : voit aussi les liens pendants.
     if std::fs::symlink_metadata(&joined).is_ok() {
-        let p = std::fs::canonicalize(&joined)
-            .with_context(|| format!("{}", joined.display()))?;
+        let p = std::fs::canonicalize(&joined).with_context(|| format!("{}", joined.display()))?;
         if !p.starts_with(&cwd) {
-            anyhow::bail!("hors du workspace: {path}");
+            anyhow::bail!("outside the workspace: {path}");
         }
         return Ok(p);
     }
     let parent = joined.parent().unwrap_or(cwd.as_path());
-    let base = std::fs::canonicalize(parent)
-        .with_context(|| format!("{}", parent.display()))?;
+    let base = std::fs::canonicalize(parent).with_context(|| format!("{}", parent.display()))?;
     if !base.starts_with(&cwd) {
-        anyhow::bail!("hors du workspace: {path}");
+        anyhow::bail!("outside the workspace: {path}");
     }
     let name = joined
         .file_name()
-        .ok_or_else(|| anyhow::anyhow!("nom de fichier invalide: {path}"))?;
+        .ok_or_else(|| anyhow::anyhow!("invalid file name: {path}"))?;
     Ok(base.join(name))
 }
 
@@ -341,7 +395,7 @@ fn splice_write(p: &std::path::Path, offset: u64, delete_len: u64, data: &[u8]) 
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = p
         .file_name()
-        .ok_or_else(|| anyhow::anyhow!("nom de fichier invalide"))?
+        .ok_or_else(|| anyhow::anyhow!("invalid file name"))?
         .to_string_lossy();
     let tmp = p.with_file_name(format!(
         ".{name}.part-{}-{}",
@@ -400,7 +454,11 @@ async fn download_path(
 ) -> Result<Value> {
     let p = resolve_in_cwd(s, path)?;
     let meta = std::fs::metadata(&p).with_context(|| format!("{}", p.display()))?;
-    let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let name = p
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
     if meta.is_file() {
         if limit == 0 {
             return Ok(json!({"name": name, "dir": false, "size": meta.len()}));
@@ -412,7 +470,7 @@ async fn download_path(
         }));
     }
     if !meta.is_dir() {
-        anyhow::bail!("type non téléchargeable: {}", p.display());
+        anyhow::bail!("non-downloadable type: {}", p.display());
     }
     if limit == 0 {
         // Sonde métadonnées : ne pas zipper ici — la première tranche
@@ -433,23 +491,25 @@ async fn download_path(
         .context("zip task")??;
         zip_name
     } else {
-        let a = archive.context("archive manquante — repartir à offset 0")?;
+        let a = archive.context("missing archive — restarting at offset 0")?;
         if !a.starts_with("dl-")
             || !a.ends_with(".zip")
-            || !a[3..a.len() - 4].chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            || !a[3..a.len() - 4]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
         {
-            anyhow::bail!("archive invalide: {a}");
+            anyhow::bail!("invalid archive: {a}");
         }
         a.to_string()
     };
     let zip_path = s.dir.join("blobs").join(&zip_name);
     if !zip_path.is_file() {
-        anyhow::bail!("archive expirée (purge) — relancez le téléchargement");
+        anyhow::bail!("archive expired (purged) — restart the download");
     }
     // Rafraîchit la mtime : le LRU trie par ancienneté et ne doit pas
     // purger une archive encore en cours de transfert.
-    let _ = std::fs::File::open(&zip_path)
-        .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    let _ =
+        std::fs::File::open(&zip_path).and_then(|f| f.set_modified(std::time::SystemTime::now()));
     let (data, total) = read_slice(&zip_path, offset, limit.min(DL_CHUNK))?;
     Ok(json!({
         "name": format!("{name}.zip"), "dir": true, "total": total,
@@ -599,4 +659,3 @@ fn zip_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
     std::fs::rename(&tmp, dst)?;
     Ok(())
 }
-

@@ -3,7 +3,7 @@
 //! journal).
 
 use super::*;
-use proto::EventKind;
+use proto::{EventKind, PrEntry};
 
 use crate::forges::{Forges, PrRef};
 use crate::prs::{ref_key, PrRegistry, TrackIn};
@@ -158,7 +158,7 @@ impl PrVerifier {
                 }
                 None => {
                     if g.len() >= VERIFY_PENDING_CAP {
-                        warn!("[{sid}] prs verify: file pleine — {} ignorée", r.display());
+                        warn!("[{sid}] prs verify: queue full — {} skipped", r.display());
                         return Ok(Submit::Rejected);
                     }
                     g.insert(
@@ -245,15 +245,16 @@ impl PrVerifier {
         let verdict = tokio::task::spawn_blocking(move || check(&t)).await;
         match verdict {
             Ok(forgesync::Verify::Exists) => self.apply(&p),
-            // PR de release (next_release → main) : existe mais reste
-            // hors registre — cache négatif comme un « inexistant »
-            // pour ne pas revérifier à chaque occurrence.
+            // PR de release (paire integration_branch → release_branch
+            // configurée) : existe mais reste hors registre — cache
+            // négatif comme un « inexistant » pour ne pas revérifier à
+            // chaque occurrence.
             Ok(forgesync::Verify::Release) => {
                 self.negative_add(key);
                 self.emit(
                     &p,
                     format!(
-                        "PR {} ignorée — PR de release (hors registre)",
+                        "PR {} skipped — release PR (out of registry)",
                         p.r.display()
                     ),
                 );
@@ -262,11 +263,7 @@ impl PrVerifier {
                 self.negative_add(key);
                 self.emit(
                     &p,
-                    format!(
-                        "PR {} ignorée — introuvable sur {}",
-                        p.r.display(),
-                        p.r.forge
-                    ),
+                    format!("PR {} skipped — not found on {}", p.r.display(), p.r.forge),
                 );
             }
             // Erreur de join = panic du checker : même destin qu'un
@@ -279,7 +276,7 @@ impl PrVerifier {
     /// registre et l'event de confirmation de la session.
     fn apply(&self, p: &PendingRef) {
         match self.prs.detected(&p.sid, &p.r, p.strong) {
-            Ok(true) => self.emit(p, format!("PR détectée et enregistrée : {}", p.r.display())),
+            Ok(true) => self.emit(p, format!("PR detected and registered: {}", p.r.display())),
             Ok(false) => {}
             Err(e) => warn!("[{}] prs.detected: {e:#}", p.sid),
         }
@@ -309,14 +306,14 @@ impl PrVerifier {
             self.notify.notify_one();
         } else {
             warn!(
-                "[{}] PR {} non enregistrée — forge injoignable après {} tentatives",
+                "[{}] PR {} not registered — forge unreachable after {} attempts",
                 p.sid,
                 p.r.display(),
                 p.attempts
             );
             self.emit(
                 &p,
-                format!("PR {} non enregistrée — forge injoignable", p.r.display()),
+                format!("PR {} not registered — forge unreachable", p.r.display()),
             );
         }
     }
@@ -386,7 +383,10 @@ impl Daemon {
         }
         let sid = s.meta_snapshot().id;
         let verify = Arc::clone(&self.pr_verify);
-        let forges = self.forges.clone();
+        // Verrou vivant : un `comp set prs-registry` ou un `[[forges]]`
+        // édité à la main est vu par le watcher sans restart (read
+        // bref par event, jamais tenu à travers un await).
+        let forges = Arc::clone(&self.forges);
         let weak = Arc::downgrade(s);
         let s2 = Arc::clone(s);
         tokio::spawn(async move {
@@ -407,7 +407,8 @@ impl Daemon {
                     if let Ok(evs) = s3.journal.read_page(&s3.dir, None, 2000) {
                         let mut titles = HashMap::new();
                         for ev in &evs {
-                            scan_pr_event(&verify_b, &forges_b, &s3, &sid_b, ev, &mut titles);
+                            let f = forges_b.read().unwrap();
+                            scan_pr_event(&verify_b, &f.set, &s3, &sid_b, ev, &mut titles);
                         }
                     }
                 })
@@ -418,7 +419,37 @@ impl Daemon {
                 match rx.recv().await {
                     Ok(ev) => {
                         let Some(s) = weak.upgrade() else { break };
-                        scan_pr_event(&verify, &forges, &s, &sid, &ev, &mut titles);
+                        // Fin d'un replay « refill » (#300) : les events
+                        // rejoués ont été journalisés SANS broadcast —
+                        // les PR citées dans l'historique re-journalisé
+                        // échapperaient au scan live. Re-scan borné du
+                        // journal (idempotent : le registre déduplique).
+                        if matches!(ev.kind, proto::EventKind::HistoryReplayed { .. }) {
+                            let s3 = Arc::clone(&s);
+                            let sid_b = sid.clone();
+                            let verify_b = Arc::clone(&verify);
+                            let forges_b = forges.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                if let Ok(evs) = s3.journal.read_page(&s3.dir, None, 2000) {
+                                    let mut titles = HashMap::new();
+                                    for ev in &evs {
+                                        let f = forges_b.read().unwrap();
+                                        scan_pr_event(
+                                            &verify_b,
+                                            &f.set,
+                                            &s3,
+                                            &sid_b,
+                                            ev,
+                                            &mut titles,
+                                        );
+                                    }
+                                }
+                            })
+                            .await;
+                            continue;
+                        }
+                        let f = forges.read().unwrap();
+                        scan_pr_event(&verify, &f.set, &s, &sid, &ev, &mut titles);
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -426,7 +457,6 @@ impl Daemon {
             }
         });
     }
-
 
     /// État de la review orchestrateur pour une entrée du registre :
     /// "running" (session PRReview-* active), "retry" (retry_wait en
@@ -444,7 +474,9 @@ impl Daemon {
         // Les clés persistées sont `repo#N` en casse forge — comparaison
         // insensible à la casse (le registre normalise en minuscules).
         for (k, e) in reviews {
-            let Some((r, n)) = k.rsplit_once('#') else { continue };
+            let Some((r, n)) = k.rsplit_once('#') else {
+                continue;
+            };
             if n.parse::<u64>() != Ok(pr) || !r.eq_ignore_ascii_case(repo) {
                 continue;
             }
@@ -457,7 +489,9 @@ impl Daemon {
             }
         }
         for k in requests.keys() {
-            let Some((r, n)) = k.rsplit_once('#') else { continue };
+            let Some((r, n)) = k.rsplit_once('#') else {
+                continue;
+            };
             if n.parse::<u64>() == Ok(pr) && r.eq_ignore_ascii_case(repo) {
                 return Some("queued");
             }
@@ -465,33 +499,140 @@ impl Daemon {
         None
     }
 
-    pub(super) async fn h_pr_list(self: &Arc<Self>, session: Option<String>) -> Result<Value> {
-                let mut v = self.prs.list();
-                if let Some(sid) = session {
-                    v.retain(|e| e.session == sid);
-                }
-                // Jointure review native : la file `PRReview-*` de
-                // l'orchestrateur est locale — `native_review` marque
-                // les PR en review agent même sans reviewRequest forge.
-                let (reviews, requests) = {
-                    let st = self.orch.state.lock().unwrap();
-                    (st.pr_reviews.clone(), st.pr_review_requests.clone())
-                };
-                let mut out = Vec::with_capacity(v.len());
-                for e in &v {
-                    let mut j = serde_json::to_value(e)?;
-                    // La review orchestrateur ne connaît que github.com.
-                    let gh = proto::forge_kind(&e.forge) == "github"
-                        && (e.host.is_empty() || e.host == "github.com");
-                    if gh {
-                        if let Some(nr) = Self::native_review_of(&reviews, &requests, &e.repo, e.pr) {
-                            j["native_review"] = json!(nr);
-                        }
-                    }
-                    out.push(j);
-                }
-                Ok(json!(out))
+    /// Jointure `native_review` sur une entrée — partagée par
+    /// `h_pr_list` et `h_pr_list_page`.
+    fn pr_entry_json(
+        e: &PrEntry,
+        reviews: &HashMap<String, Value>,
+        requests: &HashMap<String, Value>,
+    ) -> Result<Value> {
+        let mut j = serde_json::to_value(e)?;
+        // Jointure toutes forges : la review orchestrateur prend
+        // désormais n'importe quelle forge connue (git nu exclu —
+        // pas de review auto, l'entrée n'y arrive pas de toute
+        // façon par la détection).
+        if let Some(nr) = Self::native_review_of(reviews, requests, &e.repo, e.pr) {
+            j["native_review"] = json!(nr);
+        }
+        Ok(j)
     }
+
+    /// Empreinte des maps de reviews natives — entre dans le `version`
+    /// de `pr_list_page` : une review qui démarre/termine doit
+    /// invalider le `unchanged` même si le registre prs.json est figé.
+    /// Clés triées : l'itération d'une HashMap n'est pas stable.
+    fn orch_pr_fingerprint(
+        reviews: &HashMap<String, Value>,
+        requests: &HashMap<String, Value>,
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (tag, map) in [(0u8, reviews), (1u8, requests)] {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for k in keys {
+                tag.hash(&mut h);
+                k.hash(&mut h);
+                if let Some(v) = map.get(k) {
+                    v.to_string().hash(&mut h);
+                }
+            }
+        }
+        h.finish()
+    }
+
+    /// Version courte du jeu « registre + reviews natives » — voir
+    /// `PrListPage::if_version`. `prs.rev()` couvre toutes les
+    /// mutations du registre (save() est l'entonnoir unique) ;
+    /// l'empreinte orch couvre `native_review`.
+    fn pr_list_version(&self) -> (String, HashMap<String, Value>, HashMap<String, Value>) {
+        let st = self.orch.state.lock().unwrap();
+        let fp = Self::orch_pr_fingerprint(&st.pr_reviews, &st.pr_review_requests);
+        (
+            format!("{}-{:016x}", self.prs.rev(), fp),
+            st.pr_reviews.clone(),
+            st.pr_review_requests.clone(),
+        )
+    }
+
+    pub(super) async fn h_pr_list(self: &Arc<Self>, session: Option<String>) -> Result<Value> {
+        let mut v = self.prs.list();
+        if let Some(sid) = session {
+            v.retain(|e| e.session == sid);
+        }
+        // Jointure review native : la file `PRReview-*` de
+        // l'orchestrateur est locale — `native_review` marque
+        // les PR en review agent même sans reviewRequest forge.
+        let (reviews, requests) = {
+            let st = self.orch.state.lock().unwrap();
+            (st.pr_reviews.clone(), st.pr_review_requests.clone())
+        };
+        let mut out = Vec::with_capacity(v.len());
+        for e in &v {
+            out.push(Self::pr_entry_json(e, &reviews, &requests)?);
+        }
+        Ok(json!(out))
+    }
+
+    /// Page de pr_list : le registre complet dépassait 1,9 Mo en une
+    /// seule ligne NDJSON sur les grosses instances — flood du lien
+    /// puis retry storm côté client (item #367). Même motif que
+    /// `h_list_sessions_page`, avec deux garde-fous en plus : une page
+    /// bornée en OCTETS (les entrées PR font ~4-8 Kio, 50 entrées
+    /// dépasseraient encore le seuil « giant line ») et `if_version`
+    /// pour sauter la sérialisation quand rien n'a changé.
+    pub(super) async fn h_pr_list_page(
+        self: &Arc<Self>,
+        session: Option<String>,
+        limit: Option<u32>,
+        offset: Option<u64>,
+        if_version: Option<String>,
+    ) -> Result<Value> {
+        const DEFAULT_PAGE: u64 = 50;
+        const MAX_PAGE: u64 = 200;
+        const PAGE_BYTES: usize = 128 * 1024;
+        let (version, reviews, requests) = self.pr_list_version();
+        if if_version.as_deref() == Some(version.as_str()) {
+            return Ok(json!({ "unchanged": true, "version": version }));
+        }
+        let limit = limit
+            .map(|l| l as u64)
+            .unwrap_or(DEFAULT_PAGE)
+            .clamp(1, MAX_PAGE);
+        let offset = offset.unwrap_or(0);
+        let mut v = self.prs.list();
+        if let Some(sid) = session {
+            v.retain(|e| e.session == sid);
+        }
+        let total = v.len() as u64;
+        let start = (offset as usize).min(v.len());
+        let mut out: Vec<Value> = Vec::new();
+        let mut bytes = 0usize;
+        for e in &v[start..] {
+            if out.len() as u64 >= limit {
+                break;
+            }
+            let j = Self::pr_entry_json(e, &reviews, &requests)?;
+            let sz = serde_json::to_string(&j)?.len();
+            // Toujours au moins une entrée par page : une entrée seule
+            // plus grosse que la borne ne doit pas produire une page
+            // vide en boucle infinie.
+            if !out.is_empty() && bytes + sz > PAGE_BYTES {
+                break;
+            }
+            bytes += sz;
+            out.push(j);
+        }
+        let end = start + out.len();
+        let next = (end < v.len()).then_some(end as u64);
+        Ok(json!({
+            "prs": out,
+            "next_offset": next,
+            "total": total,
+            "version": version,
+        }))
+    }
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn h_pr_track(
         self: &Arc<Self>,
         session: Option<String>,
@@ -509,23 +650,23 @@ impl Daemon {
         review: Option<String>,
         ci: Option<String>,
     ) -> Result<Value> {
-                let e = self.prs.track(TrackIn {
-                    session,
-                    repo,
-                    pr,
-                    forge: forge.unwrap_or_default(),
-                    host: host.unwrap_or_default(),
-                    change_id,
-                    url,
-                    branch,
-                    title,
-                    status,
-                    note,
-                    sync_fails,
-                    review,
-                    ci,
-                })?;
-                Ok(serde_json::to_value(e)?)
+        let e = self.prs.track(TrackIn {
+            session,
+            repo,
+            pr,
+            forge: forge.unwrap_or_default(),
+            host: host.unwrap_or_default(),
+            change_id,
+            url,
+            branch,
+            title,
+            status,
+            note,
+            sync_fails,
+            review,
+            ci,
+        })?;
+        Ok(serde_json::to_value(e)?)
     }
     pub(super) async fn h_pr_untrack(
         self: &Arc<Self>,
@@ -535,7 +676,7 @@ impl Daemon {
         host: Option<String>,
         change_id: Option<String>,
     ) -> Result<Value> {
-                Ok(json!({ "removed": self.prs.remove(
+        Ok(json!({ "removed": self.prs.remove(
                     forge.as_deref().unwrap_or(""),
                     host.as_deref().unwrap_or(""),
                     &repo,
@@ -545,9 +686,12 @@ impl Daemon {
     }
     /// Set effectif des forges de review (détection + sync) — github et
     /// gitlab.com implicites + `[[forges]]` de la config. `token_env` est
-    /// un nom de variable d'environnement, jamais le token.
+    /// un nom de variable d'environnement, jamais le token. Relecture
+    /// config.toml d'abord : un `[[forges]]` édité à la main est vu ici
+    /// sans restart.
     pub(super) async fn h_forge_list(self: &Arc<Self>) -> Result<Value> {
-                Ok(self.forges.list_json())
+        self.reload_forges().await;
+        Ok(self.forges.read().unwrap().set.list_json())
     }
 
     /// `pr_sync` : resynchronise les statuts du registre depuis les
@@ -570,13 +714,16 @@ impl Daemon {
             }
             // Un run « coincé » (> PR_SYNC_STUCK) n'exclut plus — ses
             // updates tardives restent idempotentes si elles atterrissent.
-            if c.last_done.is_some_and(|t| t.elapsed() < PR_SYNC_MIN_INTERVAL) {
+            if c.last_done
+                .is_some_and(|t| t.elapsed() < PR_SYNC_MIN_INTERVAL)
+            {
                 return Ok(json!({ "synced": false, "throttled": true }));
             }
             c.running_since = Some(std::time::Instant::now());
         }
         let prs = Arc::clone(&self.prs);
-        let set = self.forges.list_json();
+        self.reload_forges().await;
+        let set = self.forges.read().unwrap().set.list_json();
         let ctl = Arc::clone(&self.pr_sync);
         let work = tokio::task::spawn_blocking(move || {
             let entries: Vec<Value> = prs
@@ -713,7 +860,7 @@ fn scan_pr_event(
         let disp = r.display();
         match verifier.submit(s, sid, r, strong) {
             Ok(Submit::Applied(true)) => s.emit(EventKind::System {
-                text: format!("PR détectée et enregistrée : {disp}"),
+                text: format!("PR detected and registered: {disp}"),
             }),
             Ok(_) => {}
             Err(e) => warn!("[{sid}] prs.detected: {e:#}"),
@@ -775,6 +922,7 @@ mod tests {
             agent: "test".into(),
             title: "t".into(),
             cwd: "/tmp".into(),
+            reported_cwd: None,
             created_at: proto::now_iso(),
             native_session_id: None,
             mode: None,
@@ -798,16 +946,21 @@ mod tests {
             context_size: None,
             last_error: None,
             wait: None,
+            state_since: None,
         };
         std::fs::write(
             dir.join("meta.json"),
             serde_json::to_string_pretty(&meta).unwrap(),
         )
         .unwrap();
-        Session::open(dir, &CompactSrc {
-            global: crate::server::CompactCfg::default(),
-            by_agent: Default::default(),
-        }, crate::caps::CapsRegistry::in_memory())
+        Session::open(
+            dir,
+            &CompactSrc {
+                global: crate::server::CompactCfg::default(),
+                by_agent: Default::default(),
+            },
+            crate::caps::CapsRegistry::in_memory(),
+        )
         .unwrap()
     }
 
@@ -836,6 +989,8 @@ mod tests {
                 excerpt: Some(excerpt.into()),
                 size: None,
                 diff: None,
+                diff_blob: None,
+                diff_size: None,
                 locations: None,
                 input: None,
             },
@@ -844,8 +999,7 @@ mod tests {
 
     /// Poll borné — le worker est async, attendre fixe serait flaky.
     async fn until(timeout_ms: u64, mut f: impl FnMut() -> bool) -> bool {
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         while std::time::Instant::now() < deadline {
             if f() {
                 return true;
@@ -943,7 +1097,8 @@ mod tests {
         let v = verifier(&r, |_| forgesync::Verify::Exists);
         let s = sess("dedup");
         assert!(matches!(
-            v.submit(&s, "s-faible", gh("corp/tools", 7), false).unwrap(),
+            v.submit(&s, "s-faible", gh("corp/tools", 7), false)
+                .unwrap(),
             Submit::Queued
         ));
         assert!(matches!(

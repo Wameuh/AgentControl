@@ -48,8 +48,7 @@ impl rand_core::TryCryptoRng for OsRng {}
 /// Paire ed25519 en mémoire — clé jetable du pairing (jamais écrite
 /// sur disque : elle vit dans le QR puis est scrubbée à l'usage).
 pub fn gen_ed25519() -> Result<ssh_key::PrivateKey> {
-    ssh_key::PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519)
-        .context("keygen ed25519")
+    ssh_key::PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).context("keygen ed25519")
 }
 
 /// (PEM privé, "<type> <b64>" public) d'une paire ed25519 jetable —
@@ -73,18 +72,23 @@ pub fn ensure_keypair() -> Result<PathBuf> {
     }
     let _ = std::fs::create_dir_all(base_dir());
     let key = gen_ed25519()?;
-    let pem = key.to_openssh(ssh_key::LineEnding::LF).context("openssh pem")?;
+    let pem = key
+        .to_openssh(ssh_key::LineEnding::LF)
+        .context("openssh pem")?;
     write_secret(&p, pem.as_bytes())?;
-    let pub_line = format!("{} agentcontrol", key.public_key().to_openssh().unwrap_or_default());
+    let pub_line = format!(
+        "{} agentcontrol",
+        key.public_key().to_openssh().unwrap_or_default()
+    );
     std::fs::write(p.with_extension("pub"), &pub_line)?;
-    log(Level::Info, format!("clé ssh app générée : {}", pub_line));
+    log(Level::Info, format!("app ssh key generated: {}", pub_line));
     Ok(p)
 }
 
 /// Ligne authorized_keys à ajouter côté serveur ("ssh-ed25519 AAAA… agentcontrol").
 pub fn pubkey_line() -> Result<String> {
     let p = ensure_keypair()?;
-    let key = load_private_key(&p).context("clé privée")?;
+    let key = load_private_key(&p).context("private key")?;
     Ok(format!(
         "{} agentcontrol",
         key.public_key().to_openssh().unwrap_or_default()
@@ -100,7 +104,7 @@ pub fn pubkey_line() -> Result<String> {
 /// tronqué ou malformé est refusé ici plutôt qu'au premier connect.
 pub fn check_key_pem(pem: &str) -> Result<()> {
     russh::keys::decode_secret_key(pem, None)
-        .context("clé privée illisible (format OpenSSH attendu)")?;
+        .context("private key unreadable (OpenSSH format expected)")?;
     Ok(())
 }
 
@@ -108,8 +112,8 @@ pub fn check_key_pem(pem: &str) -> Result<()> {
 /// par l'appelant). Erreur contextualisée si absent ou illisible.
 pub fn read_key_pem(path: &Path) -> Result<String> {
     let bytes = crate::secrets::read_secret_file(path)
-        .with_context(|| format!("clé {}", path.display()))?;
-    let pem = String::from_utf8(bytes).context("clé non texte (utf8)")?;
+        .with_context(|| format!("key {}", path.display()))?;
+    let pem = String::from_utf8(bytes).context("non-text key (utf8)")?;
     check_key_pem(&pem)?;
     Ok(pem)
 }
@@ -118,7 +122,7 @@ pub fn read_key_pem(path: &Path) -> Result<String> {
 /// (fichier scellé keystore déchiffré, clair hérité accepté).
 fn load_private_key(path: &Path) -> Result<russh::keys::PrivateKey> {
     let pem = read_key_pem(path)?;
-    russh::keys::decode_secret_key(&pem, None).with_context(|| format!("clé {}", path.display()))
+    russh::keys::decode_secret_key(&pem, None).with_context(|| format!("key {}", path.display()))
 }
 
 /// Clé privée reçue par appairage : écrite dans paired_keys/ (jamais
@@ -143,8 +147,7 @@ pub fn import_paired_key(pem: &str, name: &str) -> Result<PathBuf> {
     let dir = base_dir().join("paired_keys");
     std::fs::create_dir_all(&dir).context("paired_keys")?;
     let p = dir.join(if safe.is_empty() { "paired" } else { &safe });
-    write_secret(&p, pem.as_bytes())
-        .with_context(|| format!("écriture {}", p.display()))?;
+    write_secret(&p, pem.as_bytes()).with_context(|| format!("write {}", p.display()))?;
     Ok(p)
 }
 
@@ -161,10 +164,16 @@ fn write_secret(path: &Path, data: &[u8]) -> std::io::Result<()> {
 pub struct Opts {
     /// Empreintes `SHA256:…` épinglées — la clé présentée par le
     /// serveur doit en faire partie (certificats refusés). `None` =
-    /// accept-all historique (log seul). Un set vide est traité
-    /// comme `None` : jamais produit par le pairing, et refuser tout
-    /// serait un échec muet.
+    /// clé inconnue : refusée (TOFU — l'erreur `hostkey-unknown:<fp>`
+    /// déclenche la confirmation côté UI, qui épingle ensuite). Un
+    /// set vide est traité comme `None` : jamais produit par le
+    /// pairing, et refuser tout serait un échec muet.
     pub expected_hk: Option<Arc<HashSet<String>>>,
+    /// Porte de sortie pour les tests et outils non interactifs :
+    /// accepte une host key inconnue quand `expected_hk` est absent
+    /// (comportement accept-all historique). L'UI ne le pose jamais —
+    /// l'utilisateur confirme l'empreinte, qui est épinglée.
+    pub accept_unknown_hostkey: bool,
     /// Clé privée en mémoire (K jetable du pairing — jamais écrite
     /// sur disque). Prioritaire sur `key_path` quand présente.
     pub key: Option<Arc<russh::keys::PrivateKey>>,
@@ -182,6 +191,10 @@ struct Handler {
     /// pas remonter la clé vue). Partagée Arc<Mutex> : le Handler
     /// est consommé par client::connect.
     seen_fp: Arc<std::sync::Mutex<Option<String>>>,
+    /// `Opts.accept_unknown_hostkey` recopié : sans épinglage, la clé
+    /// inconnue n'est acceptée que si l'appelant a demandé le repli
+    /// non interactif.
+    accept_unknown: bool,
     /// Raison de déconnexion capturée par `disconnected` — lue au
     /// post-mortem par le guard pour classer la mort du transport.
     disc: Arc<std::sync::Mutex<Option<String>>>,
@@ -195,9 +208,7 @@ impl client::Handler for Handler {
     ) -> Result<bool, Self::Error> {
         match key {
             PublicKeyOrCertificate::PublicKey { key, .. } => {
-                let fp = key
-                    .fingerprint(russh::keys::HashAlg::Sha256)
-                    .to_string();
+                let fp = key.fingerprint(russh::keys::HashAlg::Sha256).to_string();
                 if let Ok(mut g) = self.seen_fp.lock() {
                     *g = Some(fp.clone());
                 }
@@ -206,28 +217,58 @@ impl client::Handler for Handler {
                         let ok = hk.contains(&fp);
                         log(
                             if ok { Level::Info } else { Level::Warn },
-                            format!("ssh host key: {fp}{}", if ok { "" } else { " — REFUSÉE (hors pinning)" }),
+                            format!(
+                                "ssh host key: {fp}{}",
+                                if ok {
+                                    ""
+                                } else {
+                                    " — REFUSED (outside pinning)"
+                                }
+                            ),
                         );
                         Ok(ok)
                     }
-                    // accept-all historique : la clé vue est loggée
-                    // (TOFU implicite v1) — les profils appairés ont
-                    // expected_hk et sortent de ce repli.
+                    // Pas d'épinglage : TOFU — la clé inconnue est
+                    // refusée (connect_auth la remonte en
+                    // `hostkey-unknown:<fp>` pour confirmation UI),
+                    // sauf repli non interactif demandé explicitement.
                     None => {
-                        log(Level::Info, format!("ssh host key: {fp}"));
-                        Ok(true)
+                        log(
+                            if self.accept_unknown {
+                                Level::Info
+                            } else {
+                                Level::Warn
+                            },
+                            format!(
+                                "ssh host key: {fp}{}",
+                                if self.accept_unknown {
+                                    ""
+                                } else {
+                                    " — REFUSED (unknown, unpinned)"
+                                }
+                            ),
+                        );
+                        Ok(self.accept_unknown)
                     }
                 }
             }
             PublicKeyOrCertificate::Certificate(_) => {
                 // Un profil épinglé n'attend que des host keys nues :
-                // un certificat ne peut pas correspondre à `hk`.
+                // un certificat ne peut pas correspondre à `hk`. Sans
+                // épinglage il suit le même sort qu'une clé inconnue —
+                // refusé sauf repli explicite (seen_fp reste vide : un
+                // fp de cert ne se vérifie pas comme une clé nue →
+                // l'erreur connect reste générique, le log dit le refus).
                 let pinned = self.expected_hk.is_some();
+                let refused = pinned || !self.accept_unknown;
                 log(
-                    if pinned { Level::Warn } else { Level::Info },
-                    format!("ssh host key: certificate{}", if pinned { " — refusé (pinning actif)" } else { "" }),
+                    if refused { Level::Warn } else { Level::Info },
+                    format!(
+                        "ssh host key: certificate{}",
+                        if refused { " — refused" } else { "" }
+                    ),
                 );
-                Ok(!pinned)
+                Ok(!pinned && self.accept_unknown)
             }
         }
     }
@@ -243,18 +284,18 @@ impl client::Handler for Handler {
         use client::DisconnectReason;
         let desc = match &reason {
             DisconnectReason::ReceivedDisconnect(d) => format!(
-                "déconnexion annoncée par le serveur ({:?} : {})",
+                "disconnect announced by the server ({:?}: {})",
                 d.reason_code, d.message
             ),
             DisconnectReason::Error(russh::Error::KeepaliveTimeout) => {
-                "keepalive-timeout local (serveur muet aux keepalives)".into()
+                "local keepalive-timeout (server silent on keepalives)".into()
             }
             DisconnectReason::Error(russh::Error::IO(e)) => {
-                format!("erreur réseau locale ({e})")
+                format!("local network error ({e})")
             }
-            DisconnectReason::Error(e) => format!("erreur session ({e})"),
+            DisconnectReason::Error(e) => format!("session error ({e})"),
         };
-        log(Level::Warn, format!("ssh natif : {desc}"));
+        log(Level::Warn, format!("native ssh: {desc}"));
         if let Ok(mut g) = self.disc.lock() {
             *g = Some(desc);
         }
@@ -275,6 +316,14 @@ pub struct NativeGuard {
 }
 
 impl NativeGuard {
+    /// Exec sur la session SSH vivante (le canal direct-tcpip n'est
+    /// qu'un flux parmi d'autres) — utilisé pour relire `daemon.token`
+    /// sans passer par le canal data : le jeton ne transite que par la
+    /// session authentifiée, jamais en clair sur le port TCP.
+    pub async fn exec(&self, script: &str) -> Result<(i32, String, String)> {
+        exec_on(&self.h, script, None).await
+    }
+
     /// Note post-mortem : la raison russh capturée si la session est
     /// morte, sinon la distinction canal-seul-fermé vs session morte.
     pub fn death_note(&self) -> String {
@@ -282,9 +331,9 @@ impl NativeGuard {
             return r;
         }
         if self.h.is_closed() {
-            "session ssh morte (sans raison capturée)".into()
+            "ssh session dead (no captured reason)".into()
         } else {
-            "canal direct-tcpip fermé — session ssh encore vivante".into()
+            "direct-tcpip channel closed — ssh session still alive".into()
         }
     }
 }
@@ -298,15 +347,18 @@ async fn connect_auth(
     key: Option<&Path>,
     opts: &Opts,
 ) -> Result<client::Handle<Handler>> {
-    let mut cfg = client::Config::default();
-    cfg.inactivity_timeout = None;
-    cfg.keepalive_interval = Some(Duration::from_secs(30));
-    cfg.keepalive_max = 3;
+    let cfg = client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        keepalive_max: 3,
+        ..Default::default()
+    };
     let addrs = (host, port);
     let seen_fp = Arc::new(std::sync::Mutex::new(None));
     let handler = Handler {
         expected_hk: opts.expected_hk.clone().filter(|s| !s.is_empty()),
         seen_fp: seen_fp.clone(),
+        accept_unknown: opts.accept_unknown_hostkey,
         disc: opts.disc.clone().unwrap_or_default(),
     };
     let mut h = match tokio::time::timeout(
@@ -317,16 +369,22 @@ async fn connect_auth(
     {
         Ok(Ok(h)) => h,
         Ok(Err(e)) => {
-            // Pinning actif + clé vue hors liste → erreur dédiée : le
-            // frontend propose la re-confirmation explicite (TOFU),
-            // jamais un accept silencieux.
+            // Clé vue au handshake refusée par check_server_key →
+            // erreur dédiée : épinglage hors liste = `hostkey-mismatch`
+            // (re-confirmation), aucun épinglage = `hostkey-unknown`
+            // (première connexion — TOFU). Le frontend confirme puis
+            // épingle l'empreinte, jamais un accept silencieux.
             let fp = seen_fp.lock().ok().and_then(|g| g.clone());
-            if let (Some(hk), Some(fp)) = (&opts.expected_hk, fp) {
-                if !hk.is_empty() && !hk.contains(&fp) {
-                    bail!("hostkey-mismatch:{fp}");
+            let pinned = opts.expected_hk.as_ref().filter(|s| !s.is_empty());
+            match (pinned, fp) {
+                (Some(hk), Some(fp)) if !hk.contains(&fp) => {
+                    bail!("hostkey-mismatch:{fp}")
                 }
+                (None, Some(fp)) if !opts.accept_unknown_hostkey => {
+                    bail!("hostkey-unknown:{fp}")
+                }
+                _ => return Err(e).context("ssh connect"),
             }
-            return Err(e).context("ssh connect");
         }
         Err(_) => bail!("ssh connect timeout"),
     };
@@ -338,20 +396,19 @@ async fn connect_auth(
             .await;
         return match auth {
             Ok(r) if r.success() => Ok(h),
-            _ => bail!("clé jetable refusée — QR expiré ou appairage annulé"),
+            _ => bail!("disposable key refused — QR expired or pairing cancelled"),
         };
     }
     let kp = key.map(PathBuf::from).unwrap_or_else(key_path);
     if kp.exists() {
-        let key = load_private_key(&kp)
-            .with_context(|| format!("clé {}", kp.display()))?;
+        let key = load_private_key(&kp).with_context(|| format!("key {}", kp.display()))?;
         let auth = h
             .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), None))
             .await;
         match auth {
             Ok(r) if r.success() => return Ok(h),
-            Ok(_) => log(Level::Warn, "clé refusée (auth partielle) — essai mot de passe"),
-            Err(e) => log(Level::Warn, format!("auth clé: {e} — essai mot de passe")),
+            Ok(_) => log(Level::Warn, "key refused (partial auth) — trying password"),
+            Err(e) => log(Level::Warn, format!("key auth: {e} — trying password")),
         }
     }
     if let Some(pw) = password.filter(|p| !p.is_empty()) {
@@ -362,9 +419,9 @@ async fn connect_auth(
         if r.success() {
             return Ok(h);
         }
-        bail!("mot de passe refusé");
+        bail!("password refused");
     }
-    bail!("auth impossible — ajoutez la clé publique de l'app dans authorized_keys du serveur");
+    bail!("auth failed — add the app's public key to the server's authorized_keys");
 }
 
 /// `ssh host <script>` sans binaire : canal exec → stdout/stderr
@@ -372,6 +429,7 @@ async fn connect_auth(
 /// au fil de l'eau (progression `step:*`, erreurs lisibles…) — le
 /// retour est `(code, stdout, stderr)` : le résultat métier reste
 /// sur stdout, les messages de diagnostic sur stderr.
+#[allow(clippy::too_many_arguments)]
 pub async fn ssh_exec(
     host: &str,
     port: u16,
@@ -386,18 +444,64 @@ pub async fn ssh_exec(
     exec_on(&h, script, on_stderr).await
 }
 
+/// `ssh host <script>` avec `stdin` poussé dans le canal exec puis EOF :
+/// le script distant lit ses données d'entrée — `cat > archive.tgz`
+/// reçoit un artefact déjà téléchargé ET vérifié côté app (option (a)
+/// I1 : le serveur n'a plus besoin d'accéder à GitHub ni de curl pour
+/// installer le démon). Même contrat que `ssh_exec` pour la sortie.
+#[allow(clippy::too_many_arguments)]
+pub async fn ssh_exec_stdin(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: Option<&str>,
+    key_path: Option<&Path>,
+    script: &str,
+    stdin: &[u8],
+    on_stderr: Option<&mut (dyn FnMut(&str) + Send)>,
+    opts: &Opts,
+    read_timeout: Duration,
+) -> Result<(i32, String, String)> {
+    let h = connect_auth(host, port, user, password, key_path, opts).await?;
+    exec_on_io(&h, script, Some(stdin), on_stderr, read_timeout).await
+}
+
 /// Exec sur une session déjà ouverte — factorisé entre ssh_exec et
 /// pair_attempt (connexion K jetable + pinning, ouverte par l'appelant).
 async fn exec_on(
     h: &client::Handle<Handler>,
     script: &str,
+    on_stderr: Option<&mut (dyn FnMut(&str) + Send)>,
+) -> Result<(i32, String, String)> {
+    exec_on_io(h, script, None, on_stderr, Duration::from_secs(120)).await
+}
+
+/// `exec_on` + stdin optionnel : `Some(bytes)` envoie les octets dans le
+/// canal puis ferme l'entrée (EOF côté remote) avant de lire la sortie.
+/// `read_timeout` borne la boucle de lecture post-stdin (l'envoi a son
+/// propre timeout de 300 s).
+async fn exec_on_io(
+    h: &client::Handle<Handler>,
+    script: &str,
+    stdin: Option<&[u8]>,
     mut on_stderr: Option<&mut (dyn FnMut(&str) + Send)>,
+    read_timeout: Duration,
 ) -> Result<(i32, String, String)> {
     use russh::ChannelMsg;
     let mut ch = h.channel_open_session().await.context("channel session")?;
     ch.exec(true, script.as_bytes().to_vec())
         .await
         .context("exec")?;
+    if let Some(data) = stdin {
+        // ch.data() gère la fenêtre SSH (backpressure) — timeout propre
+        // à l'envoi : pousser l'archive sur une liaison lente ne doit
+        // pas être plafonné par le timeout du read-loop.
+        tokio::time::timeout(Duration::from_secs(300), ch.data(data))
+            .await
+            .map_err(|_| anyhow::anyhow!("stdin push timeout"))?
+            .context("stdin push")?;
+        ch.eof().await.context("stdin eof")?;
+    }
     let mut out = Vec::new();
     let mut err = Vec::new();
     // Lignes stderr complètes → callback (les lignes partielles en
@@ -415,7 +519,7 @@ async fn exec_on(
         }
     };
     let mut code = -1i32;
-    tokio::time::timeout(Duration::from_secs(120), async {
+    tokio::time::timeout(read_timeout, async {
         while let Some(msg) = ch.wait().await {
             match msg {
                 ChannelMsg::Data { data } => out.extend_from_slice(&data),
@@ -429,8 +533,8 @@ async fn exec_on(
     .context("exec timeout")?;
     // Reliquat stderr sans '\n' final → dernière ligne au callback.
     if !err_rest.is_empty() {
-        if let Some(cb) = on_stderr.as_deref_mut() {
-            cb(&String::from_utf8_lossy(&err_rest).to_string());
+        if let Some(cb) = on_stderr {
+            cb(String::from_utf8_lossy(&err_rest).as_ref());
         }
     }
     Ok((
@@ -463,7 +567,7 @@ pub async fn open_direct_tcpip(
     )
     .await
     .context("direct-tcpip timeout")?
-    .context("direct-tcpip — le démon écoute-t-il sur le port distant ?")?;
+    .context("direct-tcpip — is the daemon listening on the remote port?")?;
     Ok((NativeGuard { h, disc }, ch.into_stream()))
 }
 
@@ -483,7 +587,7 @@ pub async fn pair_attempt(
     label: &str,
 ) -> Result<String> {
     let kp = ensure_keypair()?;
-    let own = load_private_key(&kp).context("clé app")?;
+    let own = load_private_key(&kp).context("app key")?;
     let own_pub = own.public_key().to_openssh().unwrap_or_default();
     let own_fp = own
         .public_key()
@@ -492,10 +596,10 @@ pub async fn pair_attempt(
     let mut it = own_pub.split_whitespace();
     let (ty, b64) = (it.next().unwrap_or(""), it.next().unwrap_or(""));
     if ty.is_empty() || b64.is_empty() {
-        bail!("pubkey app illisible");
+        bail!("unreadable app pubkey");
     }
     let key = russh::keys::decode_secret_key(k_pem, None)
-        .context("clé jetable K illisible — QR incomplet ?")?;
+        .context("disposable K key unreadable — incomplete QR?")?;
     let opts = Opts {
         expected_hk: Some(Arc::new(hk)),
         key: Some(Arc::new(key)),
@@ -503,7 +607,7 @@ pub async fn pair_attempt(
     };
     let h = connect_auth(host, port, user, None, None, &opts)
         .await
-        .context("connexion K — QR expiré ou hôte injoignable")?;
+        .context("K connection — QR expired or host unreachable")?;
     let cmd = format!("agentcontrol-pair {ty} {b64} {label}");
     let (code, out, err) = exec_on(&h, &cmd, None).await?;
     let fp = out
@@ -512,7 +616,7 @@ pub async fn pair_attempt(
         .map(str::trim)
         .with_context(|| {
             format!(
-                "pair.sh a refusé (code {code}){}",
+                "pair.sh refused (code {code}){}",
                 if err.trim().is_empty() {
                     String::new()
                 } else {
@@ -521,7 +625,116 @@ pub async fn pair_attempt(
             )
         })?;
     if fp != own_fp {
-        bail!("pair-ok incohérent — la clé installée n'est pas la nôtre");
+        bail!("inconsistent pair-ok — the installed key is not ours");
     }
     Ok(fp.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use russh::client::Handler as _;
+    use russh::server;
+
+    // Serveur SSH in-process : handshake réel (la négociation de la
+    // host key est la seule chose qui compte pour le TOFU) + auth
+    // acceptée pour vérifier qu'une connexion épinglée/acceptée va
+    // jusqu'au bout.
+    struct TestServer;
+    impl server::Handler for TestServer {
+        type Error = russh::Error;
+        async fn auth_publickey(
+            &mut self,
+            _user: &str,
+            _key: server::VerifiedPublicKey<'_>,
+        ) -> Result<server::Auth, Self::Error> {
+            Ok(server::Auth::Accept)
+        }
+        async fn auth_password(
+            &mut self,
+            _user: &str,
+            _password: &str,
+        ) -> Result<server::Auth, Self::Error> {
+            Ok(server::Auth::Accept)
+        }
+    }
+
+    /// (port, empreinte SHA256 de la host key du serveur).
+    async fn fake_server() -> (u16, String) {
+        let key = gen_ed25519().expect("server key");
+        let fp = key
+            .public_key()
+            .fingerprint(russh::keys::HashAlg::Sha256)
+            .to_string();
+        let mut cfg = server::Config::default();
+        cfg.keys.push(key);
+        let cfg = Arc::new(cfg);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((s, _)) = listener.accept().await {
+                let cfg = cfg.clone();
+                tokio::spawn(async move {
+                    let _ = server::run_stream(cfg, s, TestServer).await;
+                });
+            }
+        });
+        (port, fp)
+    }
+
+    /// Handler sans épinglage : la clé inconnue est refusée, sauf repli
+    /// non interactif — et l'empreinte vue est mémorisée pour
+    /// `hostkey-unknown`.
+    #[tokio::test]
+    async fn handler_tofu() {
+        let key = gen_ed25519().expect("key").public_key().clone();
+        let koc = PublicKeyOrCertificate::PublicKey {
+            key: key.clone(),
+            hash_alg: None,
+        };
+        let fp = key.fingerprint(russh::keys::HashAlg::Sha256).to_string();
+        let mk = |accept: bool| Handler {
+            expected_hk: None,
+            seen_fp: Arc::new(std::sync::Mutex::new(None)),
+            accept_unknown: accept,
+            disc: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let mut h = mk(false);
+        assert!(!h.check_server_key(&koc).await.unwrap());
+        assert_eq!(*h.seen_fp.lock().unwrap(), Some(fp));
+        let mut h = mk(true);
+        assert!(h.check_server_key(&koc).await.unwrap());
+    }
+
+    /// Sans épinglage ni repli : connect_auth refuse et l'erreur typée
+    /// `hostkey-unknown:<fp>` porte l'empreinte réelle du serveur ; le
+    /// repli `accept_unknown_hostkey` passe, l'épinglage exact aussi.
+    #[tokio::test]
+    async fn connect_unknown_hostkey() {
+        let (port, fp) = fake_server().await;
+        let r = connect_auth("127.0.0.1", port, "u", None, None, &Opts::default()).await;
+        let e = match r {
+            Err(e) => format!("{:#}", e),
+            Ok(_) => panic!("connexion inattendue sans épinglage"),
+        };
+        assert_eq!(e, format!("hostkey-unknown:{fp}"));
+
+        let opts = Opts {
+            accept_unknown_hostkey: true,
+            ..Default::default()
+        };
+        connect_auth("127.0.0.1", port, "u", Some("pw"), None, &opts)
+            .await
+            .expect("accept_unknown doit connecter");
+
+        let opts = Opts {
+            expected_hk: Some(Arc::new(HashSet::from([fp]))),
+            ..Default::default()
+        };
+        connect_auth("127.0.0.1", port, "u", Some("pw"), None, &opts)
+            .await
+            .expect("épinglage exact doit connecter");
+    }
 }

@@ -3,12 +3,160 @@
 // syntaxique, diffs, tailles/compteurs. Fonctions pures (DOM pour esc()).
 // ---------------------------------------------------------------------------
 
-import { esc, q } from "./dom";
+import { esc, q } from "./escape.ts";
+import { t } from "../i18n/index.ts";
 
-// Option « images en ligne » (Settings, défaut activé) : les URLs http(s)
-// finissant par une extension image sont rendues en <img> cliquable.
+// Option « images en ligne » (Settings) : politique de chargement des
+// images DISTANTES (http/https) dans les rendus markdown et linkify —
+// une URL d'image peut être une injection de prompt (fuite de données et
+// pistage par la requête elle-même), donc jamais de fetch sans geste :
+//  - "never"  : lien seul, aucun chargement possible ;
+//  - "click"  : défaut — placeholder cliquable « Image: host — show »,
+//               l'<img> n'est inséré qu'au clic ;
+//  - "always" : <img> dès l'affichage (comportement historique).
+// Persistance ac-inline-images — compat legacy : "0" → never,
+// "1" → always, absent → click. Les images data: et celles servies par
+// le démon ne passent pas par ce chemin (pas de match http/https).
+export type ImgMode = "never" | "click" | "always";
 export const IMG_URL_RE = /\.(?:png|jpe?g|gif|webp|avif|bmp|svg|ico)(?:[?#][^\s<]*)?$/i;
-export const inlineImages = () => localStorage.getItem("ac-inline-images") !== "0";
+export const imgMode = (): ImgMode => {
+  const v = localStorage.getItem("ac-inline-images");
+  if (v === "never" || v === "always" || v === "click") return v;
+  if (v === "0") return "never";
+  if (v === "1") return "always";
+  return "click";
+};
+
+/** Domaines de confiance (réglage CSV ac-img-hosts) : chargés sans clic
+ *  en mode « click » — match exact ou sous-domaine. */
+export const imgTrustedHosts = (): string[] =>
+  (localStorage.getItem("ac-img-hosts") ?? "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+
+/** Hôte d'une URL distante — `hostname` (sans port) : la whitelist
+ *  fait confiance à un domaine, pas à un couple hôte:port —
+ *  `example.com` couvre `example.com:8443` et ses sous-domaines. */
+const imgHost = (url: string): string => {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+};
+
+/** Décision de rendu d'une image distante : "img" = <img> direct
+ *  (always, hôte de confiance ou même origine « 'self' » — le daemon
+ *  sert le client, une image à la même adresse n'est pas distante,
+ *  comme data:), "ph" = placeholder cliquable, "none" = lien seul.
+ *  La whitelist s'applique au mode click — never reste absolu pour
+ *  les hôtes distants (aucun fetch, quel que soit l'hôte). */
+const imgRender = (url: string): "img" | "ph" | "none" => {
+  const m = imgMode();
+  if (m === "always") return "img";
+  try {
+    // Origine complète (schéma + hôte + port) : https://même-hôte sur
+    // un client http n'est PAS « 'self' » — c'est une origine différente.
+    if (new URL(url).origin === location.origin) return "img";
+  } catch {
+    /* URL illisible → politique standard. */
+  }
+  const host = imgHost(url);
+  if (m === "never" || !host) return "none";
+  return imgTrustedHosts().some((d) => host === d || host.endsWith(`.${d}`))
+    ? "img"
+    : "ph";
+};
+
+/** Placeholder « Image: host — show » inséré à la place de l'<img> en
+ *  mode click — data-src porte l'URL, le clic la remplace par l'image
+ *  (expandImgPh, listener délégué chat + viewer). */
+const imgPh = (url: string, alt: string): string =>
+  `<button type="button" class="md-img-ph" data-src="${q(url)}"` +
+  ` data-alt="${q(alt)}">${esc(t("img_ph", { host: imgHost(url) || url }))}</button>`;
+
+/** Lien simple remplaçant un placeholder ou une image retirée sous
+ *  « never » — même forme que le rendu "none" (texte = alt ou URL). */
+const imgLinkEl = (src: string, label: string): HTMLAnchorElement => {
+  const a = document.createElement("a");
+  a.href = src;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.textContent = label || src;
+  return a;
+};
+
+/** Clic délégué sur un placeholder image (#events chat, #file-md
+ *  viewer) : le bouton est remplacé par <a><img></a> — la requête
+ *  réseau ne part qu'ici, jamais au rendu. true = clic consommé.
+ *  La politique est revalidée au geste : « never » reste absolu même
+ *  si le réglage a basculé après le rendu du placeholder. */
+export function expandImgPh(target: HTMLElement): boolean {
+  const btn = target.closest<HTMLButtonElement>(".md-img-ph");
+  const src = btn?.dataset.src;
+  if (!btn || !src) return false;
+  if (imgRender(src) === "none") {
+    btn.replaceWith(imgLinkEl(src, btn.dataset.alt ?? src));
+    return true;
+  }
+  const a = document.createElement("a");
+  a.href = src;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  const img = document.createElement("img");
+  img.className = "md-img";
+  img.src = src;
+  img.alt = btn.dataset.alt ?? src;
+  img.loading = "lazy";
+  a.append(img);
+  btn.replaceWith(a);
+  return true;
+}
+
+/** Version DOM de imgPh — pour la rétrogradation <img>→placeholder
+ *  du sweep réglages (même bouton que le rendu, dataset/textContent). */
+const imgPhEl = (src: string, alt: string): HTMLButtonElement => {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "md-img-ph";
+  b.dataset.src = src;
+  b.dataset.alt = alt;
+  b.textContent = t("img_ph", { host: imgHost(src) || src });
+  return b;
+};
+
+/** Ré-applique la politique courante au contenu déjà rendu — appelé à
+ *  l'enregistrement des réglages, le chat/viewer n'étant pas re-rendus :
+ *  « never » est absolu — placeholders restants et <img> distantes
+ *  déjà insérées redeviennent de simples liens ; « click » rétrograde
+ *  les <img> distantes non fiables en placeholders (un lazy-load
+ *  différé ne doit pas partir sans geste) ; « always » ou une
+ *  whitelist élargie ouvre les placeholders restants. */
+export function refreshImgPolicy(root: ParentNode = document): void {
+  root.querySelectorAll<HTMLButtonElement>(".md-img-ph").forEach((btn) => {
+    const src = btn.dataset.src;
+    if (!src) return;
+    const r = imgRender(src);
+    if (r === "img") expandImgPh(btn);
+    else if (r === "none")
+      btn.replaceWith(imgLinkEl(src, btn.dataset.alt ?? src));
+  });
+  root.querySelectorAll<HTMLImageElement>("img.md-img").forEach((img) => {
+    const src = img.getAttribute("src") ?? "";
+    if (!/^https?:/i.test(src)) return;
+    const r = imgRender(src);
+    if (r === "img") return;
+    const nodes: Node[] =
+      r === "none"
+        ? [imgLinkEl(src, img.alt)]
+        : [imgLinkEl(src, img.alt), imgPhEl(src, img.alt)];
+    const wrap = img.parentElement;
+    if (wrap?.tagName === "A" && wrap.childNodes.length === 1)
+      wrap.replaceWith(...nodes);
+    else img.replaceWith(...nodes);
+  });
+}
 
 // Chemins de fichiers cliquables → panneau latéral (read_file côté démon)
 const FILE_RE =
@@ -19,13 +167,15 @@ export function linkify(escaped: string): string {
   // par FILE_RE ni corrompues par le markup)
   const urls: string[] = [];
   let work = escaped.replace(/https?:\/\/[^\s<\x00]+/g, (m) => {
-    const clean = m.replace(/(?:&(?:quot|#39|lt|gt);|[.,;:!?)\]])+$/, "");
+    const clean = trimUrlEnd(m);
+    const r = IMG_URL_RE.test(clean) ? imgRender(clean) : "none";
     const inner =
-      inlineImages() && IMG_URL_RE.test(clean)
+      r === "img"
         ? `<img class="md-img" src="${q(clean)}" alt="${q(clean)}" loading="lazy">`
         : clean;
     urls.push(
-      `<a class="ulink" href="${q(clean)}" target="_blank" rel="noopener noreferrer">${inner}</a>`,
+      `<a class="ulink" href="${q(clean)}" target="_blank" rel="noopener noreferrer">${inner}</a>` +
+        (r === "ph" ? imgPh(clean, clean) : ""),
     );
     return `\x00U${urls.length - 1}\x00${m.slice(clean.length)}`;
   });
@@ -35,6 +185,26 @@ export function linkify(escaped: string): string {
     return `<span class="flink" data-path="${q(clean)}">${clean}</span>${m.slice(clean.length)}`;
   });
   return work.replace(/\x00U(\d+)\x00/g, (_m, i: string) => urls[+i]);
+}
+
+// Ponctuation/entity finale écartée d'une URL nue — les ')' ne sont
+// retirées que si elles déséquilibrent les parenthèses de l'URL
+// (https://x/a_(b) reste entier, https://x/a) perd son ')' orphelin).
+const URL_TRAIL = /(?:&(?:quot|#39|lt|gt);|[.,;:!?\]])+$/;
+function trimUrlEnd(u: string): string {
+  let s = u;
+  for (;;) {
+    const n = s.replace(URL_TRAIL, "");
+    if (n === s) break;
+    s = n;
+  }
+  while (s.endsWith(")")) {
+    const open = (s.match(/\(/g) ?? []).length;
+    const close = (s.match(/\)/g) ?? []).length;
+    if (close <= open) break;
+    s = s.slice(0, -1).replace(URL_TRAIL, "");
+  }
+  return s;
 }
 
 /** Colorise les lignes de diff (+add / -del / @@ hunks) dans le texte. */
@@ -91,6 +261,154 @@ export function highlight(code: string, ext: string): string {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Liens inline […](…) / ![…](…) — parseur manuel sur le texte échappé.
+// Les regex historiques ([^)]* pour l'URL, [^\]]* pour le texte)
+// cassaient sur les destinations à parenthèses (wikipedia…), les textes
+// à crochets imbriqués, les destinations <…> avec espaces et les titres.
+// Formes acceptées (proche CommonMark) :
+//   [t](https://x/y_(z))          parenthèses équilibrées dans la dest
+//   [t](<mon fichier.md>)         destination entre <…> (espaces admis)
+//   [t](docs/a.md "titre")        titre optionnel "…" '…' (…)
+//   [a [b] c](https://x)          crochets équilibrés dans le texte
+// Destinataire :
+//   http(s)         → <a target=_blank> / <img> selon la politique image
+//   chemin (pas de schéma URI, hors #ancre) → .flink data-path — le
+//                     viewer de fichiers les ouvre (résolution relative
+//                     au dossier du .md) ; dans le chat ils restent
+//                     stylés comme les chemins nus de linkify
+//   #ancre, autre schéma (mailto:, javascript:…) → libellé seul, JAMAIS
+//                     d'href : initExternalLinks n'ouvre que http(s) et
+//                     la webview naviguerait sur le relatif.
+// ---------------------------------------------------------------------------
+
+const MD_WS = new Set([" ", "\t", "\n", "\r"]);
+const MD_SCHEME = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+// `C:\…`/`C:/…` ressemble à un schéma mais est un chemin Windows.
+const MD_WIN_PATH = /^[a-zA-Z]:[\\/]/;
+
+interface MdLink {
+  end: number; // index juste après le ')' final
+  bang: boolean; // préfixe '!' → image
+  text: string; // libellé (échappé, crochets internes conservés)
+  dest: string; // destination (échappée, <…> et titre retirés)
+  title: string | null;
+}
+
+/// Parse « […](…) » ou « ![…](…) » à partir de s[i] ('[' ou '!').
+/// null = pas un lien valide → le texte reste tel quel (jamais de
+/// réparation à l'aveugle : une parenthèse orpheline casse le match).
+function mdLinkAt(s: string, i: number): MdLink | null {
+  const bang = s[i] === "!";
+  const b = bang ? i + 1 : i;
+  if (s[b] !== "[") return null;
+  // Texte du lien : crochets équilibrés (un '[' interne doit être fermé).
+  let j = b + 1;
+  let depth = 1;
+  while (j < s.length && depth) {
+    if (s[j] === "[") depth++;
+    else if (s[j] === "]") depth--;
+    j++;
+  }
+  if (depth || s[j] !== "(") return null;
+  const text = s.slice(b + 1, j - 1);
+  // Destination : <…> (&lt;…&gt; après échappement, espaces admis) ou
+  // suite sans blanc ni ')' non appariée.
+  let k = j + 1;
+  while (k < s.length && MD_WS.has(s[k])) k++;
+  let dest = "";
+  if (s.startsWith("&lt;", k)) {
+    const gt = s.indexOf("&gt;", k + 4);
+    if (gt < 0) return null;
+    dest = s.slice(k + 4, gt);
+    k = gt + 4;
+  } else {
+    const d0 = k;
+    let p = 0;
+    while (k < s.length) {
+      const c = s[k];
+      if (c === "(") p++;
+      else if (c === ")") {
+        if (!p) break;
+        p--;
+      } else if (MD_WS.has(c)) break;
+      k++;
+    }
+    dest = s.slice(d0, k);
+    if (!dest) return null;
+  }
+  // Espaces puis ')' — ou titre optionnel ("…" '…' (…) sans imbrication)
+  // puis ')'.
+  while (k < s.length && MD_WS.has(s[k])) k++;
+  let title: string | null = null;
+  if (s[k] !== ")") {
+    const open = s[k];
+    let close = -1;
+    if (open === '"' || open === "'") close = s.indexOf(open, k + 1);
+    else if (open === "(") {
+      const e = s.indexOf(")", k + 1);
+      if (e >= 0 && !s.slice(k + 1, e).includes("(")) close = e;
+    }
+    if (close < 0) return null;
+    title = s.slice(k + 1, close);
+    k = close + 1;
+    while (k < s.length && MD_WS.has(s[k])) k++;
+    if (s[k] !== ")") return null;
+  }
+  if (!dest) return null;
+  return { end: k + 1, bang, text, dest, title };
+}
+
+/// HTML d'un lien/image parsé — null = « libellé seul » (ancre ou
+/// schéma non-http) : le texte est recopié brut pour garder le gras.
+function mdLinkHtml(l: MdLink): string | null {
+  const { bang, text, dest, title } = l;
+  if (/^https?:\/\//i.test(dest)) {
+    if (!bang) {
+      const ttl = title ? ` title="${q(title)}"` : "";
+      return `<a href="${q(dest)}" target="_blank" rel="noopener noreferrer"${ttl}>${text}</a>`;
+    }
+    const r = imgRender(dest);
+    return r === "img"
+      ? `<a href="${q(dest)}" target="_blank" rel="noopener noreferrer">` +
+          `<img class="md-img" src="${q(dest)}" alt="${q(text)}" loading="lazy"></a>`
+      : `<a href="${q(dest)}" target="_blank" rel="noopener noreferrer">${text || dest}</a>` +
+          (r === "ph" ? imgPh(dest, text) : "");
+  }
+  // Ancre ou schéma non-http (mailto:, javascript:, data:…) : jamais
+  // d'href — la navigation relative/media: casserait la webview.
+  if (dest.startsWith("#") || (MD_SCHEME.test(dest) && !MD_WIN_PATH.test(dest)))
+    return null;
+  // Chemin → .flink : cliquable dans le viewer (relatif au dossier du
+  // fichier), simplement stylé dans le chat — même sort que les chemins
+  // nus produits par linkify.
+  const label = bang ? text || dest : text;
+  return `<span class="flink" data-path="${q(dest)}">${label}</span>`;
+}
+
+/// Remplace chaque […](…) / ![…](…) valide par son HTML via `stash`
+/// (les marqueurs \x00B imbriqués — code inline dans le libellé — sont
+/// résolus au fixpoint final, comme les anciens placeholders).
+function mdLinks(work: string, stash: (html: string) => string): string {
+  let out = "";
+  let i = 0;
+  while (i < work.length) {
+    const c = work[i];
+    if (c === "[" || (c === "!" && work[i + 1] === "[")) {
+      const l = mdLinkAt(work, i);
+      if (l) {
+        const html = mdLinkHtml(l);
+        out += html === null ? l.text : stash(html);
+        i = l.end;
+        continue;
+      }
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
 /** Rendu markdown minimal et sûr : échappement HTML d'abord, blocs de code
  *  et liens extraits en placeholders (ni linkify ni inline-md ne les corrompt). */
 export function mdRender(src: string): string {
@@ -106,28 +424,16 @@ export function mdRender(src: string): string {
   // 2) échappement du reste
   work = esc(work);
 
-  // 3) images ![alt](https://…) avant les liens (le ![…] matcherait […](…))
-  work = work.replace(
-    /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g,
-    (_m, alt: string, url: string) =>
-      inlineImages()
-        ? stash(
-            `<a href="${q(url)}" target="_blank" rel="noopener noreferrer">` +
-              `<img class="md-img" src="${q(url)}" alt="${q(alt)}" loading="lazy"></a>`,
-          )
-        : stash(
-            `<a href="${q(url)}" target="_blank" rel="noopener noreferrer">${alt || url}</a>`,
-          ),
-  );
+  // 3) images ![…](…) et liens […](…) — parseur manuel (le texte est
+  //    déjà échappé) : parenthèses équilibrées dans la destination,
+  //    forme <…> et titre optionnel, crochets imbriqués équilibrés.
+  //    http(s) → <a>/<img> ; chemin (relatif, /abs, ~/) → .flink
+  //    (ouvrable dans le viewer) ; ancre #… ou autre schéma → libellé
+  //    seul — jamais d'href non-http (initExternalLinks les ignorerait
+  //    et la webview naviguerait sur le relatif).
+  work = mdLinks(work, stash);
 
-  // 4) liens markdown [t](https://…) → placeholder (avant linkify)
-  work = work.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
-    (_m, tx: string, url: string) =>
-      stash(`<a href="${q(url)}" target="_blank" rel="noopener noreferrer">${tx}</a>`),
-  );
-
-  // 5) inline : gras / italique / barré
+  // 4) inline : gras / italique / barré
   work = work
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\b__([^_]+)__\b/g, "<strong>$1</strong>")
@@ -135,10 +441,10 @@ export function mdRender(src: string): string {
     .replace(/(?<![\w_])_([^_\n]+)_(?![\w_])/g, "<em>$1</em>")
     .replace(/~~([^~]+)~~/g, "<del>$1</del>");
 
-  // 6) chemins de fichiers cliquables (hors blocs extraits)
+  // 5) chemins de fichiers cliquables (hors blocs extraits)
   work = linkify(work);
 
-  // 7) structure de blocs : headers, hr, citations, tables, listes, paragraphes
+  // 6) structure de blocs : headers, hr, citations, tables, listes, paragraphes
   const lines = work.split("\n");
   const isBlockStart = (l: string) =>
     /^\x00B\d+\x00\s*$/.test(l.trim()) ||
@@ -219,8 +525,8 @@ export function speechText(src: string): string {
   return src
     .replace(/```[\s\S]*?(?:```|$)/g, " ")
     .replace(/`([^`\n]+)`/g, "$1")
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/!\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\((?:[^()]|\([^()]*\))*\)/g, "$1")
     .replace(/<[^>]+>/g, " ")
     .replace(/https?:\/\/\S+/g, " ")
     .replace(/^#{1,6}\s+/gm, "")

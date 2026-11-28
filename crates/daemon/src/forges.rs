@@ -6,11 +6,15 @@
 //! Config (`config.toml` du démon) :
 //! ```toml
 //! [[forges]]
-//! type = "gitlab"                    # "gitlab" | "gerrit"
+//! type = "gitlab"                    # "gitlab" | "gerrit" | "github"
+//!                                    # | "git" (git nu — mode dégradé)
 //! hosts = ["gitlab.example.com"]     # host[:port][/prefix] sans schéma
 //! token_env = "GITLAB_TOKEN"         # optionnel — nom d'une var d'env
 //!                                    # portant un token API (jamais le
 //!                                    # token en clair dans la config)
+//! transport = "rest"                 # optionnel — "auto" (défaut) |
+//!                                    # "gh" | "rest" | "glab" | "mcp" —
+//!                                    # voir forgesync::client.
 //! ```
 //!
 //! `hosts` peut inclure un préfixe de chemin (installations en
@@ -19,9 +23,11 @@
 use serde_json::{json, Value};
 
 /// Une entrée `[[forges]]` de config.toml.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ForgeCfg {
-    /// "gitlab" | "gerrit" — github est implicite, le déclarer est un no-op.
+    /// "github" | "gitlab" | "gerrit" | "git" — github.com/gitlab.com
+    /// sont implicites, les déclarer ajoute des hôtes (GHES…) ou fixe
+    /// le transport de l'hôte implicite.
     #[serde(rename = "type")]
     pub kind: String,
     /// Hôtes déclarés, forme `host[:port][/prefix]` (sans schéma).
@@ -30,8 +36,13 @@ pub struct ForgeCfg {
     /// Nom d'une variable d'environnement contenant le token API de la
     /// forge (GitLab `PRIVATE-TOKEN` pour les instances privées) — lu
     /// dans l'env de l'appelant du sync (`acctl`), jamais stocké.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
+    /// Transport forge — `None` = "auto" (CLI de la forge si présente,
+    /// REST sinon). Valeurs : "auto" | "gh" | "rest" | "glab" | "mcp"
+    /// — la résolution transport → client est dans forgesync::client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
 }
 
 /// Hôte résolu d'une forge (normalisé : minuscules, sans schéma ni `/`
@@ -40,14 +51,43 @@ pub struct ForgeCfg {
 pub struct ForgeHost {
     pub host: String,
     pub token_env: Option<String>,
+    /// Transport demandé pour cet hôte (None = auto) — hérité de
+    /// l'entrée `[[forges]]` qui l'a déclaré.
+    pub transport: Option<String>,
 }
 
-/// Set effectif de forges pour la détection : github implicite,
-/// gitlab = gitlab.com + déclarés, gerrit = déclarés seulement.
+/// État vivant des forges : les entrées `[[forges]]` déclarées ET le
+/// set résolu — mutés ensemble par le panneau `prs-registry`
+/// (server/forges_cfg.rs) et le rechargement config.toml, jamais l'un
+/// sans l'autre. `Daemon.forges` est un `RwLock<ForgeLive>` : les
+/// watchers PR et les RPC lisent le set courant sans restart.
+#[derive(Debug, Clone)]
+pub struct ForgeLive {
+    /// Entrées `[[forges]]` telles que déclarées (base du panneau et
+    /// de la persistance — `set` seul perdrait le regroupement
+    /// hôtes↔token_env et les types no-op comme github).
+    pub declared: Vec<ForgeCfg>,
+    /// Set effectif résolu (`Forges::resolve(&declared)`).
+    pub set: Forges,
+}
+
+impl ForgeLive {
+    pub fn new(declared: Vec<ForgeCfg>) -> Self {
+        let set = Forges::resolve(&declared);
+        Self { declared, set }
+    }
+}
+
+/// Set effectif de forges pour la détection : github = github.com +
+/// déclarés (GHES), gitlab = gitlab.com + déclarés, gerrit/git =
+/// déclarés seulement. `git` = git nu (mode dégradé : pas de list /
+/// comment / review auto — verdict rapporté localement).
 #[derive(Debug, Clone)]
 pub struct Forges {
+    pub github: Vec<ForgeHost>,
     pub gitlab: Vec<ForgeHost>,
     pub gerrit: Vec<ForgeHost>,
+    pub git: Vec<ForgeHost>,
 }
 
 /// Référence de review extraite d'une sortie outil.
@@ -81,7 +121,7 @@ impl PrRef {
     }
 }
 
-fn norm_host(h: &str) -> String {
+pub(crate) fn norm_host(h: &str) -> String {
     let h = h.trim().to_lowercase();
     h.trim_start_matches("https://")
         .trim_start_matches("http://")
@@ -89,29 +129,51 @@ fn norm_host(h: &str) -> String {
         .to_string()
 }
 
+/// Hostname seul d'un hôte déclaré/remote — port et préfixe de chemin
+/// retirés (`gerrit.corp:8080/review` → `gerrit.corp`) : un remote SSH
+/// sur le port 29418 matche la déclaration web `:8080`.
+fn host_part(h: &str) -> &str {
+    let h = h.split('/').next().unwrap_or(h);
+    if h.starts_with('[') {
+        // IPv6 littéral : `[::1]:8080` → `[::1]`.
+        h.find(']').map(|i| &h[..=i]).unwrap_or(h)
+    } else {
+        h.split(':').next().unwrap_or(h)
+    }
+}
+
 impl Forges {
     /// Résout `[[forges]]` en set effectif : hosts normalisés,
-    /// `gitlab.com` toujours présent (plus les hôtes déclarés), gerrit
-    /// uniquement sur déclaration. Type inconnu → warn + ignoré.
+    /// `github.com`/`gitlab.com` toujours présents (plus les hôtes
+    /// déclarés — GHES, GitLab self-hosted), gerrit et git uniquement
+    /// sur déclaration. Une entrée pour un hôte déjà présent n'ajoute
+    /// rien mais fixe son transport (déclarer `type="github"
+    /// hosts=["github.com"] transport="rest"` paramètre l'implicite).
+    /// Type inconnu → warn + ignoré.
     pub fn resolve(cfgs: &[ForgeCfg]) -> Self {
         let mut f = Forges {
+            github: vec![ForgeHost {
+                host: "github.com".into(),
+                token_env: None,
+                transport: None,
+            }],
             gitlab: vec![ForgeHost {
                 host: "gitlab.com".into(),
                 token_env: None,
+                transport: None,
             }],
             gerrit: Vec::new(),
+            git: Vec::new(),
         };
         for c in cfgs {
             let kind = c.kind.trim().to_lowercase();
-            if kind == "github" {
-                tracing::warn!("[[forges]] type=github implicite — entrée ignorée");
-                continue;
-            }
             let list = match kind.as_str() {
+                "github" => &mut f.github,
                 "gitlab" => &mut f.gitlab,
                 "gerrit" => &mut f.gerrit,
+                "git" => &mut f.git,
                 _ => {
-                    tracing::warn!("[[forges]] type inconnu « {} » — ignoré", c.kind);
+                    tracing::warn!("[[forges]] unknown type « {} » — skipped", c.kind);
                     continue;
                 }
             };
@@ -120,12 +182,24 @@ impl Forges {
                 if host.is_empty() {
                     continue;
                 }
-                if list.iter().any(|x| x.host == host) {
+                if let Some(x) = list.iter_mut().find(|x| x.host == host) {
+                    // Hôte déjà présent (implicite ou entrée
+                    // précédente) : le transport/token explicite de
+                    // CETTE entrée l'emporte — une config
+                    // `github.com transport=rest` paramètre l'hôte
+                    // implicite au lieu d'être ignorée.
+                    if c.transport.is_some() {
+                        x.transport = c.transport.clone();
+                    }
+                    if c.token_env.is_some() {
+                        x.token_env = c.token_env.clone();
+                    }
                     continue;
                 }
                 list.push(ForgeHost {
                     host,
                     token_env: c.token_env.clone(),
+                    transport: c.transport.clone(),
                 });
             }
         }
@@ -133,30 +207,58 @@ impl Forges {
     }
 
     /// `forge_list` RPC — set effectif exposé aux clients (acctl sync,
-    /// settings). `hosts` = objets `{host, token_env?}` : le token de
-    /// deux hôtes d'une même forge peut différer. `token_env` est un
-    /// NOM de variable, pas un secret.
+    /// settings). `hosts` = objets `{host, token_env?, transport?}` :
+    /// le token de deux hôtes d'une même forge peut différer.
+    /// `token_env` est un NOM de variable, pas un secret.
     pub fn list_json(&self) -> Value {
         let hosts = |v: &[ForgeHost]| -> Vec<Value> {
             v.iter()
-                .map(|h| match &h.token_env {
-                    Some(e) => json!({"host": h.host, "token_env": e}),
-                    None => json!({"host": h.host}),
+                .map(|h| {
+                    let mut o = json!({"host": h.host});
+                    if let Some(e) = &h.token_env {
+                        o["token_env"] = json!(e);
+                    }
+                    if let Some(t) = &h.transport {
+                        o["transport"] = json!(t);
+                    }
+                    o
                 })
                 .collect()
         };
         Value::Array(vec![
-            json!({"type": "github", "hosts": [{"host": "github.com"}]}),
+            json!({"type": "github", "hosts": hosts(&self.github)}),
             json!({"type": "gitlab", "hosts": hosts(&self.gitlab)}),
             json!({"type": "gerrit", "hosts": hosts(&self.gerrit)}),
+            json!({"type": "git", "hosts": hosts(&self.git)}),
         ])
+    }
+
+    /// La forge déclarée propriétaire d'un hôte de remote — match sur
+    /// le hostname seul (port ssh :29418 ≠ port web :8080, préfixe de
+    /// chemin ignoré). Ordre github → gitlab → gerrit → git ; un hôte
+    /// non déclaré ne matche que les implicites (github.com/gitlab.com).
+    pub fn forge_for_host(&self, host: &str) -> Option<(&'static str, &ForgeHost)> {
+        let hp = host_part(host);
+        for (kind, list) in [
+            ("github", &self.github),
+            ("gitlab", &self.gitlab),
+            ("gerrit", &self.gerrit),
+            ("git", &self.git),
+        ] {
+            if let Some(h) = list.iter().find(|h| host_part(&h.host) == hp) {
+                return Some((kind, h));
+            }
+        }
+        None
     }
 
     /// Extrait toutes les références de review d'un texte (extrait de
     /// sortie outil). Dédupliqué par (forge, host, repo, pr, change_id).
     pub fn extract_refs(&self, text: &str) -> Vec<PrRef> {
         let mut out: Vec<PrRef> = Vec::new();
-        scan_host_refs(text, "github.com", "github", &mut out);
+        for h in &self.github {
+            scan_host_refs(text, &h.host.clone(), "github", &mut out);
+        }
         for h in &self.gitlab {
             scan_host_refs(text, &h.host.clone(), "gitlab", &mut out);
         }
@@ -204,14 +306,60 @@ impl Forges {
 /// que si TOUS ses segments sont génériques — un segment réel
 /// (`acme/widgets`) suffit à garder la référence.
 const PLACEHOLDER_WORDS: &[&str] = &[
-    "o", "r", "owner", "repo", "repository", "repos", "g", "p", "group",
-    "grp", "sub", "subgroup", "proj", "project", "projects", "a", "b",
-    "x", "y", "foo", "bar", "baz", "qux", "user", "username", "user-name",
-    "name", "org", "organisation", "organization", "myorg", "my-org",
-    "your-org", "your_org", "yourorg", "your-repo", "your_project",
-    "exemple", "example", "placeholder", "sample", "demo", "dummy",
-    "test", "namespace", "path", "votre", "projet", "depot", "repo-name",
-    "owner-name", "project-name", "my-project", "mon-projet",
+    "o",
+    "r",
+    "owner",
+    "repo",
+    "repository",
+    "repos",
+    "g",
+    "p",
+    "group",
+    "grp",
+    "sub",
+    "subgroup",
+    "proj",
+    "project",
+    "projects",
+    "a",
+    "b",
+    "x",
+    "y",
+    "foo",
+    "bar",
+    "baz",
+    "qux",
+    "user",
+    "username",
+    "user-name",
+    "name",
+    "org",
+    "organisation",
+    "organization",
+    "myorg",
+    "my-org",
+    "your-org",
+    "your_org",
+    "yourorg",
+    "your-repo",
+    "your_project",
+    "exemple",
+    "example",
+    "placeholder",
+    "sample",
+    "demo",
+    "dummy",
+    "test",
+    "namespace",
+    "path",
+    "votre",
+    "projet",
+    "depot",
+    "repo-name",
+    "owner-name",
+    "project-name",
+    "my-project",
+    "mon-projet",
 ];
 
 /// `true` si `repo` est un placeholder documentaire : chaque segment
@@ -273,12 +421,7 @@ fn url_end(path: &str) -> usize {
 ///  - github  : `<o>/<r>/pull/<N>`
 ///  - gitlab  : `<g>(/sous)*/-/merge_requests/<N>`
 ///  - gerrit  : `[#/](c|r)/<projet>/+/<N>` ou `q/<Change-Id>`
-fn parse_path(
-    host: &str,
-    forge: &'static str,
-    path: &str,
-    out: &mut Vec<PrRef>,
-) {
+fn parse_path(host: &str, forge: &'static str, path: &str, out: &mut Vec<PrRef>) {
     match forge {
         "github" => {
             let mut parts = path.split('/');
@@ -430,9 +573,104 @@ fn extract_change_ids(text: &str) -> Vec<String> {
     out
 }
 
+/// `(host[:port], chemin-projet)` d'une URL de remote git — SSH
+/// (`git@h:p`, `ssh://u@h:29418/p`), HTTPS (`https://h/p`), scp-like.
+/// Le chemin conserve les sous-groupes (`grp/sub/proj` GitLab).
+pub fn remote_parts(url: &str) -> Option<(String, String)> {
+    let u = url.trim().trim_end_matches(".git");
+    if u.is_empty() {
+        return None;
+    }
+    if !u.contains("://") {
+        // scp-like `user@host:path` — pas de schéma.
+        let (left, path) = u.split_once(':')?;
+        let host = left.rsplit('@').next()?.trim();
+        let path = path.trim_matches('/');
+        return (!host.is_empty() && !path.is_empty())
+            .then(|| (host.to_string(), path.to_string()));
+    }
+    // `scheme://[user@]host[:port]/path`
+    let rest = u.split_once("://")?.1;
+    let (auth_host, path) = rest.split_once('/')?;
+    let host = auth_host.rsplit('@').next()?.trim();
+    let path = path.trim_matches('/');
+    (!host.is_empty() && !path.is_empty()).then(|| (host.to_string(), path.to_string()))
+}
+
+/// `(kind, host, repo)` du remote `origin` d'un checkout — l'hôte du
+/// remote est matché aux forges déclarées (`host_part` : port SSH
+/// 29418 ≠ port web 8080 gommés, sous-chemins ignorés). None si pas
+/// de remote ou hôte inconnu de TOUTES les forges — l'appelant garde
+/// le repli registre / github.com.
+pub fn remote_forge(forges: &Forges, ws: &std::path::Path) -> Option<(String, String, String)> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(ws)
+        .args(["remote", "get-url", "origin"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout);
+    let (host, mut repo) = remote_parts(&url)?;
+    let (kind, fh) = forges.forge_for_host(&host)?;
+    // Gerrit : le préfixe « a/ » d'auth http n'est pas du path projet.
+    if kind == "gerrit" {
+        repo = repo.trim_start_matches("a/").to_string();
+    }
+    Some((kind.to_string(), fh.host.clone(), repo))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_parts_urls() {
+        // scp-like, SSH schémée, HTTPS — path COMPLET (sous-groupes).
+        for (url, want) in [
+            (
+                "git@github.com:Wameuh/AgentControl.git\n",
+                ("github.com", "Wameuh/AgentControl"),
+            ),
+            (
+                "https://github.com/Wameuh/AgentControl",
+                ("github.com", "Wameuh/AgentControl"),
+            ),
+            (
+                "ssh://git@github.com/Wameuh/AgentControl.git",
+                ("github.com", "Wameuh/AgentControl"),
+            ),
+            (
+                "git@gitlab.example.com:grp/sub/proj.git",
+                ("gitlab.example.com", "grp/sub/proj"),
+            ),
+            (
+                "ssh://git@gerrit.internal:29418/platform/build",
+                ("gerrit.internal:29418", "platform/build"),
+            ),
+            (
+                "https://gerrit.internal:8080/platform/build.git",
+                ("gerrit.internal:8080", "platform/build"),
+            ),
+        ] {
+            assert_eq!(
+                remote_parts(url),
+                Some((want.0.to_string(), want.1.to_string())),
+                "url: {url}"
+            );
+        }
+        // Comparaisons exactes : « Wameuh/Agent » ≠ « …/AgentControl ».
+        assert_ne!(
+            remote_parts("https://github.com/Wameuh/Agent.git").map(|(_, p)| p),
+            Some("Wameuh/AgentControl".to_string())
+        );
+        // Pas de host:path → None.
+        assert_eq!(remote_parts(""), None);
+        assert_eq!(remote_parts("https://github.com"), None);
+    }
 
     fn forges() -> Forges {
         Forges::resolve(&[
@@ -440,6 +678,7 @@ mod tests {
                 kind: "gitlab".into(),
                 hosts: vec!["gitlab.example.com".into()],
                 token_env: None,
+                transport: None,
             },
             ForgeCfg {
                 kind: "gerrit".into(),
@@ -448,6 +687,7 @@ mod tests {
                     "gerrit.internal:8080".into(),
                 ],
                 token_env: None,
+                transport: None,
             },
         ])
     }
@@ -477,10 +717,16 @@ mod tests {
             .len(),
             2
         );
-        assert!(f.extract_refs("https://github.com/acme/widgets/issues/3").is_empty());
+        assert!(f
+            .extract_refs("https://github.com/acme/widgets/issues/3")
+            .is_empty());
         // Pas de faux hôte : xgithub.com / github.com.evil non reconnus.
-        assert!(f.extract_refs("https://xgithub.com/acme/widgets/pull/3").is_empty());
-        assert!(f.extract_refs("https://github.com.evil/acme/widgets/pull/3").is_empty());
+        assert!(f
+            .extract_refs("https://xgithub.com/acme/widgets/pull/3")
+            .is_empty());
+        assert!(f
+            .extract_refs("https://github.com.evil/acme/widgets/pull/3")
+            .is_empty());
     }
 
     #[test]
@@ -502,17 +748,23 @@ mod tests {
             "https://gerrit.internal:8080/c/p/+/9",
             "https://gerrit.internal:8080/c/proj/+/9",
         ] {
-            assert!(f.extract_refs(txt).is_empty(), "refusé attendu : {txt}");
+            assert!(f.extract_refs(txt).is_empty(), "expected refusal: {txt}");
         }
         // Un seul segment réel suffit : le placeholder n'est que
         // partiel → la référence est conservée.
         for (txt, repo) in [
             ("https://github.com/acme/widgets/pull/9", "acme/widgets"),
-            ("https://gitlab.com/corp/tools/-/merge_requests/42", "corp/tools"),
-            ("https://gerrit.internal:8080/c/platform/build/+/9", "platform/build"),
+            (
+                "https://gitlab.com/corp/tools/-/merge_requests/42",
+                "corp/tools",
+            ),
+            (
+                "https://gerrit.internal:8080/c/platform/build/+/9",
+                "platform/build",
+            ),
         ] {
             let r = f.extract_refs(txt);
-            assert_eq!(r.len(), 1, "conservé attendu : {txt}");
+            assert_eq!(r.len(), 1, "expected kept: {txt}");
             assert_eq!(r[0].repo, repo);
         }
     }
@@ -531,18 +783,23 @@ mod tests {
             "https://gitlab.com/infra-team/deploy/tool/-/merge_requests/42"
         );
         // Hôte auto-hébergé déclaré.
-        let r = f.extract_refs("voir https://gitlab.example.com/corp/tools/-/merge_requests/7/diffs");
+        let r =
+            f.extract_refs("voir https://gitlab.example.com/corp/tools/-/merge_requests/7/diffs");
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].host, "gitlab.example.com");
         assert_eq!(r[0].pr, 7);
         // Hôte gitlab NON déclaré → pas de détection.
-        assert!(f.extract_refs("https://gitlab.inconnu.io/corp/tools/-/merge_requests/7").is_empty());
+        assert!(f
+            .extract_refs("https://gitlab.inconnu.io/corp/tools/-/merge_requests/7")
+            .is_empty());
         // Borne : notgitlab.example.com ne matche pas gitlab.example.com.
         assert!(f
             .extract_refs("https://notgitlab.example.com/corp/tools/-/merge_requests/7")
             .is_empty());
         // Issue ≠ MR.
-        assert!(f.extract_refs("https://gitlab.com/corp/tools/-/issues/7").is_empty());
+        assert!(f
+            .extract_refs("https://gitlab.com/corp/tools/-/issues/7")
+            .is_empty());
     }
 
     #[test]
@@ -616,11 +873,13 @@ mod tests {
                 kind: "gitlab".into(),
                 hosts: vec!["code.corp".into()],
                 token_env: None,
+                transport: None,
             },
             ForgeCfg {
                 kind: "gerrit".into(),
                 hosts: vec!["code.corp".into()],
                 token_env: None,
+                transport: None,
             },
         ]);
         let r = f.extract_refs(
@@ -637,6 +896,7 @@ mod tests {
             kind: "GitLab".into(),
             hosts: vec!["HTTPS://GL.Corp/".into()],
             token_env: Some("GL_TOK".into()),
+            transport: None,
         }]);
         assert!(f.gitlab.iter().any(|h| h.host == "gl.corp"));
         assert!(f.gitlab.iter().any(|h| h.host == "gitlab.com"));
@@ -645,6 +905,7 @@ mod tests {
             kind: "bitbucket".into(),
             hosts: vec!["bb.corp".into()],
             token_env: None,
+            transport: None,
         }]);
         assert!(f.gerrit.is_empty());
     }
@@ -656,6 +917,9 @@ mod tests {
         let cid39 = format!("I{}é", "a".repeat(39));
         assert_eq!(take_change_id(&cid39), None);
         let cid40 = format!("I{}zzz", "a".repeat(40));
-        assert_eq!(take_change_id(&cid40).as_deref(), Some(cid40[..41].to_string().as_str()));
+        assert_eq!(
+            take_change_id(&cid40).as_deref(),
+            Some(cid40[..41].to_string().as_str())
+        );
     }
 }

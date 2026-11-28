@@ -153,7 +153,7 @@ impl Daemon {
                 continue;
             }
             info!(
-                "orchestrateur: GC session orpheline {} « {} » ({}, état {})",
+                "orchestrator: GC orphan session {} « {} » ({}, state {})",
                 m.id, m.title, origin, m.state
             );
             match self.h_delete_session(m.id.clone()).await {
@@ -165,7 +165,7 @@ impl Daemon {
                     if self.get_session(&m.id).await.is_err() {
                         continue;
                     }
-                    warn!("orchestrateur: GC rm {}: {e:#}", m.id);
+                    warn!("orchestrator: GC rm {}: {e:#}", m.id);
                 }
             }
             if is_pr_review {
@@ -192,7 +192,7 @@ impl Daemon {
             self.orch_save(&snap);
         }
         info!(
-            "orchestrateur: GC — {} session(s) orpheline(s) supprimée(s)",
+            "orchestrator: GC — {} orphan session(s) deleted",
             deleted.len()
         );
     }
@@ -204,7 +204,7 @@ impl Daemon {
     /// n'est jamais touché.
     async fn gc_review_worktree(self: &Arc<Self>, cwd: &str, cfg: &cfg::OrchCfg) {
         let p = Path::new(cwd);
-        if !p.starts_with(pr_reviews_root()) || !p.is_dir() {
+        if !p.starts_with(pr_reviews_root(cfg)) || !p.is_dir() {
             return;
         }
         let mut wss: Vec<String> = vec![cfg.workspace.clone()];
@@ -243,6 +243,7 @@ mod tests {
             agent: "devin".into(),
             title: title.into(),
             cwd: "/workspace".into(),
+            reported_cwd: None,
             created_at: "2026-01-01T00:00:00Z".into(),
             native_session_id: None,
             mode: None,
@@ -266,6 +267,7 @@ mod tests {
             context_size: None,
             last_error: None,
             wait: None,
+            state_since: None,
         }
     }
 
@@ -281,7 +283,7 @@ mod tests {
         assert!(gc_upkeep_visible(&mk("Backlog-W12 #3 · t"), &c));
         assert!(!gc_upkeep_visible(&mk("Backlog-P2"), &c));
         assert!(!gc_upkeep_visible(&mk("Backlog-R4"), &c));
-        assert!(!gc_upkeep_visible(&mk("renommée hors schéma"), &c));
+        assert!(!gc_upkeep_visible(&mk("renamed outside schema"), &c));
         // Mode plan : les trois rôles relèvent de l'entretien.
         c.plan_review = true;
         assert!(gc_upkeep_visible(&mk("Backlog-P2"), &c));

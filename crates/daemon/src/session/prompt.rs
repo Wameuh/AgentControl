@@ -1,8 +1,8 @@
 //! Envoi de prompts : file FIFO (user/peer), runner séquentiel, steer,
 //! réponses aux permissions/questions de l'agent, snapshot de la file.
 
-use super::*;
 use super::compact::is_compact_cmd;
+use super::*;
 use anyhow::{bail, Context, Result};
 use proto::EventKind;
 use serde_json::Value;
@@ -23,12 +23,16 @@ pub(super) enum TurnOutcome {
 }
 
 /// Classification d'une erreur `session/prompt` — pilote le retry :
-/// `rate_limit` = backoff automatique borné, `model`/`auth`/`other` =
-/// jamais de retry sans action explicite (changer de modèle/réparer
-/// l'auth est une décision humaine).
-/// Ordre des tests : auth > rate_limit > model — un « 403 » est auth
-/// même avec « quota » dans le texte, un « rate limit » ne contient
-/// quasiment jamais « model ».
+/// `rate_limit` = throttle transitoire, backoff automatique borné ;
+/// `quota` = forfait/compte épuisé (quota mensuel, crédits) — état
+/// bloqué SANS retry automatique, la réparation est humaine (plan,
+/// profil agent) ; `model`/`auth`/`other` = jamais de retry sans
+/// action explicite non plus.
+/// Ordre des tests : auth > quota > rate_limit > model — un « 403 »
+/// est auth même avec « quota » dans le texte, et les marqueurs de
+/// forfait (« usage limit », « upgrade your plan », « insufficient
+/// quota »…) priment sur le « rate limit »/« quota » générique :
+/// un quota de plan ne se lève pas à la minute.
 pub(super) fn classify_error(msg: &str) -> &'static str {
     let m = msg.to_lowercase();
     // Codes HTTP en mot entier : « 429 » nu matcherait « 1704290000 »
@@ -42,19 +46,63 @@ pub(super) fn classify_error(msg: &str) -> &'static str {
         || has_code("401")
         || has_code("403")
         || m.contains("authentication")
+        || m.contains("authenticate")
+        || m.contains("oauth")
         || m.contains("credentials")
         || m.contains("login")
         || m.contains("api key")
     {
         return "auth";
     }
+    // Limite de FORFAIT (Cursor : « You've hit your usage limit …
+    // monthly cycle ends », « Upgrade your plan to continue » ;
+    // OpenAI : « insufficient_quota ») — distincte du throttle
+    // passager : aucun retry auto, l'utilisateur change de plan ou
+    // de profil agent. Volontairement restrictif : le « quota »
+    // générique et les fenêtres de modèle gratuit Devin (« free
+    // model rate limit … reset in … ») restent `rate_limit`.
+    // Garde-fou fenêtre glissante : un message qui porte AUSSI une
+    // échéance de reset exploitable (« usage limit … try again in
+    // 3 hours », Codex) est un throttle à horizon — `rate_limit`,
+    // pas un forfait mort. Seule l'absence d'échéance fait basculer
+    // en `quota`.
+    let has_reset = parse_reset_at(msg, std::time::SystemTime::now()).is_some();
+    if !has_reset
+        && (m.contains("usage limit")
+            || m.contains("usage_limit")
+            || m.contains("upgrade your plan")
+            || m.contains("monthly cycle")
+            || m.contains("billing cycle")
+            || m.contains("insufficient_quota")
+            || m.contains("insufficient quota")
+            || m.contains("out of credits")
+            || m.contains("insufficient credits")
+            || m.contains("credit balance")
+            || m.contains("credits exhausted")
+            || m.contains("spend limit")
+            || m.contains("spend_limit"))
+    {
+        return "quota";
+    }
     if m.contains("rate limit")
         || m.contains("ratelimit")
         || m.contains("rate_limit")
         || has_code("429")
+        || has_code("529")
+        // acp-claude : api_error_type=overloaded_error / HTTP 529 —
+        // surcharge transitoire du provider, le retry borné a un sens.
+        || m.contains("overloaded")
         || m.contains("quota")
         || m.contains("too many requests")
         || m.contains("resource exhausted")
+        // « usage limit »/« spend limit » AVEC échéance parsable :
+        // fenêtre glissante (Codex « try again in 3 hours ») — le
+        // quota de forfait a été écarté plus haut, c'est un retry.
+        || (has_reset
+            && (m.contains("usage limit")
+                || m.contains("usage_limit")
+                || m.contains("spend limit")
+                || m.contains("spend_limit")))
     {
         return "rate_limit";
     }
@@ -63,6 +111,10 @@ pub(super) fn classify_error(msg: &str) -> &'static str {
         || m.contains("unknown model")
         || m.contains("model unavailable")
         || (m.contains("does not exist") && m.contains("model"))
+        // codex-acp : « The 'gpt-5.5' model is not supported when using
+        // Codex with a ChatGPT account » — un refus de modèle côté
+        // provider, la réparation attendue est un set_model.
+        || (m.contains("not supported") && m.contains("model"))
     {
         return "model";
     }
@@ -70,10 +122,36 @@ pub(super) fn classify_error(msg: &str) -> &'static str {
 }
 
 /// Backoff du retry `rate_limit` : 60 s au premier échec, doublé à
-/// chaque échec consécutif du même kind, plafonné à 1 h.
+/// chaque échec consécutif du même kind, plafonné à `cap` secondes.
+pub(super) fn backoff_for_capped(count: u32, cap: u64) -> std::time::Duration {
+    // Borne du shift : 60 s × 2^10 ≈ 17 h — au-delà c'est `min(cap)`
+    // qui décide, un cap supérieur serait inatteignable.
+    let secs = 60u64.saturating_mul(1u64 << count.saturating_sub(1).min(10));
+    std::time::Duration::from_secs(secs.min(cap))
+}
+
+/// Backoff standard `rate_limit` : plafond 1 h.
 pub(super) fn backoff_for(count: u32) -> std::time::Duration {
-    let secs = 60u64.saturating_mul(1u64 << count.saturating_sub(1).min(6));
-    std::time::Duration::from_secs(secs.min(3600))
+    backoff_for_capped(count, 3600)
+}
+
+/// Plafond du backoff « fenêtre de quota » (modèle gratuit / limite
+/// de plan sans échéance parsable) : 8 h — les fenêtres constatées
+/// vont de la minute à ~7 h, une boucle horaire gaspillerait des
+/// tentatives et maintiendrait le mode sériel orchestrateur en
+/// vie artificiellement.
+pub(super) const QUOTA_WINDOW_BACKOFF_CAP: u64 = 8 * 3600;
+
+/// Vrai si le message décrit une fenêtre de quota à horizon long
+/// (modèle gratuit Devin, limite de plan) plutôt qu'un throttle
+/// passager à la minute — utilisé pour allonger le backoff quand
+/// aucune échéance de reset n'a pu être parsée.
+pub(super) fn quota_window(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("free model")
+        || m.contains("model rate limit")
+        || (m.contains("rate limit")
+            && (m.contains("reset") || m.contains("upgrade") || m.contains("quota")))
 }
 
 /// Secondes epoch UTC d'un SystemTime (0 si avant l'epoch — jamais en
@@ -96,11 +174,12 @@ pub(super) fn reset_jitter(msg: &str, count: u32) -> u64 {
     5 + h % 11
 }
 
-/// `<n>[.<d>] <unité?>` en tête de `s` — retourne les secondes. Unité
-/// absente → `default_secs` (None = unité exigée). Mots reconnus :
-/// second/sec, minute/min, hour/hr, day — anglais uniquement, le
-/// provider n'annonce pas dans une autre langue.
-fn parse_duration_secs(s: &str, default_secs: Option<u64>) -> Option<u64> {
+/// `<n>[.<d>] <unité?>` en tête de `s` — retourne (secondes, reste
+/// après l'unité). Unité absente → `default_secs` (None = unité
+/// exigée). Mots reconnus : second/sec, minute/min, hour/hr, day —
+/// anglais uniquement, le provider n'annonce pas dans une autre
+/// langue.
+fn parse_duration_secs(s: &str, default_secs: Option<u64>) -> Option<(u64, &str)> {
     let s = s.trim_start_matches(|c: char| !c.is_ascii_digit());
     let int_len = s.bytes().take_while(u8::is_ascii_digit).count();
     if int_len == 0 {
@@ -115,11 +194,14 @@ fn parse_duration_secs(s: &str, default_secs: Option<u64>) -> Option<u64> {
             secs += format!("0.{}", &frac[..flen]).parse::<f64>().ok()?;
         }
     }
-    let unit = rest
-        .trim_start_matches(|c: char| !c.is_ascii_alphabetic())
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .next()
-        .unwrap_or("");
+    // Mot d'unité = premier run alphabétique après le nombre
+    // (le reste avant lui — espaces, tirets — est sauté).
+    let skip = rest
+        .find(|c: char| c.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    let word = &rest[skip..];
+    let unit_len = word.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let unit = &word[..unit_len];
     let mult = match unit {
         "" => default_secs?,
         u if u.starts_with("sec") => 1,
@@ -128,19 +210,53 @@ fn parse_duration_secs(s: &str, default_secs: Option<u64>) -> Option<u64> {
         u if u.starts_with("day") => 86400,
         _ => return None,
     };
-    Some((secs * mult as f64).round() as u64)
+    let tail = &rest[skip + unit_len..];
+    Some(((secs * mult as f64).round() as u64, tail))
+}
+
+/// Durée composée « 4 hours 20 minutes » : somme des groupes
+/// `<n> <unité>` consécutifs (séparateurs espace/virgule/"and"
+/// tolérés). Unité exigée sur chaque groupe — « retry after 120 »
+/// reste au parsing unitaire du caller. None = aucun groupe.
+fn parse_duration_chain(s: &str) -> Option<u64> {
+    let mut rest = s;
+    let mut total = 0u64;
+    let mut groups = 0u32;
+    loop {
+        // Séparateurs entre groupes : espaces, virgule, « and ».
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
+        if let Some(r) = rest.strip_prefix("and ") {
+            rest = r;
+            continue;
+        }
+        let Some((secs, tail)) = parse_duration_secs(rest, None) else {
+            break;
+        };
+        total = total.saturating_add(secs);
+        groups += 1;
+        rest = tail;
+    }
+    (groups > 0).then_some(total)
 }
 
 fn unix_to_system(unix: i64) -> std::time::SystemTime {
     std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix.max(0) as u64)
 }
 
+/// Horizon max d'une échéance de reset annoncée : 24 h — les
+/// fenêtres de quota constatées (modèles gratuits) vont de la
+/// minute à ~7 h ; au-delà on considère l'annonce inexploitable et
+/// le backoff reprend la main.
+pub(super) const RESET_MAX_AHEAD: i64 = 24 * 3600;
+
 /// Échéance de reset annoncée par le provider dans un message
-/// rate_limit : « reset in 15 minutes », « try again in 2 hours »,
+/// rate_limit : « reset in 15 minutes », « reset in 4 hours 20
+/// minutes » (durée composée), « try again in 2 hours »,
 /// « retry-after: 120 » (secondes nues, convention HTTP), ou heure
-/// absolue « at 13:56 UTC ». None = rien d'exploitable ou échéance
-/// absurde (> 1 h dans le futur, > 5 min dans le passé — le backoff
-/// classique reprend la main dans les deux cas).
+/// absolue « at 13:56 UTC » (jour J, ou J+1 si déjà passée — un reset
+/// de minuit passé le soir vise le lendemain). None = rien
+/// d'exploitable ou échéance absurde (> 24 h dans le futur, > 5 min
+/// dans le passé — le backoff classique reprend la main).
 pub(super) fn parse_reset_at(
     msg: &str,
     now: std::time::SystemTime,
@@ -149,9 +265,15 @@ pub(super) fn parse_reset_at(
     let m = msg.to_lowercase();
     let sane = |target: i64| {
         let d = target - now_unix;
-        (-300..=3600).contains(&d).then(|| unix_to_system(target))
+        (-300..=RESET_MAX_AHEAD)
+            .contains(&d)
+            .then(|| unix_to_system(target))
     };
-    // (a) durée relative : « reset in 15 minutes », « try again in 2 h »
+    // (a) durée relative : « reset in 15 minutes », « try again in
+    // 2 hours », « reset in 4 hours 20 minutes » — durée composée
+    // acceptée. Une annonce refusée par `sane` ne court-circuite PAS
+    // le scan : l'heure absolue « (at 18:01 UTC) » qui suit peut
+    // rester la bonne échéance.
     for kw in [
         "reset in ",
         "resets in ",
@@ -167,19 +289,32 @@ pub(super) fn parse_reset_at(
         // retry-after admet la forme nue « : 120 » (secondes) ; les
         // autres tournures exigent une unité explicite.
         let bare = kw.starts_with("retry");
-        if let Some(d) = parse_duration_secs(rest, bare.then_some(1)) {
-            return sane(now_unix.saturating_add(d as i64));
+        let d = parse_duration_chain(rest).or_else(|| {
+            if bare {
+                parse_duration_secs(rest, Some(1)).map(|(s, _)| s)
+            } else {
+                None
+            }
+        });
+        if let Some(d) = d {
+            if let Some(t) = sane(now_unix.saturating_add(d as i64)) {
+                return Some(t);
+            }
         }
     }
     // (b) heure absolue UTC : « (at 13:56 UTC) » — le suffixe de fuseau
-    // est exigé pour ne pas capter « meet at 5:30 ».
+    // est exigé pour ne pas capter « meet at 5:30 ». Candidate jour J
+    // puis J+1 : une annonce du soir pour « 18:01 UTC » vise le
+    // lendemain, pas une heure déjà passée.
     for (i, _) in m.match_indices("at ") {
         let rest = m[i + 3..].trim_start();
         let b = rest.as_bytes();
         if b.len() < 5 || !b[0].is_ascii_digit() {
             continue;
         }
-        let Some(colon) = rest.find(':') else { continue };
+        let Some(colon) = rest.find(':') else {
+            continue;
+        };
         let (Ok(hh), Ok(mm)) = (
             rest[..colon].parse::<u32>(),
             rest[colon + 1..].get(..2).unwrap_or("").parse::<u32>(),
@@ -193,11 +328,19 @@ pub(super) fn parse_reset_at(
         }
         use chrono::Datelike;
         let dt = chrono::DateTime::<chrono::Utc>::from(now);
-        let target_unix = chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), dt.day())
-            .and_then(|d| d.and_hms_opt(hh, mm, 0))
-            .map(|n| n.and_utc().timestamp());
-        if let Some(t) = target_unix {
-            return sane(t);
+        let Some(day) = chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), dt.day()) else {
+            continue;
+        };
+        for offset in [0i64, 1] {
+            let target_unix = day
+                .checked_add_signed(chrono::Duration::days(offset))
+                .and_then(|d| d.and_hms_opt(hh, mm, 0))
+                .map(|n| n.and_utc().timestamp());
+            if let Some(t) = target_unix {
+                if let Some(t) = sane(t) {
+                    return Some(t);
+                }
+            }
         }
     }
     None
@@ -232,7 +375,7 @@ impl Session {
                 self.enqueue_prompt(text, false, PromptSrc::User);
                 drop(c);
                 self.emit(EventKind::System {
-                    text: "compact en cours — message en file".into(),
+                    text: "compact in progress — message queued".into(),
                 });
                 return Ok(false);
             }
@@ -252,8 +395,7 @@ impl Session {
             if kind == "rate_limit" {
                 self.enqueue_prompt(text, false, PromptSrc::User);
                 self.emit(EventKind::System {
-                    text: "session en erreur (rate limit) — message en file, retry programmé"
-                        .into(),
+                    text: "session in error (rate limit) — message queued, retry scheduled".into(),
                 });
                 return Ok(false);
             }
@@ -323,7 +465,7 @@ impl Session {
                             s.set_state("idle");
                         }
                         s.emit(EventKind::System {
-                            text: format!("steer refusé ({e}) — message en file"),
+                            text: format!("steer refused ({e}) — message queued"),
                         });
                         // Remise en file inconditionnelle (la condition
                         // de drain ne doit pas la sauter — un /compact
@@ -333,8 +475,7 @@ impl Session {
                         // busy) : après désarmement, le « runner déjà
                         // là » supposé par enqueue_prompt est faux —
                         // drain explicite pour ne pas orpheliner la file.
-                        let already =
-                            s.enqueue_prompt(&text, false, PromptSrc::UserJournaled);
+                        let already = s.enqueue_prompt(&text, false, PromptSrc::UserJournaled);
                         if disarmed || !already {
                             s.drain_queue().await;
                         }
@@ -349,7 +490,7 @@ impl Session {
             let held = self.take_compact_hold();
             if held {
                 self.emit(EventKind::System {
-                    text: "compact interrompu — envoi forcé".into(),
+                    text: "compact interrupted — forced send".into(),
                 });
             }
             // La retenue d'erreur tombe aussi — la trace last_error
@@ -370,7 +511,7 @@ impl Session {
         let already = self.enqueue_prompt(text, false, PromptSrc::User);
         if already {
             self.emit(EventKind::System {
-                text: "message en file — envoyé à la fin du tour".into(),
+                text: "message queued — sent at end of turn".into(),
             });
             return Ok(false); // un runner existe déjà
         }
@@ -391,7 +532,7 @@ impl Session {
                 self.enqueue_prompt(wrapped, false, PromptSrc::Peer);
                 drop(c);
                 self.emit(EventKind::System {
-                    text: "compact en cours — message en file".into(),
+                    text: "compact in progress — message queued".into(),
                 });
                 return Ok(false);
             }
@@ -417,7 +558,7 @@ impl Session {
         if steer && self.busy.load(Ordering::SeqCst) {
             // (retenue compact exclue ci-dessus : busy vrai ⇒ vrai tour)
             self.emit(EventKind::System {
-                text: "steer → envoyé au tour en cours".into(),
+                text: "steer → sent to the current turn".into(),
             });
             let gen = self.spawn_gen.load(Ordering::SeqCst);
             if let Err(e) = self.prompt_rpc(wrapped).await {
@@ -427,7 +568,7 @@ impl Session {
                     return Ok(false);
                 }
                 self.emit(EventKind::System {
-                    text: format!("steer refusé ({e}) — message en file"),
+                    text: format!("steer refused ({e}) — message queued"),
                 });
                 if !self.enqueue_prompt(wrapped, false, PromptSrc::Peer) {
                     self.drain_queue().await;
@@ -438,7 +579,7 @@ impl Session {
         let already = self.enqueue_prompt(wrapped, false, PromptSrc::Peer);
         if already {
             self.emit(EventKind::System {
-                text: "message en file — envoyé à la fin du tour".into(),
+                text: "message queued — sent at end of turn".into(),
             });
             return Ok(false); // un runner existe déjà
         }
@@ -519,9 +660,7 @@ impl Session {
     /// state "asleep" précède le kill dans sleep() — sans ce check un
     /// envoi dans la fenêtre serait livré à un agent en train de mourir).
     pub fn accepting_prompts(&self) -> bool {
-        self.is_alive()
-            && !self.is_spawning()
-            && self.meta.lock().unwrap().state != "asleep"
+        self.is_alive() && !self.is_spawning() && self.meta.lock().unwrap().state != "asleep"
     }
 
     /// Enfile un prompt pendant un spawn déjà en vol (init, resume,
@@ -608,9 +747,7 @@ impl Session {
                         // leur intention : l'utilisateur sait ce qu'il
                         // demande, un drop silencieux l'effacerait.
                         if is_compact_cmd(&t.0) {
-                            q.retain(|(t2, s2)| {
-                                !(is_compact_cmd(t2) && *s2 == PromptSrc::Auto)
-                            });
+                            q.retain(|(t2, s2)| !(is_compact_cmd(t2) && *s2 == PromptSrc::Auto));
                         }
                         t
                     }
@@ -640,7 +777,7 @@ impl Session {
                         // compaction ne tourne — désarmer plutôt que
                         // retenir les envois jusqu'au timeout.
                         self.emit(EventKind::System {
-                            text: "compact terminé — échec de la commande".into(),
+                            text: "compact done — command failed".into(),
                         });
                     }
                     // Le prompt fautif retourne en tête de file :
@@ -804,7 +941,7 @@ impl Session {
                         if self.turn_outputs.load(Ordering::SeqCst) == out0 {
                             self.emit(EventKind::System {
                                 text: format!(
-                                    "tour terminé sans sortie (stopReason: {})",
+                                    "turn ended with no output (stopReason: {})",
                                     sr.unwrap_or("?")
                                 ),
                             });
@@ -839,13 +976,17 @@ impl Session {
     }
 
     /// Vide la file (Stop : annule aussi le tour en cours).
-    pub fn clear_queue(&self) {
+    /// Renvoie le nombre d'entrées retirées — `queue_clear` l'expose
+    /// au client, `cancel` l'ignore. Le tour en cours n'est jamais
+    /// touché : seules les entrées en attente sont drainées.
+    pub fn clear_queue(&self) -> usize {
         let n = self.prompt_queue.lock().unwrap().drain(..).count();
         if n > 0 {
             self.emit(EventKind::System {
-                text: format!("{n} message(s) en file annulé(s)"),
+                text: format!("{n} queued message(s) cancelled"),
             });
         }
+        n
     }
 
     /// Contenu de la file dans l'ordre d'envoi (textes seuls).
@@ -990,7 +1131,7 @@ impl Session {
                 s.arm_compact(src == PromptSrc::Auto);
             }
             s.emit(EventKind::System {
-                text: "message en file promu en steer par l'utilisateur".into(),
+                text: "queued message promoted to steer by the user".into(),
             });
             // User → user_message steer journalisé à la remise (comme
             // send_prompt). Peer/Auto : déjà tracés par leur émetteur.
@@ -1028,7 +1169,7 @@ impl Session {
                         s.set_state("idle");
                     }
                     s.emit(EventKind::System {
-                        text: format!("steer refusé ({e}) — message remis en file"),
+                        text: format!("steer refused ({e}) — message put back in queue"),
                     });
                     // User → UserJournaled : le user_message steer est
                     // déjà visible, le drain ne doit pas le réémettre.
@@ -1087,10 +1228,9 @@ impl Session {
         // échoué (agent mort : la retenue ne survivrait qu'au timeout).
         // Le drain relancé livre les messages encore en file (le Stop
         // serveur les a vidés, le promote les garde).
-        self.end_compact("annulé", true);
+        self.end_compact("cancelled", true);
         res
     }
-
 
     /// Répond à une permission ou question pending.
     pub fn respond(
@@ -1129,7 +1269,6 @@ impl Session {
     pub fn pending_requests(&self) -> Vec<String> {
         self.pending_agent.lock().unwrap().keys().cloned().collect()
     }
-
 }
 
 /// L'agent répond que l'id de session native n'existe plus chez lui
@@ -1155,7 +1294,7 @@ pub(super) fn session_binding_lost(msg: &str) -> bool {
         "could not find session",
         "can not find session",
         "session introuvable",
-        "session est introuvable",
+        "session not found",
         "session inexistante",
     ]
     .iter()

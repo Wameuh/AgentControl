@@ -65,7 +65,7 @@ fn split_argv(s: &str, flag: &str) -> Result<Vec<String>> {
             }
         }
     }
-    anyhow::ensure!(quote.is_none(), "{flag} : quote non fermée");
+    anyhow::ensure!(quote.is_none(), "{flag}: unclosed quote");
     if touched {
         out.push(cur);
     }
@@ -93,7 +93,10 @@ fn ls(items: &[Value]) {
         } else {
             ver.to_string()
         };
-        let pid = st["pid"].as_u64().map(|p| p.to_string()).unwrap_or_else(|| "-".into());
+        let pid = st["pid"]
+            .as_u64()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into());
         let up = fmt_uptime(st["uptime_s"].as_u64().unwrap_or(0));
         let restarts = st["restarts"].as_u64().unwrap_or(0);
         let src = match it["source"].as_str() {
@@ -115,8 +118,8 @@ fn ls(items: &[Value]) {
         // actionnable (upgrade l'outil), pas une panne du composant.
         let outdated = if st["version_outdated"].as_bool().unwrap_or(false) {
             match st["version_min"].as_str() {
-                Some(min) => format!(" — outil obsolète (≥ {min} requis)"),
-                None => " — outil obsolète".to_string(),
+                Some(min) => format!(" — obsolete tool (≥ {min} required)"),
+                None => " — obsolete tool".to_string(),
             }
         } else {
             String::new()
@@ -135,7 +138,7 @@ fn ls(items: &[Value]) {
             if missing.is_empty() {
                 String::new()
             } else {
-                format!(" — configuration requise : {missing}")
+                format!(" — required configuration: {missing}")
             },
             outdated,
         );
@@ -149,8 +152,8 @@ fn catalog(entries: &[Value]) {
         let installed = if e["installed"].as_bool().unwrap_or(false) {
             e["version"]
                 .as_str()
-                .map(|v| format!("installé {v}"))
-                .unwrap_or_else(|| "installé".into())
+                .map(|v| format!("installed {v}"))
+                .unwrap_or_else(|| "installed".into())
         } else {
             "—".into()
         };
@@ -183,7 +186,7 @@ fn parse_healthcheck(s: &str) -> Result<proto::Healthcheck> {
         _ if s.starts_with("cmd:") => proto::Healthcheck::Command {
             argv: split_argv(&s["cmd:".len()..], "--hc cmd:")?,
         },
-        _ => bail!("--hc none|process|tcp:ADDR|http:URL|cmd:\"<argv>\" (reçu: {s})"),
+        _ => bail!("--hc none|process|tcp:ADDR|http:URL|cmd:\"<argv>\" (got: {s})"),
     })
 }
 
@@ -193,20 +196,25 @@ fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
         "process" => proto::ComponentKind::Process,
         "external" => proto::ComponentKind::External,
         "tool" => proto::ComponentKind::Tool,
-        "internal" => bail!("--kind internal : réservé aux composants déclarés en code"),
-        other => bail!("--kind process|external|tool (reçu: {other})"),
+        "internal" => bail!("--kind internal: reserved for code-declared components"),
+        other => bail!("--kind process|external|tool (got: {other})"),
     };
     let command = match flag_val(args, "--cmd") {
         Some(s) => split_argv(s, "--cmd")?,
         None => Vec::new(),
     };
-    if matches!(kind, proto::ComponentKind::Process | proto::ComponentKind::Tool)
-        && command.is_empty()
+    if matches!(
+        kind,
+        proto::ComponentKind::Process | proto::ComponentKind::Tool
+    ) && command.is_empty()
     {
-        bail!("--cmd \"<argv>\" requis pour kind={}", match kind {
-            proto::ComponentKind::Process => "process",
-            _ => "tool",
-        });
+        bail!(
+            "--cmd \"<argv>\" required for kind={}",
+            match kind {
+                proto::ComponentKind::Process => "process",
+                _ => "tool",
+            }
+        );
     }
     let healthcheck = match flag_val(args, "--hc") {
         Some(s) => parse_healthcheck(s)?,
@@ -215,21 +223,19 @@ fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
     // Mêmes gardes que check_usable/check_editable côté démon : une
     // sonde `process` exige un pid managé, et un `external` sans sonde
     // ne serait jamais sondé — inerte à vie.
-    if matches!(healthcheck, proto::Healthcheck::Process)
-        && kind != proto::ComponentKind::Process
-    {
-        bail!("--hc process exige kind=process (pid managé)");
+    if matches!(healthcheck, proto::Healthcheck::Process) && kind != proto::ComponentKind::Process {
+        bail!("--hc process requires kind=process (managed pid)");
     }
-    if kind == proto::ComponentKind::External
-        && matches!(healthcheck, proto::Healthcheck::None)
-    {
-        bail!("kind=external sans sonde resterait inerte — passez \
-               --hc tcp:ADDR|http:URL|cmd:\"<argv>\"");
+    if kind == proto::ComponentKind::External && matches!(healthcheck, proto::Healthcheck::None) {
+        bail!(
+            "kind=external without a probe would stay inert — pass \
+               --hc tcp:ADDR|http:URL|cmd:\"<argv>\""
+        );
     }
     let mut env = std::collections::HashMap::new();
     for kv in flag_vals(args, "--env") {
-        let (k, v) = kv.split_once('=').context("--env K=V attendu")?;
-        anyhow::ensure!(!k.is_empty(), "--env K=V attendu (clé vide)");
+        let (k, v) = kv.split_once('=').context("--env K=V expected")?;
+        anyhow::ensure!(!k.is_empty(), "--env K=V expected (empty key)");
         env.insert(k.to_string(), v.to_string());
     }
     let version_argv = match flag_val(args, "--vargv") {
@@ -264,7 +270,7 @@ fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
 /// erreur d'usage, pas un nom.
 fn name_arg<'a>(args: &'a [String], usage: &'static str) -> Result<&'a str> {
     let n = args.get(2).context(usage)?;
-    anyhow::ensure!(!n.starts_with("--"), "nom de composant invalide: {n}");
+    anyhow::ensure!(!n.starts_with("--"), "invalid component name: {n}");
     Ok(n)
 }
 
@@ -284,11 +290,20 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
     // Un flag à valeur en dernière position est une erreur d'usage —
     // mieux qu'une absorption silencieuse.
     const VAL_FLAGS: [&str; 11] = [
-        "--kind", "--cmd", "--hc", "--env", "--cwd", "--desc", "--tail",
-        "--set", "--vargv", "--vmin", "--view-dir",
+        "--kind",
+        "--cmd",
+        "--hc",
+        "--env",
+        "--cwd",
+        "--desc",
+        "--tail",
+        "--set",
+        "--vargv",
+        "--vmin",
+        "--view-dir",
     ];
     if let Some(f) = args.last().filter(|a| VAL_FLAGS.contains(&a.as_str())) {
-        bail!("{f} sans valeur");
+        bail!("{f} missing value");
     }
     let sub = args.get(1).map(String::as_str).unwrap_or("ls");
     match sub {
@@ -324,7 +339,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
         "logs" => {
             let name = name_arg(args, "comp logs <name> [--tail N]")?;
             let tail: Option<usize> = flag_val(args, "--tail")
-                .map(|s| s.parse().context("--tail N invalide"))
+                .map(|s| s.parse().context("--tail N invalid"))
                 .transpose()?;
             let v = c
                 .call(proto::ReqKind::ComponentLogs {
@@ -354,7 +369,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 v["size"].as_u64().unwrap_or(0),
                 v["offset"].as_u64().unwrap_or(0),
                 if v["truncated"].as_bool().unwrap_or(false) {
-                    " — tronqué en amont"
+                    " — truncated upstream"
                 } else {
                     ""
                 },
@@ -377,8 +392,8 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             let name = name_arg(args, "comp install <name> [--set K=V …]")?;
             let mut params = std::collections::HashMap::new();
             for kv in flag_vals(&args[3..], "--set") {
-                let (k, v) = kv.split_once('=').context("--set K=V attendu")?;
-                anyhow::ensure!(!k.is_empty(), "--set K=V attendu (clé vide)");
+                let (k, v) = kv.split_once('=').context("--set K=V expected")?;
+                anyhow::ensure!(!k.is_empty(), "--set K=V expected (empty key)");
                 params.insert(k.to_string(), v.to_string());
             }
             let v = c
@@ -403,7 +418,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 })
                 .unwrap_or_default();
             if !missing.is_empty() {
-                println!("configuration requise : {missing}");
+                println!("required configuration: {missing}");
             }
             for n in v["notes"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
                 if let Some(t) = n.as_str() {
@@ -412,17 +427,14 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             }
         }
         "set" => {
-            let name = name_arg(args, "comp set <name> <clé> <valeur>")?;
-            let key = args.get(3).context("comp set <name> <clé> <valeur>")?;
-            anyhow::ensure!(!key.starts_with("--"), "clé invalide: {key}");
-            let value = args.get(4).context("comp set <name> <clé> <valeur>")?;
+            let name = name_arg(args, "comp set <name> <key> <value>")?;
+            let key = args.get(3).context("comp set <name> <key> <value>")?;
+            anyhow::ensure!(!key.starts_with("--"), "invalid key: {key}");
+            let value = args.get(4).context("comp set <name> <key> <value>")?;
             let v = c
                 .call(proto::ReqKind::ComponentSetParams {
                     name: name.into(),
-                    params: std::collections::HashMap::from([(
-                        key.clone(),
-                        value.clone(),
-                    )]),
+                    params: std::collections::HashMap::from([(key.clone(), value.clone())]),
                 })
                 .await?;
             let missing = v["config_required"]
@@ -440,7 +452,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 if missing.is_empty() {
                     format!("state={}", v["state"].as_str().unwrap_or("?"))
                 } else {
-                    format!("configuration requise : {missing}")
+                    format!("required configuration: {missing}")
                 },
                 if v["rendered"].as_bool().unwrap_or(false) {
                     " — config rendue"
@@ -448,7 +460,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                     ""
                 },
                 if v["restarted"].as_bool().unwrap_or(false) {
-                    ", redémarré"
+                    ", restarted"
                 } else {
                     ""
                 },
@@ -484,26 +496,41 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             )?;
             let f = &args[3..];
             const VAL: [&str; 11] = [
-                "--desc", "--kind", "--cmd", "--hc", "--env", "--cwd",
-                "--restart", "--rsec", "--vargv", "--vmin", "--view-dir",
+                "--desc",
+                "--kind",
+                "--cmd",
+                "--hc",
+                "--env",
+                "--cwd",
+                "--restart",
+                "--rsec",
+                "--vargv",
+                "--vmin",
+                "--view-dir",
             ];
             if let Some(x) = f.last().filter(|a| VAL.contains(&a.as_str())) {
-                bail!("{x} sans valeur");
+                bail!("{x} missing value");
             }
             let info = c
                 .call(proto::ReqKind::ComponentInfo { name: name.into() })
                 .await?;
-            let mut spec: proto::ComponentSpec =
-                serde_json::from_value(info["spec"].clone())
-                    .context("comp edit: spec illisible dans component_info")?;
+            let mut spec: proto::ComponentSpec = serde_json::from_value(info["spec"].clone())
+                .context("comp edit: unreadable spec in component_info")?;
             if info["catalog"].as_bool().unwrap_or(false) {
                 // Composant catalogue : la spec interne est scellée —
                 // même borne que le formulaire client (params via
                 // `comp set`, internals = propriété de l'entrée). Le
                 // démon refuserait aussi l'upsert ; erreur claire ici.
                 const SEALED: [&str; 10] = [
-                    "--kind", "--cmd", "--hc", "--env", "--cwd",
-                    "--restart", "--rsec", "--vargv", "--vmin",
+                    "--kind",
+                    "--cmd",
+                    "--hc",
+                    "--env",
+                    "--cwd",
+                    "--restart",
+                    "--rsec",
+                    "--vargv",
+                    "--vmin",
                     "--view-dir",
                 ];
                 // Scan pairwise — un flag à valeur consomme le token
@@ -519,8 +546,8 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 }
                 anyhow::ensure!(
                     bad.is_empty(),
-                    "« {name} » est géré par le catalogue — spec interne \
-                     scellée ({bad:?} refusés) ; params via `comp set`"
+                    "{name} is catalog-managed — sealed internal spec \
+                     ({bad:?} refused); params via `comp set`"
                 );
             } else {
                 if let Some(k) = flag_val(f, "--kind") {
@@ -528,7 +555,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                         "process" => proto::ComponentKind::Process,
                         "external" => proto::ComponentKind::External,
                         "tool" => proto::ComponentKind::Tool,
-                        other => bail!("--kind process|external|tool (reçu: {other})"),
+                        other => bail!("--kind process|external|tool (got: {other})"),
                     };
                 }
                 if let Some(s) = flag_val(f, "--cmd") {
@@ -543,9 +570,8 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 if !envs.is_empty() {
                     let mut env = std::collections::HashMap::new();
                     for kv in envs {
-                        let (k, v) =
-                            kv.split_once('=').context("--env K=V attendu")?;
-                        anyhow::ensure!(!k.is_empty(), "--env K=V attendu (clé vide)");
+                        let (k, v) = kv.split_once('=').context("--env K=V expected")?;
+                        anyhow::ensure!(!k.is_empty(), "--env K=V expected (empty key)");
                         env.insert(k.to_string(), v.to_string());
                     }
                     spec.env = env;
@@ -559,12 +585,12 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                         "on-failure" => proto::RestartPolicy::OnFailure,
                         "never" => proto::RestartPolicy::Never,
                         other => {
-                            bail!("--restart always|on-failure|never (reçu: {other})")
+                            bail!("--restart always|on-failure|never (got: {other})")
                         }
                     };
                 }
                 if let Some(v) = flag_val(f, "--rsec") {
-                    spec.restart_sec = v.parse().context("--rsec N invalide")?;
+                    spec.restart_sec = v.parse().context("--rsec N invalid")?;
                 }
                 // Vide = retrait de la déclaration (même convention
                 // que --cwd).
@@ -574,14 +600,12 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                         .transpose()?;
                 }
                 if let Some(v) = flag_val(f, "--vmin") {
-                    spec.min_version =
-                        (!v.trim().is_empty()).then(|| v.to_string());
+                    spec.min_version = (!v.trim().is_empty()).then(|| v.to_string());
                 }
                 // Vide = retrait de la déclaration (retombe sur la
                 // convention components/<name>/web/ côté démon).
                 if let Some(v) = flag_val(f, "--view-dir") {
-                    spec.view_dir =
-                        (!v.trim().is_empty()).then(|| v.to_string());
+                    spec.view_dir = (!v.trim().is_empty()).then(|| v.to_string());
                 }
             }
             if let Some(v) = flag_val(f, "--desc") {
@@ -589,10 +613,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             }
             let on = f.iter().any(|a| a == "--autostart");
             let off = f.iter().any(|a| a == "--no-autostart");
-            anyhow::ensure!(
-                !(on && off),
-                "--autostart et --no-autostart sont exclusifs"
-            );
+            anyhow::ensure!(!(on && off), "--autostart et --no-autostart sont exclusifs");
             if on {
                 spec.autostart = true;
             }
@@ -615,10 +636,10 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             let name = name_arg(args, "comp rm <name>")?;
             c.call(proto::ReqKind::ComponentRemove { name: name.into() })
                 .await?;
-            println!("{name} retiré");
+            println!("{name} removed");
         }
         other => bail!(
-            "comp: sous-commande inconnue: {other} \
+            "comp: unknown sub-command: {other} \
              (ls|info|start|stop|restart|logs|catalog|install|set|add|edit|rm)"
         ),
     }

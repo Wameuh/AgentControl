@@ -1,6 +1,6 @@
 [package]
 name = "client-core"
-version = "0.10.3"
+version = "0.11.0"
 edition = "2021"
 
 [dependencies]
@@ -10,7 +10,13 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 # SSH natif (sans binaire ssh) — Android et partout ailleurs en opt-in.
-russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
-ssh-key = "=0.7.0-rc.11"
+# Pin exact : 0.65.2 est le premier russh sur rsa 0.10 stable +
+# ssh-key 0.7.0-rc.12 (RUSTSEC-2026-0495 + RUSTSEC-2023-0071) ; les
+# patchs suivants (0.65.3+) avaient < 7 jours au moment du bump
+# (garde supply-chain du repo).
+russh = { version = "=0.65.2", default-features = false, features = ["ring", "flate2", "rsa"] }
+# Doit rester alignée sur la req exacte de russh (même ssh-key dans le
+# graph, sinon deux copies et types incompatibles).
+ssh-key = "=0.7.0-rc.12"
 rand_core = "0.10"
 getrandom = "0.4"

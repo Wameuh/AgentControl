@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { $ } from "../core/dom";
-import { mdRender } from "../core/format";
+import { expandImgPh, mdRender } from "../core/format";
 import { t, type Key } from "../i18n";
 import { icon } from "../ui/icons";
 
@@ -86,6 +86,11 @@ export class MdView {
     this.sync();
   }
 
+  /** Le fichier courant est un markdown (rendu/split source-aperçu). */
+  get isMd() {
+    return this.md;
+  }
+
   /** Le div rendu est la vue active — ou l'aperçu live en édition
    *  splittée (son scroll alimente maybeMore dans les deux cas). */
   get rendered() {
@@ -146,6 +151,12 @@ export class MdView {
     });
     // Chemins cliquables du rendu : relatifs au dossier du fichier ouvert.
     view.addEventListener("click", (e) => {
+      // Placeholder image distante (N6) : insère l'<img> au clic —
+      // même délégation que #events côté chat.
+      if (expandImgPh(e.target as HTMLElement)) {
+        e.preventDefault();
+        return;
+      }
       const el = (e.target as HTMLElement).closest<HTMLElement>(".flink");
       if (!el?.dataset.path) return;
       // Traité ici : la délégation globale des <a> (initExternalLinks)

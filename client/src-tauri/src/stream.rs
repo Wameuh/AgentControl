@@ -48,7 +48,7 @@ struct Query {
 
 async fn serve(app: &AppHandle, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     let Some(q) = parse_query(req.uri().query().unwrap_or("")) else {
-        return err(StatusCode::BAD_REQUEST, "params session/path requis");
+        return err(StatusCode::BAD_REQUEST, "session/path params required");
     };
     let state = app.state::<AppState>();
     let client = match get_conn(&state, q.conn.as_deref()).await {
@@ -173,7 +173,7 @@ async fn chunk(client: &Client, q: &Query, offset: u64, limit: u64) -> Result<(V
     // `offset` (fichier entier plafonné à 12 Mio) : inutilisable pour
     // servir une range — exiger la forme bornée.
     if v.get("offset").and_then(Value::as_u64) != Some(offset) {
-        return Err("streaming non supporté — démon trop ancien".into());
+        return Err("streaming unsupported — daemon too old".into());
     }
     let b64 = v["data"].as_str().unwrap_or_default();
     use base64::Engine;

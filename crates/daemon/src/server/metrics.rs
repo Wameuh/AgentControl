@@ -26,13 +26,14 @@
 //! (`items_available:false`, champs items → null).
 
 use super::orch::{
-    acwait_live_sids, counts_as_working, now_secs, state_dir, task_poppable, task_status,
-    OrchProbe, Task, COMPONENT_ORIGIN,
+    acwait_live_sids, counts_as_working, now_secs, task_poppable, task_status, OrchProbe, Task,
+    COMPONENT_ORIGIN,
 };
 use super::*;
 use proto::SessionMeta;
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 /// Âge max d'un sample conservé (30 j).
@@ -48,10 +49,11 @@ const COMPACT_EVERY: u64 = 1440;
 /// d'extrapoler une rafale instantanée sur la fenêtre « all ».
 const MIN_SPAN_DAYS: f64 = 1.0 / 24.0;
 
-/// `~/.agentbacklog/metrics.jsonl` — à côté de l'état orchestrateur
-/// (même périmètre « file backlog » : DB, lock, pause, state.json).
-pub(crate) fn metrics_path() -> PathBuf {
-    state_dir().join("metrics.jsonl")
+/// `metrics.jsonl` dans le `state_dir` configuré — à côté de l'état
+/// orchestrateur (même périmètre « file backlog » : lock, pause,
+/// state.json).
+pub(crate) fn metrics_path(cfg: &cfg::OrchCfg) -> PathBuf {
+    cfg.state_dir().join("metrics.jsonl")
 }
 
 /// Sample d'un tick : compteurs instantanés de la file.
@@ -131,11 +133,11 @@ impl OrchProbe {
     /// l'append est séquentiel et la compaction (read→rewrite→rename)
     /// ne peut pas perdre un append concurrent.
     pub(crate) fn metrics_sample(&self, tasks: &[Task], metas: &[SessionMeta]) {
-        let path = metrics_path();
+        let path = metrics_path(&self.cfg.read().unwrap());
         let line = match serde_json::to_string(&build_sample(tasks, metas)) {
             Ok(l) => l,
             Err(e) => {
-                warn!("métriques: sérialisation sample: {e}");
+                warn!("metrics: sample serialization: {e}");
                 return;
             }
         };
@@ -148,7 +150,7 @@ impl OrchProbe {
                 .and_then(|mut f| writeln!(f, "{line}"))
         });
         if let Err(e) = appended {
-            warn!("métriques: append {}: {e}", path.display());
+            warn!("metrics: append {}: {e}", path.display());
             return;
         }
         // Compaction : périodique (borne d'âge) ou pression taille.
@@ -162,10 +164,10 @@ impl OrchProbe {
         self.metrics_appends.store(0, Ordering::Relaxed);
         match compact(&path) {
             Ok((kept, dropped)) if dropped > 0 => {
-                info!("métriques: compaction — {kept} gardés, {dropped} tronqués/corrompus");
+                info!("metrics: compaction — {kept} kept, {dropped} truncated/corrupt");
             }
             Ok(_) => {}
-            Err(e) => warn!("métriques: compaction {}: {e}", path.display()),
+            Err(e) => warn!("metrics: compaction {}: {e}", path.display()),
         }
     }
 }
@@ -226,23 +228,23 @@ fn window_secs(w: Option<&str>) -> Result<(Option<f64>, String)> {
     let num = &w[..w.len().saturating_sub(unit.len_utf8())];
     let n: f64 = num
         .parse()
-        .with_context(|| format!("fenêtre « {w} » invalide (ex. 24h, 7d, 30d, all)"))?;
+        .with_context(|| format!("invalid window « {w} » (e.g. 24h, 7d, 30d, all)"))?;
     let secs = match unit {
         'h' => n * 3_600.0,
         'd' => n * 86_400.0,
-        _ => anyhow::bail!("fenêtre « {w} » invalide (ex. 24h, 7d, 30d, all)"),
+        _ => anyhow::bail!("invalid window « {w} » (e.g. 24h, 7d, 30d, all)"),
     };
     anyhow::ensure!(
         secs > 0.0,
-        "fenêtre « {w} » invalide (ex. 24h, 7d, 30d, all)"
+        "invalid window « {w} » (e.g. 24h, 7d, 30d, all)"
     );
     Ok((Some(secs), w))
 }
 
-/// Série du journal bornée à `since` (None = toute la série) —
+/// Série du journal `path` bornée à `since` (None = toute la série) —
 /// (samples, lignes corrompues ignorées). Fichier absent → vide.
-fn read_samples(since: Option<f64>) -> (Vec<Value>, u64) {
-    let Ok(txt) = std::fs::read_to_string(metrics_path()) else {
+fn read_samples(path: &Path, since: Option<f64>) -> (Vec<Value>, u64) {
+    let Ok(txt) = std::fs::read_to_string(path) else {
         return (Vec::new(), 0);
     };
     let mut out = Vec::new();
@@ -384,7 +386,8 @@ impl Daemon {
         let (span, label) = window_secs(window.as_deref())?;
         let now = now_secs();
         let since = span.map(|s| now - s);
-        let (samples, corrupt) = read_samples(since);
+        let mpath = metrics_path(&self.orch.cfg.read().unwrap());
+        let (samples, corrupt) = read_samples(&mpath, since);
         // Items = source des agrégats lead-time/attente — best-effort :
         // binaire non résolvable ou --list en échec → agrégats null.
         let items = match self.orch_agentbacklog_bin().await {
@@ -398,7 +401,7 @@ impl Daemon {
             "window": label,
             "since": since,
             "generated_at": proto::now_iso(),
-            "journal": metrics_path().display().to_string(),
+            "journal": mpath.display().to_string(),
             "sample_count": samples.len(),
             "corrupt_lines": corrupt,
             "samples": samples,
@@ -417,6 +420,7 @@ mod tests {
             agent: "devin".into(),
             title: "Backlog-W1".into(),
             cwd: "/workspace".into(),
+            reported_cwd: None,
             created_at: "2026-01-01T00:00:00Z".into(),
             native_session_id: None,
             mode: None,
@@ -440,6 +444,7 @@ mod tests {
             context_size: None,
             last_error: None,
             wait: None,
+            state_since: None,
         }
     }
 
@@ -495,8 +500,8 @@ mod tests {
         assert_eq!(s["poppable"], 2); // le dep-bloqué ne compte pas
         assert_eq!(s["wip"], 1);
         assert_eq!(s["workers_alive"], 2); // dead exclu, non-orch exclus
-        // working : sous-ensemble en activité — seul le meta « working »
-        // (asleep et dead exclus, autres origines exclues).
+                                           // working : sous-ensemble en activité — seul le meta « working »
+                                           // (asleep et dead exclus, autres origines exclues).
         assert_eq!(s["working"], 1);
         assert_eq!(s["by_repo"]["AgentControl"]["pending"], 2);
         assert_eq!(s["by_repo"]["AgentControl"]["wip"], 1);

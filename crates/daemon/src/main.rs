@@ -11,12 +11,13 @@ mod prs;
 mod selfupdate;
 mod server;
 mod session;
+mod skills;
 mod term;
 mod tui;
 mod web;
 
 use anyhow::{Context, Result};
-use server::{AgentProfile, Daemon};
+use server::Daemon;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -24,6 +25,12 @@ use std::path::PathBuf;
 struct Config {
     #[serde(default = "default_tcp")]
     bind_tcp: String,
+    /// Échappatoire explicite au garde loopback de `bind_tcp` : à true le
+    /// bind est accepté hors loopback (conteneur, réseau privé isolé) et
+    /// un warn est journalisé à chaque démarrage — l'auth `daemon.token`
+    /// reste exigée sur chaque connexion TCP.
+    #[serde(default)]
+    allow_non_loopback_tcp: bool,
     /// Interface web servie par le démon (AC#14) — loopback uniquement,
     /// accès distant via `ssh -L`. Absent = désactivé.
     #[serde(default)]
@@ -38,7 +45,7 @@ struct Config {
     #[serde(default = "default_true")]
     auto_resume: bool,
     #[serde(default)]
-    agents: HashMap<String, AgentConf>,
+    agents: HashMap<String, server::AgentConf>,
     #[serde(default)]
     retention: server::RetentionCfg,
     /// Communication agent↔agent (serveur MCP injecté dans les sessions).
@@ -48,6 +55,11 @@ struct Config {
     /// `enabled = true`, bascule à chaud par RPC OrchestratorSet.
     #[serde(default)]
     backlog_orchestrator: server::OrchCfg,
+    /// File de revue locale générique (server/rq.rs) — opt-in via
+    /// `enabled = true`, section `[review_queue]`, bascule à chaud
+    /// par RPC ReviewQueueConfig / composant `review-queue`.
+    #[serde(default)]
+    review_queue: server::ReviewQueueCfg,
     /// Compact automatique au seuil de contexte : `[compact]` global,
     /// override par agent `[agents.<id>.compact]`, override par session
     /// via setcfg `ac.compact_*` (compact.json).
@@ -58,43 +70,24 @@ struct Config {
     /// (session/watch.rs, server::watchdog).
     #[serde(default)]
     watchdog: server::WatchdogCfg,
+    /// Skills agents embarqués : synchronisés dans les répertoires
+    /// scannés par chaque provider au spawn et au boot (skills.rs) —
+    /// `false` désactive globalement, `[agents.<id>] provision_skills
+    /// = false` par profil.
+    #[serde(default = "default_true")]
+    provision_skills: bool,
     /// Forges de review au-delà de GitHub : `[[forges]]` {type, hosts,
-    /// token_env} — détection des URLs GitLab/Gerrit dans les sorties
-    /// outils (voir docs/forges.md). github.com + gitlab.com implicites.
+    /// token_env, transport} — détection des URLs GitLab/Gerrit dans
+    /// les sorties outils et transport du pipeline (gh/rest/glab/
+    /// mcp→rest/git — voir docs/forges.md). github.com + gitlab.com
+    /// implicites.
     #[serde(default)]
     forges: Vec<forges::ForgeCfg>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct AgentConf {
-    name: Option<String>,
-    command: Vec<String>,
+    /// Overrides `[catalog.<name>]` des entrées du catalogue embarqué
+    /// (repo/homepage/défauts de params — cf. server::CatalogPatch).
+    /// Repointer une recette vers un fork/miroir sans recompiler.
     #[serde(default)]
-    env: HashMap<String, String>,
-    /// Override du compact auto pour ce profil agent
-    /// (`[agents.<id>.compact]`) — session > agent > global.
-    #[serde(default)]
-    compact: server::CompactPartial,
-    /// Agents vivants simultanés max pour ce profil (défaut 6, 0 = illimité).
-    #[serde(default)]
-    max_instances: Option<u32>,
-    /// Commande liste du catalogue complet des modèles (variantes hors
-    /// annonce ACP) — ex. "devin models list".
-    #[serde(default)]
-    catalogue_cmd: Option<String>,
-    /// Template shell `{native_sid}`/`{model}` pour persister un modèle
-    /// catalogue-only côté provider (ex. "devin -r {native_sid} --model {model}").
-    #[serde(default)]
-    model_override_cmd: Option<String>,
-    /// Modèles sélectionnables hors annonce ACP — `[{value=…, label=…}]`
-    /// (ex. variantes Fable de claude-code-acp que l'adaptateur n'annonce pas).
-    #[serde(default)]
-    extra_models: Vec<proto::ExtraModel>,
-    /// Modèles advisor proposables pour les sessions du profil — active
-    /// l'injection `advisorModel` via `_meta.claudeCode.options` au spawn
-    /// (mécanisme claude-code-acp). Ex. ["fable", "opus", "sonnet"].
-    #[serde(default)]
-    advisor_models: Vec<String>,
+    catalog: HashMap<String, server::CatalogPatch>,
 }
 
 fn default_tcp() -> String {
@@ -109,6 +102,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             bind_tcp: default_tcp(),
+            allow_non_loopback_tcp: false,
             bind_http: None,
             web_dir: None,
             auto_resume: true,
@@ -116,9 +110,12 @@ impl Default for Config {
             retention: server::RetentionCfg::default(),
             a2a: server::A2aCfg::default(),
             backlog_orchestrator: server::OrchCfg::default(),
+            review_queue: server::ReviewQueueCfg::default(),
             compact: server::CompactCfg::default(),
             watchdog: server::WatchdogCfg::default(),
+            provision_skills: true,
             forges: Vec::new(),
+            catalog: HashMap::new(),
         }
     }
 }
@@ -144,46 +141,199 @@ fn parse_cli() -> Result<Cli> {
             "--web-dir" => {
                 cli.web_dir = Some(it.next().context("--web-dir <path>")?);
             }
-            other => anyhow::bail!("argument inconnu: {other}"),
+            other => anyhow::bail!("unknown argument: {other}"),
         }
     }
     Ok(cli)
 }
 
-/// Le listener web ne doit JAMAIS exposer le démon sur le réseau :
-/// loopback strict, l'accès distant passe par le tunnel SSH (`ssh -L`).
-fn check_loopback(addr: &str) -> Result<()> {
-    let host = addr
-        .rsplit_once(':')
-        .map(|(h, _)| h.trim_matches(['[', ']']))
-        .unwrap_or_default();
+/// Vrai si `addr` se résout et que TOUTES les SocketAddr sont loopback
+/// (127.0.0.0/8 ou ::1) : un enregistrement mixte loopback+externe
+/// exposerait le port. Échec de résolution → faux.
+async fn addr_is_loopback(addr: &str) -> bool {
+    match tokio::net::lookup_host(addr).await {
+        Ok(it) => {
+            let addrs: Vec<_> = it.collect();
+            !addrs.is_empty() && addrs.iter().all(|sa| sa.ip().is_loopback())
+        }
+        Err(_) => false,
+    }
+}
+
+/// Les listeners du démon ne doivent JAMAIS exposer le démon sur le
+/// réseau : loopback strict, l'accès distant passe par le tunnel SSH
+/// (`ssh -L`). `name` = la clé de config fautive, `escape` = la clé
+/// d'échappatoire éventuelle citée par l'erreur (`bind_tcp` en a une,
+/// la web UI non) — le message indique exactement quoi corriger.
+/// L'adresse est résolue comme le fera le bind (littéral IP ou nom —
+/// `localhost` reste admis) et n'est acceptée que si TOUTES les
+/// SocketAddr résolues sont loopback (127.0.0.0/8 ou ::1) : un
+/// enregistrement mixte loopback+externe exposerait le port.
+async fn check_loopback(name: &str, addr: &str, escape: Option<&str>) -> Result<()> {
     anyhow::ensure!(
-        matches!(host, "127.0.0.1" | "localhost" | "::1"),
-        "bind_http « {addr} » n'est pas loopback — utilisez 127.0.0.1 / ::1 \
-         (l'accès distant se fait via ssh -L, jamais par exposition réseau)"
+        addr_is_loopback(addr).await,
+        "{name} « {addr} » is not loopback — use 127.0.0.1 / ::1 \
+         (remote access goes through `ssh -L`, never network exposure){}",
+        escape
+            .map(|k| format!(", or set `{k} = true` to expose anyway"))
+            .unwrap_or_default()
     );
     Ok(())
 }
 
-/// Token d'accès web : aléa /dev/urandom (32 o → 64 hex), persisté
-/// `<root>/web.token` mode 600 — l'utilisateur le copie dans l'URL ou
-/// le colle dans le dialogue du front (`acctl status` l'affiche aussi
-/// via daemon_status.web.url).
-fn gen_web_token(root: &std::path::Path) -> Result<String> {
+/// Environnement conteneur ? Marqueurs standards : `/.dockerenv`
+/// (Docker), `/run/.containerenv` (podman/systemd-nspawn) et le cgroup
+/// de PID 1 (docker, kubepods, containerd, lxc, podman/libpod, cri-o…).
+/// Dans un conteneur, binder `0.0.0.0` est le SEUL moyen d'être joint
+/// (docker-proxy ne DNAT que vers l'IP eth0, pas la loopback interne)
+/// et l'exposition réelle est bornée par le port publishing de
+/// l'orchestrateur — le garde loopback y est donc rétrogradé en warn.
+/// `AGENTCONTROL_CONTAINER=1|0` force le verdict (tests, conteneurs
+/// sans marqueur — nested, userns, runtime exotique).
+fn in_container() -> bool {
+    if let Ok(v) = std::env::var("AGENTCONTROL_CONTAINER") {
+        return matches!(v.trim(), "1" | "true" | "yes" | "on");
+    }
+    container_markers(
+        std::path::Path::new("/.dockerenv"),
+        std::path::Path::new("/run/.containerenv"),
+        std::path::Path::new("/proc/1/cgroup"),
+    )
+}
+
+/// Verdict conteneur sur des chemins injectés — testable hors Docker.
+fn container_markers(
+    dockerenv: &std::path::Path,
+    containerenv: &std::path::Path,
+    cgroup: &std::path::Path,
+) -> bool {
+    dockerenv.is_file()
+        || containerenv.is_file()
+        || std::fs::read_to_string(cgroup)
+            .map(|s| {
+                let s = s.to_ascii_lowercase();
+                [
+                    "docker",
+                    "kubepods",
+                    "containerd",
+                    "libpod",
+                    "podman",
+                    "lxc",
+                    "cri-o",
+                    "crio",
+                    "garden",
+                ]
+                .iter()
+                .any(|k| s.contains(k))
+            })
+            .unwrap_or(false)
+}
+
+/// Jeton 64 hex — 32 octets /dev/urandom. Source partagée par
+/// `web.token` (accès web UI) et `daemon.token` (auth du port TCP).
+fn new_token() -> Result<String> {
     use std::io::Read;
     let mut b = [0u8; 32];
     std::fs::File::open("/dev/urandom")
         .context("/dev/urandom")?
         .read_exact(&mut b)?;
-    let token: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    let p = root.join("web.token");
-    std::fs::write(&p, &token).context("écriture web.token")?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
+/// Écriture atomique `<name>.part` + `rename`, mode 0600 dès la
+/// création — le jeton n'est jamais tronqué à moitié écrit ni lisible
+/// par un autre utilisateur dans une fenêtre d'umask.
+fn write_token_file(path: &std::path::Path, token: &str) -> Result<()> {
+    use std::io::Write;
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".part");
+    let tmp = path.with_file_name(tmp_name);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(&tmp)
+        .and_then(|mut f| f.write_all(token.as_bytes()))
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    // Windows refuse le rename sur une cible existante — micro-fenêtre
+    // acceptable (l'accès au port TCP est déjà un privilège local).
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(path);
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    // Le rename conserve les perms du .part — on refixe au cas où un
+    // ancien .part traînait avec un mode plus large que 0600.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
-    Ok(token)
+    Ok(())
+}
+
+/// Format attendu d'un jeton persisté : 32 octets aléatoires rendus en
+/// 64 caractères hexadécimaux (`new_token`). Un fichier non vide mais
+/// d'une autre forme est traité comme corrompu et régénéré.
+fn is_token_shape(token: &str) -> bool {
+    token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Cycle de vie `daemon.token` (audit post-incident) : seuls le boot
+/// (`load_or_create_token` ci-dessous) et `token_rotate`
+/// (`server::misc::h_token_rotate` → `regen_token`) écrivent ce fichier.
+/// `selfupdate`, les composants gérés et `acctl daemon-update` ne le
+/// touchent pas ; `web.token` partage `regen_token` mais a son propre
+/// cycle (régénéré à chaque boot). L'écriture est atomique
+/// (`write_token_file` : `.part` + rename, 0600) — un `daemon.token.part`
+/// orphelin n'est jamais lu. Au boot, un fichier absent, vide ou
+/// malformé est régénéré ; un jeton valide est réutilisé tel quel pour
+/// survivre aux restarts sans invalider les clients.
+/// Jeton de service persisté (`<root>/<name>`, 0600) : réutilise le
+/// fichier existant s'il est valide — `daemon.token` doit survivre
+/// aux restarts sinon chaque boot invaliderait les clients. Resserre
+/// les perms d'un fichier hérité trop lisible.
+fn load_or_create_token(root: &std::path::Path, name: &str) -> Result<String> {
+    let p = root.join(name);
+    match std::fs::read_to_string(&p) {
+        Ok(t) => {
+            let t = t.trim().to_string();
+            if is_token_shape(&t) {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+                }
+                tracing::info!("{name} reused existing");
+                return Ok(t);
+            }
+            if !t.is_empty() {
+                tracing::warn!("{name} malformed — regenerating");
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
+    }
+    let t = regen_token(root, name)?;
+    tracing::info!("{name} generated (new install/root)");
+    Ok(t)
+}
+
+/// (Re)génère le jeton — neuf et atomique. `daemon.token` : appelé par
+/// `token_rotate` en plus du boot.
+pub(crate) fn regen_token(root: &std::path::Path, name: &str) -> Result<String> {
+    let t = new_token()?;
+    write_token_file(&root.join(name), &t)?;
+    Ok(t)
+}
+
+/// Token d'accès web : régénéré à chaque boot (les URLs du front sont
+/// éphémères), persisté `<root>/web.token` mode 600 — l'utilisateur le
+/// copie dans l'URL ou le colle dans le dialogue du front
+/// (`acctl status` l'affiche aussi via daemon_status.web.url).
+fn gen_web_token(root: &std::path::Path) -> Result<String> {
+    regen_token(root, "web.token")
 }
 
 /// Source des assets de la web UI, par ordre : `--web-dir`/`web_dir`
@@ -197,7 +347,7 @@ fn resolve_assets(explicit: Option<&str>, root: &std::path::Path) -> Option<web:
         if p.join("index.html").is_file() {
             return Some(web::Assets::Dir(p));
         }
-        tracing::warn!("web_dir {d}: index.html absent — ignoré");
+        tracing::warn!("web_dir {d}: index.html missing — ignored");
     }
     if let Some(m) = web::embedded_assets() {
         return Some(web::Assets::Embed(m));
@@ -221,56 +371,6 @@ fn resolve_assets(explicit: Option<&str>, root: &std::path::Path) -> Option<web:
         .into_iter()
         .find(|p| p.join("index.html").is_file())
         .map(web::Assets::Dir)
-}
-
-fn default_agents() -> HashMap<String, AgentProfile> {
-    let mut m = HashMap::new();
-    let mut devin_env = HashMap::new();
-    devin_env.insert("DEVIN_PERMISSION_MODE".to_string(), "{mode}".to_string());
-    m.insert(
-        "devin".into(),
-        AgentProfile {
-            name: "Devin CLI".into(),
-            command: vec!["devin".into(), "acp".into()],
-            env: devin_env,
-            compact: server::CompactPartial::default(),
-            max_instances: server::DEFAULT_MAX_INSTANCES,
-            catalogue_cmd: None,
-            model_override_cmd: None,
-            extra_models: Vec::new(),
-            advisor_models: Vec::new(),
-        },
-    );
-    // Cursor CLI — ACP natif (`agent acp` / `cursor-agent acp`, même
-    // binaire : `agent` est un alias d'install). argv[0] est résolu en
-    // chemin absolu au boot quand c'est possible : `agent` est un nom
-    // générique (collision possible) — la résolution fige le binaire
-    // concret trouvé, et `available`/spawn le re-résolvent à chaud via
-    // `command_path` (un Cursor installé APRÈS le boot reste
-    // `available` grâce au repli nu « cursor-agent » + PATH élargi).
-    // La commande reste surchargeable : `[agents.cursor]` dans
-    // config.toml ou le composant interne `agents` (options →
-    // composants).
-    let cursor_bin = ["cursor-agent", "agent"]
-        .iter()
-        .find_map(|c| server::misc::command_path(c))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "cursor-agent".into());
-    m.insert(
-        "cursor".into(),
-        AgentProfile {
-            name: "Cursor CLI".into(),
-            command: vec![cursor_bin, "acp".into()],
-            env: HashMap::new(),
-            compact: server::CompactPartial::default(),
-            max_instances: server::DEFAULT_MAX_INSTANCES,
-            catalogue_cmd: None,
-            model_override_cmd: None,
-            extra_models: Vec::new(),
-            advisor_models: Vec::new(),
-        },
-    );
-    m
 }
 
 fn home_dir() -> PathBuf {
@@ -335,14 +435,14 @@ async fn run() -> Result<()> {
     // fichier — y compris l'erreur fatale, émise AVANT son drop.
     let _guard = logging::init(&root);
     tracing::info!(
-        "=== agentcontrol-daemon v{} démarré (pid {}) — logs: {} ===",
+        "=== agentcontrol-daemon v{} started (pid {}) — logs: {} ===",
         env!("CARGO_PKG_VERSION"),
         std::process::id(),
         root.join("logs").display()
     );
     let res = serve(&root).await;
     if let Err(e) = &res {
-        tracing::error!("arrêt sur erreur fatale: {e:#}");
+        tracing::error!("stopped on fatal error: {e:#}");
     }
     res
 }
@@ -358,7 +458,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let crashed = match read_pid_marker(&pid_path)? {
         PidMarker::Absent => false,
         PidMarker::Running(pid) => {
-            anyhow::bail!("une autre instance agentcontrol-daemon tourne déjà (pid {pid})");
+            anyhow::bail!("another agentcontrol-daemon instance is already running (pid {pid})");
         }
         PidMarker::Stale => true,
     };
@@ -366,7 +466,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // Config optionnelle
     let cfg_path = root.join("config.toml");
     let cfg: Config = if cfg_path.exists() {
-        toml::from_str(&std::fs::read_to_string(&cfg_path)?).context("config.toml invalide")?
+        toml::from_str(&std::fs::read_to_string(&cfg_path)?).context("invalid config.toml")?
     } else {
         Config::default()
     };
@@ -376,41 +476,44 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let bind_http = cli.bind_http.or(cfg.bind_http.clone());
     let web_dir_cfg = cli.web_dir.or(cfg.web_dir.clone());
 
-    let mut agents = default_agents();
-    for (id, c) in cfg.agents {
-        agents.insert(
-            id.clone(),
-            AgentProfile {
-                name: c.name.unwrap_or(id),
-                command: c.command,
-                env: c.env,
-                compact: c.compact,
-                max_instances: c.max_instances.unwrap_or(server::DEFAULT_MAX_INSTANCES),
-                catalogue_cmd: c.catalogue_cmd,
-                model_override_cmd: c.model_override_cmd,
-                extra_models: c.extra_models,
-                advisor_models: c.advisor_models,
-            },
-        );
-    }
+    // Merge built-ins + [agents.*] + auto-découverte PATH — la même
+    // fonction que le hot-reload (agents_cfg.rs).
+    let agents = server::agents_cfg::full_agent_profiles(cfg.agents);
+
+    // Jeton d'authentification du port TCP — créé ici (avant tout
+    // bind) : le loopback ne vaut pas isolation par utilisateur, un
+    // autre compte local ou un `ssh -L` atteint le port.
+    let tcp_token: std::sync::Arc<str> =
+        std::sync::Arc::from(load_or_create_token(root, "daemon.token")?);
 
     let (daemon, resumable) = Daemon::open(
         root.to_path_buf(),
         agents,
         cfg.retention.clone(),
         cfg.a2a.clone(),
-        forges::Forges::resolve(&cfg.forges),
+        cfg.forges.clone(),
         cfg.bind_tcp.clone(),
         cfg.backlog_orchestrator.clone(),
+        cfg.review_queue.clone(),
         cfg.compact.clone(),
         cfg.watchdog.clone(),
+        cfg.provision_skills,
+        cfg.catalog.clone(),
+        tcp_token,
     )
     .await?;
     tracing::info!(
-        "{} session(s) chargée(s), root={}, agents: {}",
+        "{} session(s) loaded, root={}, agents: {}",
         daemon.sessions.read().await.len(),
         root.display(),
-        daemon.agents.read().await.keys().cloned().collect::<Vec<_>>().join(", ")
+        daemon
+            .agents
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     // Socket Unix
@@ -425,7 +528,35 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         let _ = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600));
     }
 
-    // TCP loopback (pour tunnel SSH `ssh -L`)
+    // TCP loopback (pour tunnel SSH `ssh -L`) — même garde que
+    // bind_http : un bind_tcp hors loopback exposerait le démon sur le
+    // réseau. Deux échappatoires : `allow_non_loopback_tcp` explicite,
+    // et la détection conteneur — en conteneur `0.0.0.0` est le seul
+    // bind joignable (docker-proxy ne DNAT que vers l'IP eth0) et
+    // l'exposition réelle est bornée par le port publishing (incident
+    // v0.11.0-rc.2 : le garde transformait le devcontainer en
+    // crash-loop). Dans les deux cas un warn est journalisé à chaque
+    // démarrage — l'auth daemon.token reste exigée sur chaque connexion.
+    // Hors conteneur le fatal est conservé.
+    if !addr_is_loopback(&cfg.bind_tcp).await {
+        if cfg.allow_non_loopback_tcp {
+            tracing::warn!(
+                "allow_non_loopback_tcp — bind_tcp « {} » is exposed outside \
+                 loopback; every TCP connection still requires daemon.token",
+                cfg.bind_tcp
+            );
+        } else if in_container() {
+            tracing::warn!(
+                "bind_tcp « {} » is not loopback — accepted: container \
+                 environment detected (exposure bounded by the runtime's \
+                 port publishing; every TCP connection still requires \
+                 daemon.token)",
+                cfg.bind_tcp
+            );
+        } else {
+            check_loopback("bind_tcp", &cfg.bind_tcp, Some("allow_non_loopback_tcp")).await?;
+        }
+    }
     let tcp_listener = tokio::net::TcpListener::bind(&cfg.bind_tcp)
         .await
         .with_context(|| format!("bind {}", cfg.bind_tcp))?;
@@ -433,18 +564,23 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // Listener web (opt-in) : SPA + WS/RPC/media loopback, token dans
     // web.token. Une panne/erreur de ce listener ne doit pas abattre le
     // démon → tâche séparée, hors du select de shutdown.
+    // Garde loopback SANS échappatoire conteneur, contrairement à
+    // bind_tcp : la web UI expose un terminal et le filesystem —
+    // surface bien plus large que la RPC authentifiée. En conteneur,
+    // la garder sur 127.0.0.1 et publier le port reste la bonne
+    // topologie (le client y accède via tunnel SSH comme ailleurs).
     if let Some(addr) = &bind_http {
-        check_loopback(addr)?;
+        check_loopback("bind_http", addr, None).await?;
         let token = gen_web_token(root)?;
         let assets = resolve_assets(web_dir_cfg.as_deref(), root);
         match &assets {
             Some(web::Assets::Embed(m)) => {
-                tracing::info!("web assets: {} fichier(s) embarqué(s)", m.len())
+                tracing::info!("web assets: {} embedded file(s)", m.len())
             }
             Some(web::Assets::Dir(d)) => tracing::info!("web assets: {}", d.display()),
             None => tracing::warn!(
-                "assets web introuvables (ni embed, ni root/web, ni exe/web, \
-                 ni client/dist) — page placeholder servie"
+                "web assets not found (neither embed, nor root/web, nor exe/web, \
+                 nor client/dist) — serving placeholder page"
             ),
         }
         let http_listener = tokio::net::TcpListener::bind(addr)
@@ -461,7 +597,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     }
 
     tracing::info!(
-        "listening: unix:{} + {} | rétention: journal>{}MB→{}MB, blobs<{}MB, purge_days={}",
+        "listening: unix:{} + {} | retention: journal>{}MB→{}MB, blobs<{}MB, purge_days={}",
         sock_path.display(),
         cfg.bind_tcp,
         cfg.retention.journal_max_mb,
@@ -472,8 +608,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
 
     // Listeners bindés → l'instance est la nôtre : le marqueur nous
     // représente jusqu'à un arrêt propre (voir la branche signal).
-    std::fs::write(&pid_path, std::process::id().to_string())
-        .context("écriture daemon.pid")?;
+    std::fs::write(&pid_path, std::process::id().to_string()).context("writing daemon.pid")?;
 
     let d1 = daemon.clone();
     let d2 = daemon.clone();
@@ -493,13 +628,42 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // porte l'activation (opt-in config ou bascule RPC à chaud).
     daemon.orch_boot();
 
+    // File de revue locale : même mécanique — la boucle tourne
+    // toujours, l'activation est portée par la phase du composant.
+    daemon.rq_boot();
+
+    // Re-scan périodique des `[agents.*]` de config.toml : profils
+    // déclarés/modifiés/supprimés à la main pris en compte à chaud.
+    daemon.agents_rescan_boot();
+
+    // Idem `[[forges]]` : hôtes gitlab/gerrit édités à la main dans
+    // config.toml → nouveau set de détection/sync sans restart.
+    daemon.forges_rescan_boot();
+
+    // Fraîcheur des capacités par profil (item #268) : re-sonde
+    // périodique des profils dont l'instantané agent_caps.json est
+    // absent ou périmé — un profil auto-découvert post-boot (#260) ou
+    // une annonce provider périmée sont rattrapés sans action manuelle.
+    daemon.caps_sweep_boot();
+
+    // Rattrapage acp-* au boot (item #289) : un update depuis un
+    // updater buggé (≤ 0.10.4-rc.9) n'a pas posé les adaptateurs
+    // maison — le nouveau démon les installe depuis sa propre
+    // release, une fois par version. Non bloquant : spawn_blocking,
+    // agent_path_dirs() rescanne le dossier de l'exe à chaque
+    // list_agents → effet immédiat sans restart.
+    {
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || selfupdate::acp_bootstrap(&root));
+    }
+
     if crashed && !resumable.is_empty() {
         if cfg.auto_resume {
             let d3 = daemon.clone();
             tokio::spawn(async move { d3.auto_resume(resumable).await });
         } else {
             tracing::info!(
-                "arrêt précédent brutal — {} session(s) active(s), reprise auto désactivée (auto_resume=false)",
+                "previous unclean shutdown — {} active session(s), auto resume disabled (auto_resume=false)",
                 resumable.len()
             );
         }
@@ -513,16 +677,16 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let d_shutdown = daemon.clone();
     let clean = tokio::select! {
         _ = server::accept_unix(d1, unix_listener) => {
-            tracing::error!("accept_unix a retourné — arrêt inattendu");
+            tracing::error!("accept_unix returned — unexpected stop");
             false
         }
         _ = server::accept_tcp(daemon, tcp_listener) => {
-            tracing::error!("accept_tcp a retourné — arrêt inattendu");
+            tracing::error!("accept_tcp returned — unexpected stop");
             false
         }
         sig = shutdown_signal() => {
             tracing::info!(
-                "signal {sig} reçu — arrêt (les sessions restent journalisées sur disque)"
+                "signal {sig} received — stopping (sessions stay journaled on disk)"
             );
             true
         }
@@ -535,7 +699,10 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     if clean {
         let _ = std::fs::remove_file(&pid_path);
     }
-    tracing::info!("=== agentcontrol-daemon arrêté (pid {}) ===", std::process::id());
+    tracing::info!(
+        "=== agentcontrol-daemon stopped (pid {}) ===",
+        std::process::id()
+    );
     Ok(())
 }
 
@@ -553,7 +720,7 @@ fn read_pid_marker(path: &std::path::Path) -> Result<PidMarker> {
     let txt = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(PidMarker::Absent),
-        Err(e) => return Err(e).context("lecture daemon.pid"),
+        Err(e) => return Err(e).context("reading daemon.pid"),
     };
     let Ok(pid) = txt.trim().parse::<u32>() else {
         // Contenu illisible : écriture interrompue → arrêt brutal aussi.
@@ -586,9 +753,133 @@ async fn shutdown_signal() -> &'static str {
             _ = term.recv() => "SIGTERM",
         },
         Err(e) => {
-            tracing::warn!("handler SIGTERM indisponible: {e}");
+            tracing::warn!("SIGTERM handler unavailable: {e}");
             let _ = tokio::signal::ctrl_c().await;
             "SIGINT"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("ac-token-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn daemon_token_reused_across_restarts() {
+        let root = tmpdir("reuse");
+        let first = load_or_create_token(&root, "daemon.token").unwrap();
+        assert!(is_token_shape(&first));
+        // Second boot sur le même root = restart : le fichier gagne.
+        let second = load_or_create_token(&root, "daemon.token").unwrap();
+        assert_eq!(first, second);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn daemon_token_empty_or_malformed_regenerated() {
+        let root = tmpdir("regen");
+        for (i, contents) in ["", "   \n", "not-a-token", "abc\nextra"]
+            .iter()
+            .enumerate()
+        {
+            let p = root.join(format!("case-{i}.token"));
+            std::fs::write(&p, contents).unwrap();
+            let t = load_or_create_token(&root, &format!("case-{i}.token")).unwrap();
+            assert!(is_token_shape(&t), "{contents:?} -> {t}");
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), t);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn daemon_token_orphan_part_never_read() {
+        let root = tmpdir("part");
+        // Jeton valide + .part orphelin : le .part est ignoré, pas de regen.
+        let kept = "a".repeat(64);
+        std::fs::write(root.join("daemon.token"), &kept).unwrap();
+        std::fs::write(root.join("daemon.token.part"), "garbage").unwrap();
+        assert_eq!(load_or_create_token(&root, "daemon.token").unwrap(), kept);
+        // Sans jeton principal, un .part valide ne doit pas être promu.
+        std::fs::remove_file(root.join("daemon.token")).unwrap();
+        std::fs::write(root.join("daemon.token.part"), "b".repeat(64)).unwrap();
+        let t = load_or_create_token(&root, "daemon.token").unwrap();
+        assert!(is_token_shape(&t));
+        assert_ne!(t, "b".repeat(64));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn regen_token_rotates_atomically() {
+        let root = tmpdir("rotate");
+        let first = load_or_create_token(&root, "daemon.token").unwrap();
+        let second = regen_token(&root, "daemon.token").unwrap();
+        assert_ne!(first, second);
+        assert!(is_token_shape(&second));
+        assert_eq!(
+            std::fs::read_to_string(root.join("daemon.token")).unwrap(),
+            second
+        );
+        assert!(!root.join("daemon.token.part").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Le garde n'admet que du loopback résolu — 127.0.0.0/8 entier,
+    // ::1 et les noms (`localhost`) — et refuse jokers et adresses
+    // externes, SocketAddr par SocketAddr.
+    #[tokio::test]
+    async fn loopback_only() {
+        for a in [
+            "127.0.0.1:7331",
+            "127.0.0.2:7331",
+            "[::1]:7331",
+            "localhost:7331",
+        ] {
+            assert!(
+                check_loopback("t", a, None).await.is_ok(),
+                "{a} should pass"
+            );
+        }
+        for a in ["0.0.0.0:7331", "192.168.1.10:7331", "[::]:7331"] {
+            assert!(
+                check_loopback("t", a, None).await.is_err(),
+                "{a} should fail"
+            );
+        }
+    }
+
+    // Détection conteneur sur chemins injectés : /.dockerenv ou
+    // /run/.containerenv suffisent ; sinon on grep le cgroup de PID 1
+    // (docker, kubepods, containerd, lxc, podman…). Chemins absents →
+    // faux, jamais de panique.
+    #[test]
+    fn container_markers_detects() {
+        let dir = std::env::temp_dir().join(format!("ac-cmark-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let none = dir.join("absent");
+        let docker = dir.join(".dockerenv");
+        let containerenv = dir.join("containerenv");
+        let cgroup = dir.join("cgroup");
+        std::fs::write(&docker, "").unwrap();
+        std::fs::write(&cgroup, "12:memory:/docker/abc123\n").unwrap();
+
+        assert!(container_markers(&docker, &none, &none));
+        assert!(!container_markers(&none, &containerenv, &none));
+        std::fs::write(&containerenv, "engine=podman\n").unwrap();
+        assert!(container_markers(&none, &containerenv, &none));
+        assert!(container_markers(&none, &none, &cgroup));
+        // cgroup v2 sans marqueur → pas conteneur.
+        std::fs::write(&cgroup, "0::/user.slice/user-1000.slice\n").unwrap();
+        assert!(!container_markers(&none, &none, &cgroup));
+        assert!(!container_markers(&none, &none, &none));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

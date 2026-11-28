@@ -9,8 +9,8 @@ use proto::{ComponentKind, ComponentSpec};
 
 /// argv de la sonde de version effective : `version_argv` de la spec
 /// > `version_argv` de l'entrée catalogue homonyme > `command` d'un
-/// `tool` (sa commande *est* sa sonde version). `~` est expansé par
-/// `run_version_probe` comme pour les autres argv de la spec.
+/// > `tool` (sa commande *est* sa sonde version). `~` est expansé par
+/// > `run_version_probe` comme pour les autres argv de la spec.
 pub(super) fn version_argv(spec: &ComponentSpec) -> Option<Vec<String>> {
     if let Some(argv) = &spec.version_argv {
         if !argv.is_empty() {
@@ -82,7 +82,7 @@ mod tests {
         assert_eq!(nums("agent-reviewer 0.3.1").unwrap(), [0, 3, 1]);
         assert_eq!(nums("v2").unwrap(), [2]);
         assert_eq!(nums("0.3.0-rc.1").unwrap(), [0, 3, 0]);
-        assert_eq!(nums("sans chiffre"), None);
+        assert_eq!(nums("no digits"), None);
         assert_eq!(nums(""), None);
     }
 
@@ -97,6 +97,6 @@ mod tests {
         assert!(!version_below_min("0.10.0", "0.3"));
         assert!(version_below_min("1.9", "2"));
         assert!(!version_below_min("illiso", "0.3"));
-        assert!(!version_below_min("0.2", "sans"));
+        assert!(!version_below_min("0.2", "none"));
     }
 }

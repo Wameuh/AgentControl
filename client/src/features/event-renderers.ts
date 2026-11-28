@@ -8,10 +8,13 @@
 import { $, copyText, esc, mkEv, q, showErr } from "../core/dom";
 import { linkify, mdRender } from "../core/format";
 import { call } from "../core/rpc";
+import { currentAccent, isAndroid } from "../core/chrome";
 import { app } from "../core/state";
 import type { AcEvent, CmdInfo, ConfigOption } from "../core/types";
+import { gemAccentSVG, gemSVG, type GemShape } from "../crystal";
 import { t } from "../i18n";
 import { icon, qIco } from "../ui/icons";
+import { tick } from "../mobile/haptics";
 
 // Seuils au-delà desquels une bulle user est repliée par défaut.
 const USER_FOLD_CHARS = 480;
@@ -23,11 +26,29 @@ const USER_FOLD_LINES = 5;
 // le DOM. WeakMap : libéré avec le nœud.
 const lastToolExcerpt = new WeakMap<HTMLElement, string>();
 
+/** Réponse à une question_request : JSON si possible, sinon `{answer: val}`,
+ *  `null` si vide. Partagé avec les cartes « À traiter » de l'accueil (N3). */
+export function parseAnswer(val: string | null): unknown {
+  if (val) {
+    try {
+      return JSON.parse(val);
+    } catch {
+      return { answer: val };
+    }
+  }
+  return null;
+}
+
 export class EventRenderer {
   // Réassignés au swap de session (cache par conversation) — publics pour
   // que ChatView puisse les stash/restaurer.
   toolBlocks = new Map<string, HTMLElement>();
   answered = new Set<string>();
+  /** Réponses dont le RPC `respond` est en vol — verrou anti double-envoi
+   *  distinct d'`answered` (rempli par les events *_resolved) : sans lui,
+   *  un second clic avant la résolution renverrait un doublon. Vidé en
+   *  finally à chaque respond ; swapé avec le reste de l'état de rendu. */
+  pending = new Set<string>();
   // Updates reçues avant leur bloc tool_call (bloc dans une page
   // d'historique pas encore chargée) — flushées quand le bloc est rendu.
   pendingToolUpdates = new Map<string, AcEvent[]>();
@@ -104,7 +125,6 @@ export class EventRenderer {
     if (ev.seq === 1) this.headSeen = true;
     switch (ev.type) {
       case "user_message": {
-        const d = mkEv("msg user", ev.seq);
         const txt = ev.text as string;
         // Prompt de spawn d'une session « service » (origin) = le 1er
         // user_message DU JOURNAL : identifiable seulement quand la
@@ -116,36 +136,12 @@ export class EventRenderer {
         const servicePrompt =
           !!ev.origin && this.userMsgs === 0 && this.headSeen;
         this.userMsgs += 1;
-        const body = document.createElement("div");
-        body.className = "um-body";
-        body.innerHTML =
+        const badges =
           (ev.origin
             ? `<span class="origin-badge">${esc(t("via"))} ${esc(ev.origin as string)}</span> `
             : "") +
-          (ev.steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "") +
-          linkify(esc(txt));
-        d.appendChild(body);
-        // Prompt long → replié par défaut, bouton pour déplier/replier.
-        if (
-          servicePrompt ||
-          txt.length > USER_FOLD_CHARS ||
-          txt.split("\n").length > USER_FOLD_LINES
-        ) {
-          d.classList.add("um-collapsed");
-          if (servicePrompt) d.classList.add("um-service");
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.className = "um-toggle";
-          const setLabel = (collapsed: boolean) => {
-            btn.innerHTML = `${icon("chev-down", "ic-caret")} ${esc(t(collapsed ? "um_expand" : "um_collapse"))}`;
-          };
-          setLabel(true);
-          btn.addEventListener("click", () => {
-            setLabel(d.classList.toggle("um-collapsed"));
-          });
-          d.appendChild(btn);
-        }
-        return d;
+          (ev.steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "");
+        return this.userBubble(mkEv("msg user", ev.seq), txt, badges, servicePrompt);
       }
       case "agent_text": {
         const d = mkEv("msg agent", ev.seq);
@@ -189,7 +185,8 @@ export class EventRenderer {
         const d = mkEv("resolved", ev.seq);
         const rid = ev.request_id as string;
         this.answered.add(rid);
-        d.innerHTML = `${icon("check")} ${esc(t("resolved") + ((ev.outcome ?? ev.answer) as string))}`;
+        const raw = ev.outcome ?? ev.answer;
+        d.innerHTML = `${icon("check")} ${esc(t("resolved") + formatResolved(raw))}`;
         const card = $("events").querySelector(`[data-req="${rid}"]`);
         if (card) card.classList.add("done");
         return d;
@@ -224,6 +221,15 @@ export class EventRenderer {
           app.current.context_size = ev.size as number;
           this.deps.ctxChanged();
         }
+        const d = mkEv("sysline", ev.seq);
+        d.hidden = true;
+        return d;
+      }
+      case "steps": {
+        // Étapes de tâche (skill ac-steps) : état interne — le panneau
+        // est alimenté en amont (main.ts) et la reconstruction passe
+        // par session_info.steps. Sysline masquée : conservation du
+        // tracking par seq sans bruit dans le chat (comme usage_update).
         const d = mkEv("sysline", ev.seq);
         d.hidden = true;
         return d;
@@ -263,12 +269,72 @@ export class EventRenderer {
         d.innerHTML = `${icon("sys")} ${esc(ev.text as string)}`;
         return d;
       }
+      case "history_replayed": {
+        // Fin d'un replay session/load « refill » (fork/rebind) : le journal a été reconstruit sans broadcast live —
+        // la queue affichée a été rechargée en amont (main.ts → open
+        // forcé), cet event journalisé marque la fin du contexte
+        // rejoué dans l'historique.
+        const d = mkEv("sysline", ev.seq);
+        d.textContent = t("history_replayed", {
+          n: (ev.events as number) ?? 0,
+        });
+        return d;
+      }
       default: {
         const d = mkEv("sysline", ev.seq);
         d.textContent = ev.type;
         return d;
       }
     }
+  }
+
+  /// Bulle user commune au rendu confirmé et à l'écho optimiste :
+  /// corps (badges + texte linkifié) + repli des prompts longs.
+  private userBubble(
+    d: HTMLElement,
+    txt: string,
+    badgesHtml: string,
+    servicePrompt = false,
+  ): HTMLElement {
+    const body = document.createElement("div");
+    body.className = "um-body";
+    body.innerHTML = badgesHtml + linkify(esc(txt));
+    d.appendChild(body);
+    // Prompt long → replié par défaut, bouton pour déplier/replier.
+    if (
+      servicePrompt ||
+      txt.length > USER_FOLD_CHARS ||
+      txt.split("\n").length > USER_FOLD_LINES
+    ) {
+      d.classList.add("um-collapsed");
+      if (servicePrompt) d.classList.add("um-service");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "um-toggle";
+      const setLabel = (collapsed: boolean) => {
+        btn.innerHTML = `${icon("chev-down", "ic-caret")} ${esc(t(collapsed ? "um_expand" : "um_collapse"))}`;
+      };
+      setLabel(true);
+      btn.addEventListener("click", () => {
+        setLabel(d.classList.toggle("um-collapsed"));
+      });
+      d.appendChild(btn);
+    }
+    return d;
+  }
+
+  /// Écho optimiste d'un envoi (composer.sendInput) : bulle user
+  /// identique au rendu confirmé mais marquée `um-pending` — opacité
+  /// réduite tant que le user_message du journal n'est pas arrivé
+  /// (file d'attente, réveil…). Pas de data-seq : le nœud n'est pas un
+  /// event, il est retiré à la réconciliation.
+  renderUserEcho(text: string, steer: boolean): HTMLElement {
+    const d = document.createElement("div");
+    d.className = "ev msg user um-pending";
+    d.dataset.pending = "1";
+    d.title = t("um_pending");
+    const badges = steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "";
+    return this.userBubble(d, text, badges);
   }
 
   /// Bouton « copier » en surimpression de chaque bloc de code markdown.
@@ -289,6 +355,15 @@ export class EventRenderer {
         });
       };
       wrap.appendChild(b);
+      // Mobile (S4) : un <pre> déborde l'écran 390px — bouton « retour à
+      // la ligne » à gauche du bouton copier. Android seul : le desktop
+      // garde le défilement horizontal comme unique comportement.
+      if (isAndroid()) {
+        const w = qIco("wrap", t("md_wrap"));
+        w.className = "md-wrap";
+        w.onclick = () => pre.classList.toggle("wrapped");
+        wrap.appendChild(w);
+      }
     }
   }
 
@@ -311,7 +386,8 @@ export class EventRenderer {
         ${ev.input ? '<pre class="tool-cmd"></pre>' : ""}
         <pre class="tool-out"></pre>
         ${ev.blob ? '<button class="btn-more">charger la sortie complète…</button>' : ""}
-        ${ev.diff ? `<pre class="tool-diff">${esc(ev.diff as string)}</pre>` : ""}
+        ${ev.diff ? `<pre class="tool-diff"></pre>` : ""}
+        ${ev.diff_blob ? '<button class="btn-diffmore"></button>' : ""}
       </div>`;
     const body = d.querySelector<HTMLElement>(".tool-body")!;
     const cmd = d.querySelector<HTMLElement>(".tool-cmd");
@@ -340,6 +416,8 @@ export class EventRenderer {
       pre.textContent = ev.excerpt as string;
       lastToolExcerpt.set(pre, ev.excerpt as string);
     }
+    const diffPre = d.querySelector<HTMLElement>(".tool-diff");
+    if (diffPre && ev.diff != null) diffPre.textContent = ev.diff as string;
     d.querySelector(".tool-head")!.addEventListener("click", () => {
       body.hidden = !body.hidden;
       d.classList.toggle("open", !body.hidden);
@@ -357,6 +435,44 @@ export class EventRenderer {
         });
         pre.textContent = r.data + (r.total > r.data.length ? `\n… (${r.total} o total)` : "");
         btn.remove();
+      });
+    }
+    // Diff externalisé (gros Write/Edit, #302) : `diff` ne porte que
+    // l'extrait — le patch complet se récupère du blob à la demande.
+    const dbtn = d.querySelector<HTMLButtonElement>(".btn-diffmore");
+    if (dbtn && diffPre && ev.diff_blob) {
+      dbtn.textContent = t("load_diff");
+      dbtn.addEventListener("click", async () => {
+        dbtn.disabled = true;
+        dbtn.textContent = t("loading");
+        try {
+          // Le blob peut faire plusieurs Mo — tranches de 1 Mio ;
+          // `size` = octets lus (data est du texte lossy, sa longueur
+          // ne mesure pas la tranche).
+          let out = "";
+          let off = 0;
+          let total = Infinity;
+          for (let i = 0; i < 16 && off < total; i++) {
+            const r = await call<{ data: string; total: number; size?: number }>("get_blob", {
+              session: app.current!.id,
+              blob: ev.diff_blob,
+              offset: off,
+              limit: 1 << 20,
+            });
+            total = r.total;
+            out += r.data;
+            off += r.size ?? r.data.length;
+            if (!r.data.length) break;
+          }
+          diffPre.textContent =
+            out + (off < total ? `\n… (${total} o total)` : "");
+        } catch (e) {
+          showErr(String(e));
+          dbtn.disabled = false;
+          dbtn.textContent = t("load_diff");
+          return;
+        }
+        dbtn.remove();
       });
     }
     return d;
@@ -470,41 +586,109 @@ export class EventRenderer {
   // Permissions & questions
   // -------------------------------------------------------------------------
 
+  /// Envoie la réponse à une permission/question : état « envoi » posé
+  /// AVANT le await (carte .pending, boutons désactivés, spinner sur le
+  /// bouton cliqué) pour que l'app ne paraisse pas figée pendant le
+  /// roundtrip — sur connexion lente il peut prendre des secondes.
+  /// `.done` reste réservé à la résolution confirmée ; en cas d'erreur
+  /// RPC on retire .pending et on réactive les contrôles (la demande est
+  /// peut-être encore vivante côté agent — jamais de .done).
+  private respondCard(
+    rid: string,
+    card: HTMLElement,
+    btn: HTMLElement,
+    reply: Record<string, unknown>,
+  ) {
+    if (this.answered.has(rid) || this.pending.has(rid)) return;
+    this.pending.add(rid);
+    card.classList.add("pending");
+    btn.classList.add("spin");
+    const controls = card.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input");
+    for (const c of controls) c.disabled = true;
+    void call("respond", {
+      session: app.current!.id,
+      request_id: rid,
+      ...reply,
+    })
+      .then(() => {
+        tick("resolve");
+        btn.classList.remove("spin");
+        card.classList.remove("pending");
+        card.classList.add("done");
+      })
+      .catch((e) => {
+        showErr(String(e));
+        btn.classList.remove("spin");
+        card.classList.remove("pending");
+        for (const c of controls) c.disabled = false;
+      })
+      .finally(() => this.pending.delete(rid));
+  }
+
+  /// État de la carte à la pose : résolue (event reçu avant le rendu)
+  /// ou envoi déjà en vol (réponse partie d'une autre surface).
+  private applyReqState(d: HTMLElement, rid: string) {
+    if (this.answered.has(rid)) {
+      d.classList.add("done");
+    } else if (this.pending.has(rid)) {
+      d.classList.add("pending");
+      for (const c of d.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input"))
+        c.disabled = true;
+    }
+  }
+
   private renderPermission(ev: AcEvent): HTMLElement {
     const d = mkEv("perm", ev.seq);
     d.dataset.req = ev.request_id as string;
     const opts = (ev.options as { option_id: string; name: string; kind: string }[]) ?? [];
     const kind = ev.kind as string | undefined;
     const detail = ev.detail as string | undefined;
+    // ExitPlanMode : le détail EST le plan proposé (markdown) — le
+    // rendre en markdown plutôt qu'en <pre> brute. Même heuristique
+    // que le détecteur exit-plan de l'orchestrateur (titre/kind).
+    const planMode = isExitPlanReq(ev.title as string, kind);
     d.innerHTML =
       `<div class="perm-title">${icon("lock")} ${esc(ev.title as string)}` +
       (kind ? ` <span class="perm-kind">${esc(kind)}</span>` : "") +
       `</div>` +
-      (detail ? `<pre class="perm-detail">${esc(detail)}</pre>` : "") +
+      (detail
+        ? planMode
+          ? `<div class="perm-detail md perm-plan"></div>`
+          : `<pre class="perm-detail">${esc(detail)}</pre>`
+        : "") +
       `<div class="perm-opts"></div>`;
+    if (planMode && detail) {
+      d.querySelector<HTMLElement>(".perm-plan")!.innerHTML = mdRender(detail);
+    }
     const box = d.querySelector<HTMLElement>(".perm-opts")!;
     for (const o of opts) {
       const b = document.createElement("button");
       b.textContent = o.name || o.option_id;
       b.className = o.kind.startsWith("reject") ? "btn-reject" : "btn-allow";
-      b.onclick = async () => {
-        if (this.answered.has(ev.request_id as string)) return;
-        await call("respond", {
-          session: app.current!.id,
-          request_id: ev.request_id,
+      // Lu par le dock mobile (perm-dock.ts) pour mettre allow_once en
+      // avant quel que soit l'ordre des options annoncé par l'agent.
+      b.dataset.kind = o.kind;
+      b.onclick = () =>
+        this.respondCard(ev.request_id as string, d, b, {
           option_id: o.option_id,
-        }).catch((e) => showErr(String(e)));
-        d.classList.add("done");
-      };
+        });
       box.appendChild(b);
     }
-    if (this.answered.has(ev.request_id as string)) d.classList.add("done");
+    this.applyReqState(d, ev.request_id as string);
     return d;
   }
 
   private renderQuestion(ev: AcEvent): HTMLElement {
     const d = mkEv("perm question", ev.seq);
     d.dataset.req = ev.request_id as string;
+    // Schéma de formulaire (elicitation ACP — AskUserQuestion de claude,
+    // ask_user_question des autres agents) : champs structurés plutôt
+    // que la saisie JSON libre.
+    const schema = ev.schema as { properties?: Record<string, unknown> } | undefined;
+    const props = schema?.properties;
+    if (props && typeof props === "object" && Object.keys(props).length > 0) {
+      return this.renderQuestionForm(d, ev, props as Record<string, Record<string, unknown>>);
+    }
     d.innerHTML = `
       <div class="perm-title">${icon("question")} ${esc(ev.message as string)}</div>
       <div class="q-row">
@@ -513,26 +697,193 @@ export class EventRenderer {
         <button class="btn-reject">${t("ignore_btn")}</button>
       </div>`;
     const input = d.querySelector<HTMLInputElement>(".q-input")!;
-    const answer = async (val: string | null) => {
-      if (this.answered.has(ev.request_id as string)) return;
-      let parsed: unknown = null;
-      if (val) {
-        try {
-          parsed = JSON.parse(val);
-        } catch {
-          parsed = { answer: val };
-        }
-      }
-      await call("respond", {
-        session: app.current!.id,
-        request_id: ev.request_id,
-        answer: parsed,
-      }).catch((e) => showErr(String(e)));
-      d.classList.add("done");
-    };
-    d.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = () => answer(input.value || "{}");
-    d.querySelector<HTMLButtonElement>(".btn-reject")!.onclick = () => answer(null);
-    if (this.answered.has(ev.request_id as string)) d.classList.add("done");
+    const answer = (val: string | null, btn: HTMLElement) =>
+      this.respondCard(ev.request_id as string, d, btn, {
+        answer: parseAnswer(val),
+      });
+    d.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = (e) =>
+      answer(input.value || "{}", e.currentTarget as HTMLElement);
+    d.querySelector<HTMLButtonElement>(".btn-reject")!.onclick = (e) =>
+      answer(null, e.currentTarget as HTMLElement);
+    this.applyReqState(d, ev.request_id as string);
     return d;
   }
+
+  /// Question avec schéma de formulaire : chaque propriété devient un
+  /// champ — `oneOf` → radios, `array`+`items.anyOf` → cases à cocher,
+  /// scalaire → saisie libre (string/number/boolean). La réponse est
+  /// l'objet `{clé: valeur}` transmis tel quel à l'agent via
+  /// `respond --answer` (l'adaptateur le replie dans l'outil).
+  private renderQuestionForm(
+    d: HTMLElement,
+    ev: AcEvent,
+    props: Record<string, Record<string, unknown>>,
+  ): HTMLElement {
+    const msg = (ev.message as string) || t("perm_title");
+    d.innerHTML =
+      `<div class="perm-title">${icon("question")} ${esc(msg)}</div>` +
+      `<div class="q-form"></div>` +
+      `<div class="q-row q-actions">` +
+      `<button class="btn-allow">${t("answer_btn")}</button>` +
+      `<button class="btn-reject">${t("ignore_btn")}</button>` +
+      `</div>`;
+    const form = d.querySelector<HTMLElement>(".q-form")!;
+    // key → {kind, options: consts bruts} pour reconstruire les valeurs
+    // JSON exactes (un `const` peut être nombre/booléen, pas seulement
+    // une chaîne).
+    const metas = new Map<string, { multi: boolean; consts: unknown[] }>();
+
+    for (const [key, pRaw] of Object.entries(props)) {
+      // Les schémas JSON admettent des formes inattendues (`true` comme
+      // propriété, `null` dans oneOf/anyOf…) : on normalise en objet et
+      // on filtre les options non-objet avant de lire .const/.title —
+      // sinon un TypeError figerait tout le formulaire.
+      const p = (pRaw && typeof pRaw === "object" ? pRaw : {}) as Record<string, unknown>;
+      const ptype = p.type as string | undefined;
+      const items =
+        p.items && typeof p.items === "object"
+          ? (p.items as Record<string, unknown>)
+          : null;
+      const rawOptions = Array.isArray(p.oneOf)
+        ? p.oneOf
+        : ptype === "array" && items && Array.isArray(items.anyOf)
+          ? items.anyOf
+          : null;
+      const options = rawOptions?.filter(
+        (o): o is Record<string, unknown> => !!o && typeof o === "object",
+      ) ?? null;
+      const field = document.createElement("div");
+      field.className = "q-field";
+      field.dataset.key = key;
+      const title = typeof p?.title === "string" && p.title ? p.title : null;
+      const desc = typeof p?.description === "string" && p.description ? p.description : null;
+      if (title) field.innerHTML += `<div class="q-label">${esc(title)}</div>`;
+      if (desc) field.innerHTML += `<div class="q-desc">${esc(desc)}</div>`;
+
+      if (options?.length) {
+        const multi = ptype === "array";
+        metas.set(key, { multi, consts: options.map((o) => o.const) });
+        const box = document.createElement("div");
+        box.className = "q-opts";
+        options.forEach((o, i) => {
+          const val = o.const;
+          const label =
+            typeof o.title === "string" && o.title ? o.title : String(val ?? "");
+          const od = typeof o.description === "string" && o.description ? o.description : null;
+          const lab = document.createElement("label");
+          lab.className = "q-opt";
+          // Gemme cristal = rendu du choix : ronde (radio, exclusif) ou
+          // carrée (checkbox, additif), ardoise au repos, teintée de
+          // l'accent du thème une fois cochée. L'input natif reste dans
+          // le label (masqué) : collect(), clavier et tests inchangés.
+          const shape: GemShape = multi ? "square" : "round";
+          lab.innerHTML =
+            `<input type="${multi ? "checkbox" : "radio"}" name="${esc(key)}" data-oi="${i}" class="q-sr" />` +
+            `<span class="q-gem" data-shape="${shape}" aria-hidden="true"></span>` +
+            `<span class="q-opt-t">${esc(label)}` +
+            (od ? `<span class="q-opt-d">${esc(od)}</span>` : "") +
+            `</span>`;
+          lab.querySelector(".q-gem")!.innerHTML = gemSVG("slate", shape);
+          box.appendChild(lab);
+        });
+        field.appendChild(box);
+      } else {
+        const inp = document.createElement("input");
+        inp.className = "q-input q-free";
+        if (ptype === "number" || ptype === "integer") inp.type = "number";
+        else if (ptype === "boolean") inp.type = "checkbox";
+        else inp.type = "text";
+        if (typeof p?.placeholder === "string") inp.placeholder = p.placeholder;
+        field.appendChild(inp);
+        metas.set(key, { multi: false, consts: [] });
+      }
+      form.appendChild(field);
+    }
+
+    // La gemme suit l'état coché : un changement sur une option repeint
+    // toutes les gemmes du groupe (.q-opts — les radios décochés par le
+    // navigateur n'émettent pas de change, on relit .checked).
+    form.addEventListener("change", (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLInputElement) || !t.closest(".q-opt")) return;
+      const scope = t.closest(".q-opts") ?? form;
+      for (const o of scope.querySelectorAll<HTMLInputElement>(".q-opt input")) {
+        const opt = o.closest<HTMLElement>(".q-opt")!;
+        const gem = opt.querySelector<HTMLElement>(".q-gem");
+        if (!gem) continue;
+        const shape = (gem.dataset.shape ?? "round") as GemShape;
+        opt.classList.toggle("on", o.checked);
+        gem.innerHTML = o.checked
+          ? gemAccentSVG(currentAccent(), shape)
+          : gemSVG("slate", shape);
+      }
+    });
+
+    const collect = (): Record<string, unknown> => {
+      const out: Record<string, unknown> = {};
+      for (const [key, meta] of metas) {
+        const field = form.querySelector<HTMLElement>(`[data-key="${CSS.escape(key)}"]`);
+        if (!field) continue;
+        if (meta.consts.length) {
+          const checked = [...field.querySelectorAll<HTMLInputElement>("input:checked")];
+          if (meta.multi) {
+            const vals = checked.map((c) => meta.consts[Number(c.dataset.oi)]);
+            if (vals.length) out[key] = vals;
+          } else if (checked.length) {
+            out[key] = meta.consts[Number(checked[0].dataset.oi)];
+          }
+          continue;
+        }
+        const inp = field.querySelector<HTMLInputElement>("input")!;
+        if (inp.type === "checkbox") {
+          out[key] = inp.checked;
+        } else {
+          const v = inp.value.trim();
+          if (v === "") continue;
+          const ptype = (props[key] as Record<string, unknown>)?.type;
+          out[key] = ptype === "number" || ptype === "integer" ? Number(v) : v;
+        }
+      }
+      return out;
+    };
+
+    const answer = (val: unknown, btn: HTMLElement) =>
+      this.respondCard(ev.request_id as string, d, btn, { answer: val });
+    d.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = (e) =>
+      answer(collect(), e.currentTarget as HTMLElement);
+    // « Ignorer » = sauter les questions : accept avec un contenu vide
+    // (l'agent voit des réponses vides et poursuit) — pas un cancel,
+    // qui interromprait le tour.
+    d.querySelector<HTMLButtonElement>(".btn-reject")!.onclick = (e) =>
+      answer({}, e.currentTarget as HTMLElement);
+    this.applyReqState(d, ev.request_id as string);
+    return d;
+  }
+}
+
+/** Réponse affichée sur la ligne « résolu » : les réponses de
+ *  formulaire sont des objets ({question_0: "…", question_1: […]}) —
+ *  JSON compact borné plutôt que « [object Object] ». */
+function formatResolved(v: unknown): string {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  let s: string;
+  try {
+    s = JSON.stringify(v) ?? String(v);
+  } catch {
+    s = String(v);
+  }
+  return s.length > 160 ? `${s.slice(0, 157)}…` : s;
+}
+
+/** Permission « sortie de plan » (ExitPlanMode / exit_plan_mode) :
+ *  titre ou kind le signalent — le détail porte le plan lui-même. */
+function isExitPlanReq(title: string, kind: string | undefined): boolean {
+  const s = `${title} ${kind ?? ""}`.toLowerCase();
+  return (
+    s.includes("exit_plan") ||
+    s.includes("exit-plan") ||
+    s.includes("exit plan") ||
+    kind === "switch_mode"
+  );
 }

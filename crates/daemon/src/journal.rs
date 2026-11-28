@@ -36,7 +36,7 @@ pub struct Journal {
 /// serait un faux.
 pub enum FirstPost {
     /// Premier `user_message` du cycle (seq/ts/texte intacts).
-    Found(Event),
+    Found(Box<Event>),
     /// La tête du journal a été supprimée par la compaction.
     Truncated,
     /// Pas de `user_message` dans la fenêtre scannée.
@@ -137,7 +137,12 @@ impl Journal {
 
     /// Les `limit` derniers événements avec seq < before_seq
     /// (before_seq None/0 → depuis la fin).
-    pub fn read_page(&self, dir: &Path, before_seq: Option<u64>, limit: usize) -> Result<Vec<Event>> {
+    pub fn read_page(
+        &self,
+        dir: &Path,
+        before_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
         let before = before_seq.filter(|b| *b > 0).unwrap_or(u64::MAX);
         let (start_off, n) = {
             let g = self.inner.lock().unwrap();
@@ -152,7 +157,11 @@ impl Journal {
             // nb d'events avec seq < before
             let n = g.offsets.partition_point(|(s, _)| *s < before);
             let start = n.saturating_sub(limit);
-            let off = if start < n { g.offsets[start].1 } else { return Ok(vec![]) };
+            let off = if start < n {
+                g.offsets[start].1
+            } else {
+                return Ok(vec![]);
+            };
             (off, n - start)
         };
         Self::read_from(dir, start_off, before, n)
@@ -310,42 +319,96 @@ impl Journal {
                 if spawn_prompt || legacy_prompt {
                     continue;
                 }
-                return Ok(FirstPost::Found(ev));
+                return Ok(FirstPost::Found(Box::new(ev)));
             }
         }
         Ok(FirstPost::Empty)
     }
 
     /// Rattrapage borné : les events avec seq > after_seq, mais au plus les
-    /// `cap` derniers — les plus vieux sont comptés dans `skipped` et
-    /// restent atteignables via `read_page` (pagination arrière). Un
-    /// subscribe sur un after_seq très ancien ne rejoue ainsi jamais un
-    /// journal entier, qui peut faire des centaines de Mo.
-    pub fn read_tail(&self, dir: &Path, after_seq: u64, cap: usize) -> Result<(Vec<Event>, u64)> {
-        let (start_off, skipped) = {
+    /// `cap` derniers ET `max_bytes` d'octets journal — les plus vieux sont
+    /// comptés dans `skipped` et restent atteignables via `read_page`
+    /// (pagination arrière). Un subscribe sur un after_seq très ancien ne
+    /// rejoue ainsi jamais un journal entier, qui peut faire des centaines
+    /// de Mo — et un journal d'events volumineux (gros diffs, longues
+    /// sorties) ne explose plus le budget : le cap « events » seul
+    /// laissait passer ~15 Mo pour 500 events (#269). Le 3e élément du
+    /// retour = octets journal des events retenus (≈ taille fil : la
+    /// trame Push n'ajoute que l'enveloppe ~session+50 o/evt).
+    /// Toujours au moins un event (le plus récent) : une frame unique
+    /// dépassant le budget reste indivisible sur le fil — l'exclure
+    /// gèlerait le curseur pour toujours.
+    pub fn read_tail(
+        &self,
+        dir: &Path,
+        after_seq: u64,
+        cap: usize,
+        max_bytes: u64,
+    ) -> Result<(Vec<Event>, u64, u64)> {
+        let (start_off, count, skipped, bytes) = {
             let g = self.inner.lock().unwrap();
             if g.offsets.is_empty() {
-                // Index mémoire vide → scan complet, même repli que read_page.
+                // Index mémoire vide → scan complet, même repli que
+                // read_page — la sélection byte s'y fait sur la taille
+                // sérialisée de chaque event (coût déjà payé par le
+                // scan ; ce repli est rare : l'index est bâti à open).
                 drop(g);
                 let v = Self::read_from(dir, 0, u64::MAX, usize::MAX)?;
-                let v: Vec<Event> = v.into_iter().filter(|e| e.seq > after_seq).collect();
-                let skipped = v.len().saturating_sub(cap) as u64;
-                let keep = v.len().saturating_sub(cap);
-                return Ok((v.into_iter().skip(keep).collect(), skipped));
+                let v: Vec<(Event, u64)> = v
+                    .into_iter()
+                    .filter(|e| e.seq > after_seq)
+                    .map(|e| {
+                        let n = serde_json::to_string(&e)
+                            .map(|s| s.len() as u64 + 1)
+                            .unwrap_or(0);
+                        (e, n)
+                    })
+                    .collect();
+                let mut keep_from = v.len();
+                let mut b = 0u64;
+                for (n, (i, (_, sz))) in v.iter().enumerate().rev().enumerate() {
+                    if n >= cap || (n > 0 && b + sz > max_bytes) {
+                        break;
+                    }
+                    b += sz;
+                    keep_from = i;
+                }
+                let skipped = keep_from as u64;
+                let events = v.into_iter().skip(keep_from).map(|(e, _)| e).collect();
+                return Ok((events, skipped, b));
             }
             let idx = g.offsets.partition_point(|(s, _)| *s <= after_seq);
             if idx >= g.offsets.len() {
-                return Ok((vec![], 0));
+                return Ok((vec![], 0, 0));
             }
-            let remaining = g.offsets.len() - idx;
-            if remaining > cap {
-                let start = g.offsets.len() - cap;
-                (g.offsets[start].1, (start - idx) as u64)
-            } else {
-                (g.offsets[idx].1, 0)
+            // Taille d'un event = span jusqu'à l'offset suivant (le
+            // dernier va jusqu'à g.end) — l'index est contigu : la
+            // somme des spans du suffixe = end - offset de départ.
+            let span = |i: usize| -> u64 {
+                let next = if i + 1 < g.offsets.len() {
+                    g.offsets[i + 1].1
+                } else {
+                    g.end
+                };
+                next.saturating_sub(g.offsets[i].1)
+            };
+            // Suffixe maximal : count ≤ cap ET bytes ≤ max_bytes,
+            // ≥ 1 event. On remonte depuis la fin (les plus récents).
+            let mut start = g.offsets.len();
+            let mut b = 0u64;
+            for (n, i) in (idx..g.offsets.len()).rev().enumerate() {
+                let sz = span(i);
+                if n >= cap || (n > 0 && b + sz > max_bytes) {
+                    break;
+                }
+                b += sz;
+                start = i;
             }
+            let skipped = (start - idx) as u64;
+            (g.offsets[start].1, g.offsets.len() - start, skipped, b)
         };
-        Ok((Self::read_from(dir, start_off, u64::MAX, cap)?, skipped))
+        let events = Self::read_from(dir, start_off, u64::MAX, count)?;
+        Ok((events, skipped, bytes))
     }
 
     /// Si le fichier dépasse `max_bytes`, réécrit en gardant seulement les
@@ -417,7 +480,7 @@ impl Journal {
         g.offsets = new_offsets;
         g.end = pos;
         g.file = OpenOptions::new().append(true).open(&path)?;
-        info!("journal compacté : -{removed} events, {len} -> {pos} octets");
+        info!("journal compacted: -{removed} events, {len} -> {pos} bytes");
         Ok(true)
     }
 }
@@ -429,7 +492,13 @@ pub fn write_blob(dir: &Path, name: &str, data: &[u8]) -> Result<String> {
     // Sanitize : pas de traversal
     let safe: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let path = bdir.join(&safe);
     let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
@@ -440,7 +509,8 @@ pub fn write_blob(dir: &Path, name: &str, data: &[u8]) -> Result<String> {
 /// Lit une tranche de blob [offset, offset+limit). Retourne (data, total_size).
 pub fn read_blob(dir: &Path, rel: &str, offset: u64, limit: u64) -> Result<(Vec<u8>, u64)> {
     let path = dir.join(rel);
-    let meta = std::fs::metadata(&path).with_context(|| format!("blob absent ou purgé: {rel}"))?;
+    let meta =
+        std::fs::metadata(&path).with_context(|| format!("missing or purged blob: {rel}"))?;
     let total = meta.len();
     let mut f = File::open(&path)?;
     f.seek(SeekFrom::Start(offset))?;
@@ -464,7 +534,11 @@ pub fn purge_blobs(dir: &Path, max_bytes: u64) -> Result<usize> {
         if let Ok(m) = e.metadata() {
             if m.is_file() {
                 total += m.len();
-                files.push((m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH), e.path()));
+                files.push((
+                    m.len(),
+                    m.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    e.path(),
+                ));
             }
         }
     }
@@ -494,11 +568,8 @@ mod tests {
     use super::*;
 
     fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "ac-journal-test-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let d =
+            std::env::temp_dir().join(format!("ac-journal-test-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -507,7 +578,10 @@ mod tests {
     fn fill(dir: &Path, texts: &[&str]) -> Journal {
         let j = Journal::open(dir).unwrap();
         for t in texts {
-            j.append(EventKind::AgentText { text: t.to_string() }).unwrap();
+            j.append(EventKind::AgentText {
+                text: t.to_string(),
+            })
+            .unwrap();
         }
         j
     }
@@ -550,10 +624,15 @@ mod tests {
         // post [Backlog] → le post est le premier utile.
         let dir = tmpdir("fp-svc");
         let j = Journal::open(&dir).unwrap();
-        j.append(EventKind::System { text: "créée par svc".into() }).unwrap();
-        j.append(um("MISSION boilerplate", Some(svc), true)).unwrap();
+        j.append(EventKind::System {
+            text: "créée par svc".into(),
+        })
+        .unwrap();
+        j.append(um("MISSION boilerplate", Some(svc), true))
+            .unwrap();
         j.append(EventKind::AgentText { text: "…".into() }).unwrap();
-        j.append(um("[Backlog] item #105 — bug", Some(svc), false)).unwrap();
+        j.append(um("[Backlog] item #105 — bug", Some(svc), false))
+            .unwrap();
         let t = found_text(j.first_post(&dir, Some(svc)).unwrap());
         assert!(t.contains("#105"), "{t}");
 
@@ -563,8 +642,12 @@ mod tests {
         // Session service avec SEUL le prompt → Empty, pas le boilerplate.
         let dir = tmpdir("fp-svc-empty");
         let j = Journal::open(&dir).unwrap();
-        j.append(EventKind::System { text: "créée".into() }).unwrap();
-        j.append(um("MISSION boilerplate", Some(svc), true)).unwrap();
+        j.append(EventKind::System {
+            text: "créée".into(),
+        })
+        .unwrap();
+        j.append(um("MISSION boilerplate", Some(svc), true))
+            .unwrap();
         j.append(EventKind::AgentText { text: "…".into() }).unwrap();
         assert!(matches!(
             j.first_post(&dir, Some(svc)).unwrap(),
@@ -600,12 +683,11 @@ mod tests {
         // porte pas l'origin de CELLE-CI).
         let dir = tmpdir("fp-foreign");
         let j = Journal::open(&dir).unwrap();
-        j.append(um("nudge", Some("component:autre"), false)).unwrap();
-        j.append(um("[Backlog] item #9 — x", Some(svc), false)).unwrap();
-        assert_eq!(
-            found_text(j.first_post(&dir, Some(svc)).unwrap()),
-            "nudge"
-        );
+        j.append(um("nudge", Some("component:autre"), false))
+            .unwrap();
+        j.append(um("[Backlog] item #9 — x", Some(svc), false))
+            .unwrap();
+        assert_eq!(found_text(j.first_post(&dir, Some(svc)).unwrap()), "nudge");
 
         // Tête coupée par la compaction (premier seq != 1) → Truncated,
         // même pour une session service.
@@ -637,6 +719,47 @@ mod tests {
         assert!(j.read_page_after(&dir, 6, 3).unwrap().is_empty());
         // après 0 = tout depuis le début, borné
         assert_eq!(j.read_page_after(&dir, 0, 2).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_budget_octets() {
+        // #269 : le cap « events » seul laissait passer ~15 Mo pour
+        // 500 events volumineux — la borne octet doit tailler le
+        // suffixe au plus gros qui tienne, `skipped` comptant le reste.
+        let dir = tmpdir("tail-bytes");
+        let j = fill(&dir, &["a", "b", "c", "d", "e"]);
+        let total = std::fs::metadata(dir.join("events.jsonl")).unwrap().len();
+        // Budget = pile la place de ~2 events → les 3 plus vieux sautés.
+        let per = total / 5 + 1;
+        let budget = per * 2 + 4;
+        let (evs, skipped, bytes) = j.read_tail(&dir, 0, 500, budget).unwrap();
+        assert_eq!(skipped, 3);
+        assert_eq!(evs.len(), 2);
+        assert!(bytes <= budget + per, "bytes={bytes} budget={budget}");
+        // after_seq au milieu : la fenêtre reprend là, pas à zéro.
+        let (evs2, skipped2, _) = j.read_tail(&dir, 3, 500, budget).unwrap();
+        assert_eq!(skipped2, 0);
+        assert_eq!(evs2.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![4, 5]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_budget_un_event_geant() {
+        // Un event unique > budget reste servi (frame indivisible) —
+        // l'exclure gèlerait le curseur : au moins le plus récent part.
+        let dir = tmpdir("tail-giant");
+        let j = fill(&dir, &["x"]);
+        j.append(EventKind::AgentText {
+            text: "gros".repeat(10_000),
+        })
+        .unwrap();
+        let (evs, skipped, _) = j.read_tail(&dir, 0, 500, 128).unwrap();
+        // L'event ancien est compté skipped (omission budgétée) ; le
+        // géant — plus récent — est servi même au-delà du budget.
+        assert_eq!(skipped, 1);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].seq, 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

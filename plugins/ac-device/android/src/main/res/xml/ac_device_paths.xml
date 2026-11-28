@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Racines exposées au FileProvider ac-device : uniquement le
+     sous-dossier de cache où update_client dépose l'APK vérifié
+     (<app_cache_dir>/agentcontrol-update/) — jamais le cache entier. -->
+<paths>
+    <cache-path name="apk-update" path="agentcontrol-update/" />
+</paths>

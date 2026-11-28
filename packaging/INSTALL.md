@@ -1,14 +1,35 @@
 # AgentControl — Installation
 
 Archive: `agentcontrol-server-<arch>-linux.tar.gz`
-Contents: `agentcontrol-daemon` · `acctl` · `packaging/` (systemd unit, example config)
+Contents: `agentcontrol-daemon` · `acctl` · `acp-claude` · `ac-wait` · `packaging/` (systemd unit, example config)
+
+## 0. Verify the archive first (recommended)
+
+Every release ships `SHA256SUMS` + `SHA256SUMS.minisig` — a minisign
+(Ed25519) signature over the checksum manifest. The app and the daemon
+verify it themselves before installing anything (in-app update,
+`acctl daemon-update`, remote install). For a manual check:
+
+```bash
+# the manifest is really signed by the project key
+minisign -Vm SHA256SUMS -P "$(grep -v '^untrusted' packaging/agentcontrol.pub | head -n1)"
+# your archive matches a signed checksum
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+The public key is the second line of `packaging/agentcontrol.pub`
+(also in the repo root's `packaging/`). GitHub build-provenance
+attestations are attached to each release file (`gh attestation
+verify <file>` works too). Releases older than signed publishing have
+no manifest: they are refused by default — `AGENTCONTROL_ALLOW_UNSIGNED=1`
+re-enables them for troubleshooting only (never for a bad signature).
 
 ## 1. Server (Ubuntu — where the agents run)
 
 ```bash
 tar xzf agentcontrol-server-*.tar.gz
 mkdir -p ~/.local/bin ~/.agentcontrol ~/.config/systemd/user
-cp agentcontrol-daemon acctl ~/.local/bin/
+cp agentcontrol-daemon acctl acp-claude ac-wait ~/.local/bin/
 cp packaging/agentcontrol-daemon.service ~/.config/systemd/user/
 cp packaging/config.example.toml ~/.agentcontrol/config.toml
 
@@ -19,8 +40,28 @@ systemctl --user status agentcontrol-daemon
 ```
 
 The daemon listens on:
-- `127.0.0.1:7331` (loopback → reachable only via SSH tunnel)
-- `~/.agentcontrol/daemon.sock` (local)
+- `127.0.0.1:7331` — loopback only (a non-loopback bind needs the
+  explicit `allow_non_loopback_tcp` opt-in); remote access goes through
+  your SSH tunnel, and every TCP connection authenticates (below)
+- `~/.agentcontrol/daemon.sock` — Unix socket, mode `0600`: only your
+  own account can open it
+
+The TCP port requires an authentication token as the first line of
+every connection: `~/.agentcontrol/daemon.token` is generated at first
+start (mode `0600`) and reused across restarts. If the file is missing,
+empty or malformed the daemon regenerates it atomically (`.part` +
+rename, never a half-written token); a stray `daemon.token.part` is
+ignored. Loopback alone is not per-user isolation — another local
+account, or anything reaching your forwarded port, would otherwise get
+full RPC access. SSH connections read the token over the
+already-authenticated SSH channel and retry once with a fresh read when
+the daemon refuses it; nothing to configure there. Direct-TCP profiles
+carry the token in the connection form.
+Rotate it any time with `acctl token rotate` (open TCP connections are
+dropped; clients re-read the file or field on reconnect).
+
+See the README's [Security model](../README.md#security-model) for the
+threat model — the short version: one trusted user per server account.
 
 Local test: `~/.local/bin/acctl status` → `{"agents":["devin","cursor"],...}`
 
@@ -57,7 +98,11 @@ The client opens `ssh -N -L <local>:127.0.0.1:7331 <host>` automatically.
 
 ```bash
 ssh -N -L 7331:127.0.0.1:7331 user@server &
-AGENTCONTROL_TCP=127.0.0.1:7331 acctl status   # → {"sessions":0,...}
+AGENTCONTROL_TCP=127.0.0.1:7331 \
+  AGENTCONTROL_TOKEN=$(ssh user@server cat .agentcontrol/daemon.token) \
+  acctl status   # → {"sessions":0,...}
+# Run on the server itself, acctl reads daemon.token (or the unix
+# socket) directly — AGENTCONTROL_TOKEN is only needed off-host.
 ```
 
 ## 3. Usage
@@ -80,6 +125,14 @@ interval_secs = 600
 ```
 
 ## 5. Managed components — migrating a supervisord service
+
+> **Scope — reference deployment.** This section documents the
+> migration the author's own dev container went through (supervisord →
+> daemon-internal orchestrator, #140). It only matters if your install
+> still runs the legacy `backlog-orchestrator.py` under an external
+> supervisor — a fresh install has nothing to migrate; skip to §6 to
+> simply enable the orchestrator. This repo's deployment specifics are
+> collected in `docs/reference-deployment.md`.
 
 The daemon itself supervises satellite programs: `kind=process`
 (spawn/stop/restart, healthcheck, paged logs), `tool`, `external` —
@@ -166,3 +219,114 @@ daemon is down (workers keep running; spawn/nudge/rm resume on
 restart). Same exposure as the supervisord program dying with the
 container — just not resurrected by `autorestart` while the daemon is
 absent.
+
+## 6. Orchestrator (optional — `backlog-orchestrator`)
+
+The internal `backlog-orchestrator` component drives a shared task
+queue: it claims pending items, spawns one worker session per item,
+nudges stalled ones, runs the plan→review pipeline and serves PR
+reviews. It is **opt-in** (`[backlog_orchestrator] enabled = true`,
+or `acctl orch set enabled true` for a persisted toggle) — the daemon
+starts fine without it and none of the prerequisites below is needed
+otherwise.
+
+Prerequisites:
+
+- **agentbacklog** — the queue CLI the orchestrator shells out to
+  (`agentbacklog --list/--pop/--claim/--done/--verdict/…`).
+  **This is a required, non-negotiable dependency**: the task-queue
+  backend is not pluggable — the orchestrator assumes agentbacklog's
+  flag surface and SQLite semantics (see the note at the end of this
+  section). Without the CLI the component reports
+  `waiting: agentbacklog missing` — an explicit phase, not a crash,
+  and it never starts dispatching.
+
+  Install **before enabling** — recommended **≥ 0.9** (per-item
+  `--done-when` done contract and the `agent`/`model`/`effort`
+  spec fields); **≥ 0.7** is the floor for `plan_review`
+  (`--claim`, `--submit-plan`, `--claim-review`, `--verdict`,
+  `--reassign`); older releases still dispatch, falling back to the
+  unscoped self-`--pop` cycle.
+
+  The package is **not published on PyPI** — install from source
+  with `uv` (the daemon ships no copy):
+
+  ```sh
+  uv tool install git+https://github.com/Wameuh/AgentBacklog
+  ```
+
+  or let the daemon do it: the catalog recipe
+  (`component_install agentbacklog`, also offered by the Backlog
+  sidebar tab) runs the same `uv tool install` and materializes the
+  managed `tool` spec. The binary is then resolved either on the
+  daemon's PATH or through that managed component.
+
+  Fork/mirror/local checkout? The recipe's `install_spec` parameter
+  accepts an index package name, a `git+<url>` or a local path —
+  pass it at install time, or pin it permanently in `config.toml`:
+
+  ```toml
+  [catalog.agentbacklog]
+  repo = "acme/AgentBacklog"              # upstream probed for versions
+  params.install_spec = "git+https://git.acme.corp/ab"
+  ```
+- **An available agent profile** — `agent` empty (default) resolves
+  to the first `available` `[agents.*]` profile at dispatch
+  (auto-discovered ACP adapters count);
+  `worker_agent`/`planner_agent`/`reviewer_agent`/
+  `pr_reviewer_agent` override it per role. No resolvable profile →
+  a clear `no available agent profile` error in `acctl orch status`.
+  `mode`/`model`/`thought_level` empty (defaults) let the profile
+  decide — the previous named defaults were calibrated for Devin.
+- **A forge CLI/REST matching `[[forges]]`** — for the PR-review
+  pipeline and the forge calls of worker prompts. GitHub: `gh` on
+  the PATH + `gh auth login`. Other forges declared in `[[forges]]`
+  (gitlab/gerrit) use their own CLI/credentials there. Not needed
+  for pure queue dispatch — only the review pipeline is forge-bound.
+- **Workspace** — `workspace` defaults to `git rev-parse
+  --show-toplevel` run in the daemon's cwd, else the daemon's cwd
+  itself: declare it (and `repo_workspaces` repo→cwd routes for
+  repo-tagged items) when the daemon doesn't run inside the work
+  repo. `repo_workspaces` is empty by default — single implicit
+  workspace.
+- **State directory** — `state_dir` (default `~/.agentbacklog`)
+  holds `orchestrator.lock` (shared flock — every orchestrator of
+  the same queue must point at the same directory),
+  `orchestrator.pause`, `orchestrator-state.json`, `plans/`,
+  `metrics.jsonl` and the `pr-reviews/` review worktrees.
+- **ac-wait** — bash script shipped at the tarball root (same
+  install step as `acctl`, §1): worker/reviewer prompts delegate
+  any wait over ~1 min to it. Contract: `ac-wait -- <cmd>` polls
+  `<cmd>` until exit 0 then pings the session via
+  `acctl send --steer` (`--name`, `--interval`, `--timeout`,
+  `--until-pid|file|port` variants, `--list/--cancel/--log`); waiter
+  state lives under `${XDG_STATE_HOME:-~/.local/state}/ac-wait/` —
+  the daemon scans that dir to count parked sessions, it is the
+  tool's own XDG convention and stays independent of `state_dir`.
+  Needs `acctl` on the spawned agent's PATH.
+- **Branch conventions** — worker/reviewer prompts assume the repo's
+  own integration workflow (feature branch → PR on the integration
+  branch → automated review → merge). The convention itself lives
+  in the repo's rules file(s) — `rules_files` (default
+  `AGENTS.md,CLAUDE.md`, per-repo override) picks which; a repo
+  without one falls back to the generic git flow described by the
+  prompt.
+
+Optional knobs: `plan_review` (plan→review→implementation pipeline —
+needs agentbacklog ≥ 0.7), `pr_review` (native `/mr review` serving),
+`worker_pool`, `max_workers`… — all hot-settable via
+`acctl comp set backlog-orchestrator <key> <value>` or the component's
+config form.
+
+> **Task-queue backend — design decision** (coupling audit #321):
+> the orchestrator talks to a ~20-flag CLI surface
+> (`--list/--pop/--claim/--done/--release/--reassign/--reviews/
+> --claim-review/--unclaim-review/--verdict/--submit-plan/--depend/
+> --bump/--add/--json`…) with queue-specific semantics — WIP claims,
+> review rounds, plan submission, dependency bumps. Abstracting that
+> behind a trait would mean re-specifying each workflow twice
+> (CLI and backend-neutral API) for a single known implementation, so
+> **`agentbacklog` stays an explicit, documented prerequisite** rather
+> than a generic interface: installing a different queue is a port of
+> the component, not a config change. The decision is revisitable if a
+> second backend ever ships.

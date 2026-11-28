@@ -38,9 +38,7 @@ pub struct Term {
     /// Prise partagée avec le thread reader : tué explicitement au drop
     /// (leader de session → SIGHUP au groupe fg → slave fermé → reader
     /// EIO → reap du vrai code). `reap` côté reader conserve le wait.
-    child: std::sync::Arc<
-        std::sync::Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
-    >,
+    child: std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
 }
 
 /// Attente max d'une mort naturelle après EOF avant de forcer SIGHUP.
@@ -240,9 +238,7 @@ fn login_shell() -> Option<String> {
 /// `EXIT_GRACE` (shell qui ignore SIGHUP, stdio détaché) → kill + wait.
 /// Le lock n'est tenu qu'un appel à la fois : `Drop` peut s'intercaler
 /// pour son `kill()` sans attendre la fin de la grâce.
-fn reap(
-    child: &std::sync::Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
-) -> Option<i64> {
+fn reap(child: &std::sync::Mutex<Box<dyn portable_pty::Child + Send + Sync>>) -> Option<i64> {
     let t0 = std::time::Instant::now();
     loop {
         {
@@ -276,8 +272,14 @@ mod tests {
             "/bin/zsh"
         );
         assert_eq!(resolve_shell(None, Some("/bin/bash".into())), "/bin/bash");
-        assert_eq!(resolve_shell(Some(String::new()), Some("/bin/bash".into())), "/bin/bash");
-        assert_eq!(resolve_shell(None, Some("/usr/sbin/nologin".into())), "/bin/sh");
+        assert_eq!(
+            resolve_shell(Some(String::new()), Some("/bin/bash".into())),
+            "/bin/bash"
+        );
+        assert_eq!(
+            resolve_shell(None, Some("/usr/sbin/nologin".into())),
+            "/bin/sh"
+        );
         assert_eq!(resolve_shell(None, Some("/bin/false".into())), "/bin/sh");
         assert_eq!(resolve_shell(None, Some(String::new())), "/bin/sh");
         assert_eq!(resolve_shell(None, None), "/bin/sh");
@@ -290,7 +292,7 @@ mod tests {
     fn login_shell_from_passwd() {
         // uid sans entrée passwd (conteneur à uid arbitraire) → skip.
         let Some(s) = login_shell() else {
-            eprintln!("skip login_shell_from_passwd: pas d'entrée passwd");
+            eprintln!("skip login_shell_from_passwd: no passwd entry");
             return;
         };
         assert!(s.starts_with('/'), "login shell inattendu: {s}");
@@ -309,7 +311,7 @@ mod tests {
         // Le test n'exige l'édition que des shells à line-discipline
         // connue — un login shell POSIX nu (dash) reste un choix user.
         if !matches!(base, "bash" | "zsh" | "fish" | "ksh") {
-            eprintln!("skip spawn_shell_line_editing: shell résolu = {shell}");
+            eprintln!("skip spawn_shell_line_editing: resolved shell = {shell}");
             return;
         }
         let (t, mut rx) = Term::spawn("/tmp", 80, 24, &[], None).unwrap();
@@ -331,7 +333,7 @@ mod tests {
             false
         })
         .await;
-        assert!(matches!(first, Ok(true)), "pas de sortie shell : {first:?}");
+        assert!(matches!(first, Ok(true)), "no shell output: {first:?}");
         t.input(b"\x1b[A\n"); // flèche haut (rappel) + Entrée
         let second = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let mut buf = Vec::new();
@@ -348,7 +350,7 @@ mod tests {
         .await;
         assert!(
             matches!(second, Ok(true)),
-            "flèche haut sans rappel d'historique — shell sans édition ?"
+            "up arrow without history recall — shell without editing?"
         );
     }
 
@@ -403,7 +405,7 @@ mod tests {
             false
         })
         .await;
-        assert!(matches!(got, Ok(true)), "pas de sortie shell : {got:?}");
+        assert!(matches!(got, Ok(true)), "no shell output: {got:?}");
 
         drop(t); // shell tué → slave fermé → reader EIO → reap → Exit
         let last = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -416,7 +418,7 @@ mod tests {
         .await;
         assert!(
             matches!(last, Ok(Some(TermMsg::Exit(_)))),
-            "flux non terminé par Exit : {last:?}"
+            "stream not ended by Exit: {last:?}"
         );
         // La preuve de la mort réelle : plus aucun fd master ouvert
         // (sinon = shell+reader fuités — le bug du drop sans kill). Le
@@ -432,7 +434,7 @@ mod tests {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            assert!(ok, "fds ptmx restants — shell fuité");
+            assert!(ok, "ptmx fds left — leaked shell");
         }
     }
 }

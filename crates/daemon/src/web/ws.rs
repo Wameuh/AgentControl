@@ -51,7 +51,7 @@ pub async fn upgrade_and_serve(
 ) -> Result<()> {
     let key = head
         .header("sec-websocket-key")
-        .context("Sec-WebSocket-Key manquant")?;
+        .context("missing Sec-WebSocket-Key")?;
     let upgrade = head
         .header("upgrade")
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
@@ -60,7 +60,7 @@ pub async fn upgrade_and_serve(
         .header("connection")
         .is_some_and(|v| v.to_ascii_lowercase().contains("upgrade"));
     if !upgrade || !version_ok || !conn_hdr {
-        anyhow::bail!("upgrade websocket invalide");
+        anyhow::bail!("invalid websocket upgrade");
     }
     let rsp = format!(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
@@ -83,11 +83,16 @@ pub async fn upgrade_and_serve(
     let d = Arc::clone(&daemon);
     let mut conn = tokio::spawn(async move {
         let t0 = std::time::Instant::now();
-        let r = d.serve_conn(tokio::io::join(srv_in, srv_out)).await;
+        let peer_lbl = format!("ws {peer}");
+        // Pas de gate TCP : l'auth du pont WS est portée par le
+        // handshake HTTP (web.token + vérification Origin) en amont.
+        let r = d
+            .serve_conn(tokio::io::join(srv_in, srv_out), &peer_lbl, None)
+            .await;
         let secs = t0.elapsed().as_secs();
         match &r {
-            Ok(()) => tracing::info!("conn ws {peer} close ({secs}s) — client parti"),
-            Err(e) => tracing::info!("conn ws {peer} close ({secs}s): {e:#}"),
+            Ok(()) => tracing::info!("conn {peer_lbl} closed ({secs}s) — client gone"),
+            Err(e) => tracing::info!("conn {peer_lbl} close ({secs}s): {e:#}"),
         }
         r
     });
@@ -135,16 +140,16 @@ async fn read_frames(
         }
         if !masked {
             let _ = out.try_send((0x8, close_payload(1002)));
-            anyhow::bail!("frame non masquée (RFC : client → serveur masque toujours)");
+            anyhow::bail!("unmasked frame (RFC: client → server always masks)");
         }
         // Frames de contrôle : payload ≤ 125 octets, jamais fragmentées.
         if op >= 0x8 && (len > 125 || !fin) {
             let _ = out.try_send((0x8, close_payload(1002)));
-            anyhow::bail!("frame de contrôle invalide");
+            anyhow::bail!("invalid control frame");
         }
         if len > FRAME_MAX {
             let _ = out.try_send((0x8, close_payload(1009)));
-            anyhow::bail!("frame trop grande ({len} o)");
+            anyhow::bail!("frame too large ({len} bytes)");
         }
         let mut mask = [0u8; 4];
         rd.read_exact(&mut mask).await?;
@@ -155,11 +160,11 @@ async fn read_frames(
         }
         match op {
             // Continuation / texte / binaire : agrégat NDJSON.
-            0x0 | 0x1 | 0x2 => {
+            0x0..=0x2 => {
                 msg.extend_from_slice(&payload);
                 if msg.len() > MSG_MAX {
                     let _ = out.try_send((0x8, close_payload(1009)));
-                    anyhow::bail!("message trop grand (> {MSG_MAX} o)");
+                    anyhow::bail!("message too large (> {MSG_MAX} bytes)");
                 }
                 if fin {
                     // Une ligne JSON par message — le client n'envoie
@@ -179,7 +184,7 @@ async fn read_frames(
             0xA => {}
             _ => {
                 let _ = out.try_send((0x8, close_payload(1002)));
-                anyhow::bail!("opcode inconnu {op:#x}");
+                anyhow::bail!("unknown opcode {op:#x}");
             }
         }
     }
@@ -212,7 +217,7 @@ async fn write_frames(
                 }
             }
             l = lines.next_line() => {
-                match l.context("lecture serve_conn")? {
+                match l.context("reading serve_conn")? {
                     Some(line) => write_frame(&mut wr, 0x1, line.as_bytes()).await?,
                     None => {
                         // serve_conn terminé → close propre côté WS.

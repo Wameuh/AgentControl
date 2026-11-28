@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -38,19 +39,33 @@ pub struct CapsRegistry {
     /// Sérialise les probes (un spawn d'agent chacun) : le refresh est
     /// explicite et rare — jamais deux moissons en parallèle.
     probe_lock: tokio::sync::Mutex<()>,
+    /// Persist suspendue pendant un session/load : les
+    /// `config_option_update` rejoués arrivent en rafale — la map est
+    /// tenue à jour en mémoire et une seule écriture a lieu au
+    /// `resume_persist` final (#271, même logique que save_meta).
+    persist_paused: AtomicBool,
+    persist_dirty: AtomicBool,
 }
 
 impl CapsRegistry {
     pub fn open(root: &Path) -> Arc<Self> {
         let path = root.join("agent_caps.json");
-        let map: HashMap<String, proto::AgentCaps> = std::fs::read_to_string(&path)
+        let mut map: HashMap<String, proto::AgentCaps> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+        // Snapshots persistés par un démon antérieur au repli
+        // configOptions → models/modes (codex garde ses modèles dans
+        // config_options[model] et laissait models vide, #345).
+        for c in map.values_mut() {
+            fold_config_options(c);
+        }
         Arc::new(Self {
             map: Mutex::new(map),
             path: Some(path),
             probe_lock: tokio::sync::Mutex::new(()),
+            persist_paused: AtomicBool::new(false),
+            persist_dirty: AtomicBool::new(false),
         })
     }
 
@@ -61,6 +76,8 @@ impl CapsRegistry {
             map: Mutex::new(HashMap::new()),
             path: None,
             probe_lock: tokio::sync::Mutex::new(()),
+            persist_paused: AtomicBool::new(false),
+            persist_dirty: AtomicBool::new(false),
         })
     }
 
@@ -98,7 +115,10 @@ impl CapsRegistry {
             if !caps.current_model.is_empty() {
                 e.current_model = caps.current_model.clone();
             }
-            for (kind, cur) in [("mode", &mut e.current_mode), ("model", &mut e.current_model)] {
+            for (kind, cur) in [
+                ("mode", &mut e.current_mode),
+                ("model", &mut e.current_model),
+            ] {
                 if let Some(o) = caps
                     .config_options
                     .iter()
@@ -125,13 +145,17 @@ impl CapsRegistry {
             let mut m = self.map.lock().unwrap();
             let e = m.entry(agent.to_string()).or_default();
             e.config_options = options.to_vec();
+            // Les listes dédiées suivent la même annonce : un agent qui
+            // ne publie ses modèles/modes que par configOption (codex,
+            // devin) remplit models/modes sans availableModels.
+            fold_config_options(e);
             // La notification porte aussi les valeurs courantes — les
             // indices de présélection restent frais entre deux probes.
-            for (kind, cur) in [("mode", &mut e.current_mode), ("model", &mut e.current_model)] {
-                if let Some(o) = options
-                    .iter()
-                    .find(|o| o.id == kind || o.category == kind)
-                {
+            for (kind, cur) in [
+                ("mode", &mut e.current_mode),
+                ("model", &mut e.current_model),
+            ] {
+                if let Some(o) = options.iter().find(|o| o.id == kind || o.category == kind) {
                     if !o.current_value.is_empty() {
                         *cur = o.current_value.clone();
                     }
@@ -156,9 +180,29 @@ impl CapsRegistry {
         &self.probe_lock
     }
 
+    /// Suspendre les écritures `agent_caps.json` — appelé au début d'un
+    /// session/load : la map reste à jour en mémoire, `persist()` ne
+    /// fait que marquer dirty. `resume_persist` écrit une fois.
+    pub fn pause_persist(&self) {
+        self.persist_paused.store(true, Ordering::SeqCst);
+    }
+
+    /// Reprendre les écritures — une seule persist si du contenu a
+    /// été moissonné pendant la suspension.
+    pub fn resume_persist(&self) {
+        self.persist_paused.store(false, Ordering::SeqCst);
+        if self.persist_dirty.swap(false, Ordering::SeqCst) {
+            self.persist();
+        }
+    }
+
     /// `.tmp` + rename : pas de json tronqué si le démon meurt en
     /// pleine écriture (même convention que pinned/compact).
     fn persist(&self) {
+        if self.persist_paused.load(Ordering::SeqCst) {
+            self.persist_dirty.store(true, Ordering::SeqCst);
+            return;
+        }
         let Some(path) = &self.path else { return };
         let map = self.map.lock().unwrap();
         let Ok(s) = serde_json::to_string_pretty(&*map) else {
@@ -232,7 +276,37 @@ pub(crate) fn caps_from_new_resp(resp: &Value) -> proto::AgentCaps {
     {
         c.current_model = v.to_string();
     }
+    fold_config_options(&mut c);
     c
+}
+
+/// Unionne les options `config_options` portant `id|category == kind`
+/// dans la liste dédiée (`models`/`modes`) : un agent qui n'annonce ses
+/// modèles que par configOption (codex : `category: "model"`, jamais
+/// `availableModels` ; devin : `id: "model"`) voit `models` rempli des
+/// mêmes valeurs — les points d'usage (list_agents, dyn_choices,
+/// poolOpts) n'ont plus à lire config_options séparément. Dédup par
+/// `value`, l'annonce `availableModels` garde priorité (libellé souvent
+/// plus riche).
+fn fold_config_options(caps: &mut proto::AgentCaps) {
+    for kind in ["model", "mode"] {
+        let opts: Vec<proto::ConfigOpt> = caps
+            .config_options
+            .iter()
+            .find(|o| o.id == kind || o.category == kind)
+            .map(|o| o.options.clone())
+            .unwrap_or_default();
+        let dst = if kind == "model" {
+            &mut caps.models
+        } else {
+            &mut caps.modes
+        };
+        for x in opts {
+            if !dst.iter().any(|d| d.value == x.value) {
+                dst.push(x);
+            }
+        }
+    }
 }
 
 /// Sonde les capacités d'un profil : spawn jetable de l'agent dans un
@@ -244,13 +318,12 @@ pub(crate) fn caps_from_new_resp(resp: &Value) -> proto::AgentCaps {
 /// `probe_lock`).
 pub async fn probe(profile: &AgentProfile, cwd: &Path) -> Result<proto::AgentCaps> {
     let subst = |s: &str| s.replace("{model}", "").replace("{mode}", "");
-    let argv: Vec<String> = profile
-        .command
+    let argv: Vec<String> = crate::server::misc::effective_command(&profile.commands)
         .iter()
         .map(|a| subst(a))
         .filter(|a| !a.is_empty())
         .collect();
-    let (cmd, args) = argv.split_first().context("commande agent vide")?;
+    let (cmd, args) = argv.split_first().context("empty agent command")?;
     let envs: HashMap<String, String> = profile
         .env
         .iter()
@@ -357,13 +430,11 @@ impl ProbeIo {
             let Ok(v) = serde_json::from_str::<Value>(&l) else {
                 continue;
             };
-            if self.note(&v, stdin).await {
-                if v.get("id").and_then(Value::as_u64) == Some(id) {
-                    if let Some(e) = v.get("error") {
-                        anyhow::bail!("acp {method}: {}", e.get("message").unwrap_or(e));
-                    }
-                    return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+            if self.note(&v, stdin).await && v.get("id").and_then(Value::as_u64) == Some(id) {
+                if let Some(e) = v.get("error") {
+                    anyhow::bail!("acp {method}: {}", acp::acp_error_string(e));
                 }
+                return Ok(v.get("result").cloned().unwrap_or(Value::Null));
             }
         }
     }
@@ -404,7 +475,9 @@ impl ProbeIo {
         let deadline = std::time::Instant::now() + DRAIN_MAX;
         let mut quiet = std::time::Instant::now() + DRAIN_QUIET;
         loop {
-            let budget = quiet.min(deadline).saturating_duration_since(std::time::Instant::now());
+            let budget = quiet
+                .min(deadline)
+                .saturating_duration_since(std::time::Instant::now());
             if budget.is_zero() {
                 return;
             }
@@ -422,5 +495,59 @@ impl ProbeIo {
                 _ => return,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Le repli configOptions → models/modes : un agent n'annonçant ses
+    /// modèles que par configOption (codex `category:"model"`, devin
+    /// `id:"model"`) voit `models` rempli ; l'annonce dédiée
+    /// (`availableModels`) garde priorité sur le doublon.
+    #[test]
+    fn fold_config_options_enrichit_models_et_modes() {
+        let opt = |v: &str| proto::ConfigOpt {
+            value: v.into(),
+            name: format!("N-{v}"),
+            description: String::new(),
+        };
+        let mut c = proto::AgentCaps {
+            models: vec![opt("m-dedie")],
+            config_options: vec![
+                proto::ConfigOption {
+                    id: "model".into(),
+                    options: vec![opt("m-cfg"), opt("m-dedie")],
+                    ..Default::default()
+                },
+                proto::ConfigOption {
+                    id: "x".into(),
+                    category: "mode".into(),
+                    options: vec![opt("mo-cfg")],
+                    ..Default::default()
+                },
+                proto::ConfigOption {
+                    id: "thought_level".into(),
+                    options: vec![opt("max")],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        fold_config_options(&mut c);
+        assert_eq!(
+            c.models
+                .iter()
+                .map(|m| m.value.as_str())
+                .collect::<Vec<_>>(),
+            ["m-dedie", "m-cfg"]
+        );
+        assert_eq!(
+            c.modes.iter().map(|m| m.value.as_str()).collect::<Vec<_>>(),
+            ["mo-cfg"]
+        );
+        // thought_level n'alimente ni models ni modes.
+        assert_eq!(c.models.len(), 2);
     }
 }

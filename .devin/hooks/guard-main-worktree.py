@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """PreToolUse/Stop/SessionStart hook: keep the MAIN worktree pristine.
 
-The primary checkout must stay on `next_release` with no local changes —
-all work happens in linked worktrees (`git worktree add`, convention
-`~/worktrees/ac-*`).
+The primary checkout must stay on the repo's integration branch
+(`next_release` here — see CONFIGURATION below for how it resolves)
+with no local changes — all work happens in linked worktrees
+(`git worktree add`, convention `~/worktrees/ac-*`).
 
 PreToolUse:
 - write/edit/apply_patch/notebook_edit: block file paths that resolve
@@ -58,6 +59,26 @@ over-blocks (safe direction): update-ref also scans the ref *value*
 positional, remote update/prune/set-head are refused repo-wide,
 checked-out branches are protected from any worktree, and branch names
 whose tail matches a protected name (`foo/next_release`) hit prot_hit.
+
+CONFIGURATION — this hook is an EXAMPLE of repo-local policy; it is
+meant to be adapted (or dropped) per repo, and to stay inert when it
+doesn't apply. The protected branch resolves to, first non-empty wins:
+
+1. env `AGENTCONTROL_INTEGRATION_BRANCH` — explicit override;
+   `none`/`off`/`disabled`/`false`/`0` disables the hook entirely.
+2. repo git config `agentcontrol.integration-branch`
+   (`git config agentcontrol.integration-branch <name>`) — the
+   repo-local pin, recommended when copying this file elsewhere.
+3. `[backlog_orchestrator] integration_branch` from the AgentControl
+   daemon's config.toml (#316) — located next to `$AGENTCONTROL_SOCK`
+   (injected into daemon-spawned agent sessions) or at the default
+   `~/.agentcontrol/config.toml`.
+4. `DEFAULT_BRANCH` below ("next_release").
+
+Whatever the source, a resolved name that does NOT exist as a local
+head or remote-tracking ref in the repo leaves the hook fully inert
+(fail-open) — copying `.devin/hooks` into a repo without this branch
+workflow does nothing instead of blocking everything.
 """
 import json
 import os
@@ -68,7 +89,8 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.realpath(__file__))))
-PROTECTED_BRANCH = "next_release"
+DEFAULT_BRANCH = "next_release"
+PROTECTED_BRANCH = DEFAULT_BRANCH  # resolved in main()
 
 PATH_KEYS = ("file_path", "notebook_path", "path", "target_file")
 MCP_MUTATE = re.compile(
@@ -124,13 +146,14 @@ FLAT_BLOCK = {
     "update-index", "read-tree", "checkout-index", "filter-branch",
 }
 
-REASON = (
+REASON_T = (
     "Worktree principal verrouillé : aucun changement local — il reste "
-    "propre sur `next_release`. Travailler dans un worktree lié "
-    "(`git worktree add ~/worktrees/ac-<feat> -b <br> origin/next_release`). "
+    "propre sur `{b}`. Travailler dans un worktree lié dédié "
+    "(`git worktree add <dir> -b <br> origin/{b}`). "
     "Restent permis ici : lecture, fetch/pull/reset, restore/checkout -- "
-    "(retour au propre), `checkout|switch next_release`."
+    "(retour au propre), `checkout|switch {b}`."
 )
+REASON = REASON_T.format(b=PROTECTED_BRANCH)  # resolved in main()
 
 
 def run(cmd, timeout=5):
@@ -143,6 +166,80 @@ def run(cmd, timeout=5):
 
 def real(p):
     return os.path.realpath(os.path.expanduser(p))
+
+
+def _toml_integration_branch(path):
+    """`integration_branch` from `[backlog_orchestrator]` in a
+    config.toml — tiny section scan (tomllib is 3.11+ only, this hook
+    stays dependency-free)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return ""
+    in_sec = False
+    for l in lines:
+        s = l.strip()
+        if s.startswith("["):
+            in_sec = s == "[backlog_orchestrator]"
+            continue
+        if in_sec:
+            m = re.match(
+                r"integration_branch\s*=\s*[\"']([^\"']*)[\"']", s)
+            if m:
+                return m.group(1).strip()
+    return ""
+
+
+def _daemon_integration_branch():
+    """integration_branch exposed by the AgentControl daemon (#316):
+    config.toml next to `$AGENTCONTROL_SOCK` (env injected into
+    daemon-spawned sessions), else `~/.agentcontrol/config.toml`."""
+    cands = []
+    sock = os.environ.get("AGENTCONTROL_SOCK") or ""
+    if sock:
+        cands.append(os.path.join(os.path.dirname(sock), "config.toml"))
+    cands.append(os.path.expanduser("~/.agentcontrol/config.toml"))
+    for p in cands:
+        v = _toml_integration_branch(p)
+        if v:
+            return v
+    return ""
+
+
+def _disabled(v):
+    return v.strip().lower() in (
+        "none", "off", "disabled", "false", "0")
+
+
+def _branch_exists(name):
+    """`name` resolves to a local head or a remote-tracking ref
+    (any remote name, tail match — same semantics as prot_hit)."""
+    if run(["git", "-C", REPO, "rev-parse", "--verify", "--quiet",
+            "refs/heads/" + name]):
+        return True
+    out = run(["git", "-C", REPO, "for-each-ref",
+               "--format=%(refname)", "refs/remotes/"])
+    return any(l.rsplit("/", 1)[-1] == name for l in out.splitlines())
+
+
+def resolve_protected_branch():
+    """The branch the main worktree must stay on — "" disables the
+    hook. Order: env → repo git config → daemon config.toml →
+    DEFAULT_BRANCH; fail-open when the resolved name isn't a ref."""
+    v = os.environ.get("AGENTCONTROL_INTEGRATION_BRANCH") or ""
+    if v.strip():
+        name = "" if _disabled(v) else v.strip()
+    else:
+        v = run(["git", "-C", REPO, "config", "--get",
+                 "agentcontrol.integration-branch"])
+        if v.strip():
+            name = "" if _disabled(v) else v.strip()
+        else:
+            name = _daemon_integration_branch() or DEFAULT_BRANCH
+    if not name or _disabled(name):
+        return ""
+    return name if _branch_exists(name) else ""
 
 
 def worktree_info():
@@ -756,7 +853,12 @@ def main_state():
     ahead = 0
     if branch == PROTECTED_BRANCH:
         cnt = run(["git", "-C", roots[0], "rev-list", "--count",
-                   PROTECTED_BRANCH, "^origin/" + PROTECTED_BRANCH])
+                   PROTECTED_BRANCH, "--not",
+                   PROTECTED_BRANCH + "@{upstream}"])
+        if not cnt.isdigit():  # no upstream configured → origin/<b>
+            cnt = run(["git", "-C", roots[0], "rev-list", "--count",
+                       PROTECTED_BRANCH, "--not",
+                       "origin/" + PROTECTED_BRANCH])
         ahead = int(cnt) if cnt.isdigit() else 0
     return branch, dirty, ahead
 
@@ -771,8 +873,8 @@ def state_reason(branch, dirty, ahead):
         bits.append(f"{len(dirty)} fichier(s) tracké(s) modifié(s) "
                     f"({shown}{', …' if len(dirty) > 5 else ''})")
     if ahead:
-        bits.append(f"{ahead} commit(s) locaux ahead "
-                    f"d'origin/{PROTECTED_BRANCH}")
+        bits.append(f"{ahead} commit(s) locaux non poussés "
+                    f"sur `{PROTECTED_BRANCH}`")
     return "Worktree principal souillé : " + "; ".join(bits) + (
         ". Restaurer l'état propre (git switch " + PROTECTED_BRANCH +
         ", git restore/git reset --hard, ou finir depuis un worktree).")
@@ -796,6 +898,11 @@ def main():
         data = json.load(sys.stdin)
     except Exception:
         return 0
+    global PROTECTED_BRANCH, REASON
+    PROTECTED_BRANCH = resolve_protected_branch()
+    if not PROTECTED_BRANCH:
+        return 0  # no configured branch / absent from this repo → inert
+    REASON = REASON_T.format(b=PROTECTED_BRANCH)
     ev = data.get("hook_event_name")
     if ev == "Stop":
         if not data.get("stop_hook_active"):

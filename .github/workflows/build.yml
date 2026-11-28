@@ -33,8 +33,14 @@ jobs:
         include:
           - os: ubuntu-latest
             arch: x86_64
+            target: x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
             arch: aarch64
+            target: aarch64-unknown-linux-musl
+    # Nom de check figé : la ruleset next_release exige les contextes
+    # « daemon-linux (<os>, <arch>) » — sans `name:` la matrix
+    # ajouterait la cible au nom et les required checks ne matchent plus.
+    name: daemon-linux (${{ matrix.os }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +52,12 @@ jobs:
         if: contains(github.ref_name, '-rc.')
         run: python3 client/tools/bump_version.py "${GITHUB_REF_NAME#v}"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # ring (via rustls/ureq) compile son code C avec cc → les targets
+      # *-linux-musl exigent musl-gcc.
+      - name: musl-gcc
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: Swatinem/rust-cache@v2
       # Le binaire démon embarque client/dist (build.rs) : la SPA doit
       # être buildée en amont pour que la web UI release soit servie.
@@ -56,13 +68,51 @@ jobs:
           cache-dependency-path: client/package-lock.json
       - run: npm ci && npm run build
         working-directory: client
-      - run: cargo build --release -p agentcontrol-daemon -p acctl
+      # Cible musl = binaire 100 % statique : plus d'exigence GLIBC_X.Y
+      # — les tarballs release démarrent sur n'importe quelle distro
+      # (Debian 11/12, Ubuntu 20.04/22.04/24.04…), là où un build
+      # ubuntu-latest (glibc 2.39) refuse de tourner sur glibc < 2.39.
+      - run: cargo build --release --target ${{ matrix.target }} -p agentcontrol-daemon -p acctl -p acp-claude
+        env:
+          # cc résout aarch64-linux-musl-gcc pour les cibles
+          # aarch64-*-musl — absent : musl-tools ne fournit que
+          # `musl-gcc`. Forcer le compilateur (sur le runner arm64 il
+          # produit bien du aarch64-musl) ; sans effet sur x86_64.
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          AR_aarch64_unknown_linux_musl: ar
       - name: package
         run: |
           mkdir -p dist
-          cp target/release/agentcontrol-daemon target/release/acctl dist/
+          cp target/${{ matrix.target }}/release/agentcontrol-daemon \
+             target/${{ matrix.target }}/release/acctl \
+             target/${{ matrix.target }}/release/acp-claude dist/
+          # ac-wait : script (pas de build cargo) — exigé par les
+          # prompts agents, son état est scanné par l'orchestrateur.
+          install -m 755 tools/ac-wait dist/
           cp -r packaging dist/
           tar czf agentcontrol-server-${{ matrix.arch }}-linux.tar.gz -C dist .
+      # Critère d'acceptation : les binaires tournent sur une vieille
+      # glibc. `ldd` doit dire « statically linked » (static-PIE x86_64)
+      # ou « not a dynamic executable » (ET_EXEC aarch64) et `acctl`
+      # sans argument doit afficher son usage dans debian:bookworm
+      # (glibc 2.36) — image native de l'arch du runner.
+      - name: Vérif portabilité (debian:bookworm)
+        run: |
+          for bin in acctl agentcontrol-daemon; do
+            # NB : `ldd` sort en code 1 sur un ET_EXEC statique — le
+            # `|| true` évite que set -e avorte le step ; le grep sur
+            # le contenu fait foi.
+            ldd_out=$(docker run --rm -v "$PWD/dist:/ac" debian:bookworm ldd /ac/$bin 2>&1 || true)
+            echo "== $bin"; echo "$ldd_out"
+            echo "$ldd_out" | grep -qE 'statically linked|not a dynamic executable'
+          done
+          set +e
+          help_out=$(docker run --rm -v "$PWD/dist:/ac" debian:bookworm /ac/acctl 2>&1)
+          code=$?
+          set -e
+          echo "$help_out"
+          [ "$code" -eq 2 ]
+          echo "$help_out" | grep -q "usage: acctl"
       - uses: actions/upload-artifact@v4
         with:
           name: agentcontrol-server-${{ matrix.arch }}-linux
@@ -159,9 +209,9 @@ jobs:
           if-no-files-found: error
 
   # -----------------------------------------------------------------
-  # Client desktop Tauri : macOS arm64 (.app + .dmg — non signé pour
-  # l'instant, cf. README : installation via clic droit → Ouvrir ou
-  # xattr -dr com.apple.quarantine).
+  # Client desktop Tauri : macOS arm64 (.app + .dmg — signature ad hoc
+  # via signingIdentity "-", pas de notarisation : cf. README pour le
+  # contournement Privacy & Security → Open Anyway au 1er lancement).
   # -----------------------------------------------------------------
   client-macos:
     if: github.event.pull_request.draft != true
@@ -272,6 +322,14 @@ jobs:
             src-tauri/gen/android/app/src/main/AndroidManifest.xml
           grep -q 'android:allowBackup="false"' \
             src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          # Portrait uniquement : patch post-init comme CAMERA / allowBackup
+          # (gen/android n'est pas commité). Garde : une seule <activity>,
+          # sinon le sed patcherait aussi des activités de plugins.
+          test "$(grep -c '<activity' src-tauri/gen/android/app/src/main/AndroidManifest.xml)" = 1
+          sed -i 's|<activity|<activity\n            android:screenOrientation="portrait"|' \
+            src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          grep -q 'android:screenOrientation="portrait"' \
+            src-tauri/gen/android/app/src/main/AndroidManifest.xml
           # Icônes commitées (tauri icon) → projet généré
           cp -r src-tauri/icons/android/* src-tauri/gen/android/app/src/main/res/
           # ── Signature release : sans keystore CI, chaque APK était
@@ -289,7 +347,7 @@ jobs:
           if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
             SIGNED=1
           elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "::error::Secrets ANDROID_KEYSTORE_* absents — APK release non signable. Générer le keystore via client/tools/android-upload-keystore.sh puis gh secret set (cf. AGENTS.md § Releases)."
+            echo "::error::Secrets ANDROID_KEYSTORE_* absents — APK release non signable. Générer le keystore via client/tools/android-upload-keystore.sh puis gh secret set (cf. docs/maintainer.md § Releases)."
             exit 1
           else
             echo "::warning::ANDROID_KEYSTORE_BASE64 absent — APK --debug à signature éphémère (build de test, non publié)."
@@ -347,6 +405,10 @@ jobs:
           find src-tauri/gen/android/app/build/intermediates \
             -name "AndroidManifest.xml" -path "*merged*" \
             -exec grep -l 'allowBackup="false"' {} \; | grep -q .
+          # screenOrientation doit survivre au manifest merger.
+          find src-tauri/gen/android/app/build/intermediates \
+            -name "AndroidManifest.xml" -path "*merged*" \
+            -exec grep -l 'screenOrientation="portrait"' {} \; | grep -q .
           # L'AAR sherpa-onnx doit être lié : jniLibs arm64 dans l'APK.
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" \
             -exec sh -c 'unzip -l "$1" | grep -q "arm64-v8a/libsherpa-onnx-jni.so"' _ {} \;
@@ -428,6 +490,9 @@ jobs:
 
   # -----------------------------------------------------------------
   # Release GitHub sur tag v* (permet l'auto-update + install démon distant)
+  # Intégrité (I1) : SHA256SUMS signé minisign + attestations Sigstore —
+  # fail-closed sans les secrets MINISIGN_* (une release non signée ne
+  # doit plus jamais être publiée, même politique que l'APK).
   # -----------------------------------------------------------------
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -436,11 +501,71 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # OIDC Sigstore + store d'attestations — portés par CE seul job.
+      id-token: write
+      attestations: write
     steps:
+      # Checkout requis avant le staging : packaging/agentcontrol.pub
+      # sert à la contre-vérification de la signature produite.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
+      - name: Signer SHA256SUMS (minisign)
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Fail-closed : tag v* sans la clé = release refusée (comme
+          # ANDROID_KEYSTORE_* pour l'APK). La paire est générée une fois
+          # hors CI ; la pubkey voyage dans packaging/agentcontrol.pub.
+          if [ -z "${MINISIGN_KEY:-}" ]; then
+            echo "::error::Secret MINISIGN_KEY absent — minisign -G -p packaging/agentcontrol.pub -s <clé hors repo> puis gh secret set MINISIGN_KEY (+ MINISIGN_PASSWORD si chiffrée) ; cf. docs/maintainer.md § Releases."
+            exit 1
+          fi
+          if grep -q PLACEHOLDER packaging/agentcontrol.pub; then
+            echo "::error::packaging/agentcontrol.pub est encore le placeholder — commiter la vraie clé publique issue de la paire de signature."
+            exit 1
+          fi
+          if ! command -v minisign >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          fi
+          # Artefacts à plat dans release-files/ : les assets publiés
+          # portent leur basename → SHA256SUMS les liste tels quels, ce
+          # qui rend `sha256sum -c` directement rejouable en local.
+          mkdir -p release-files
+          expect=$(find agentcontrol-* -type f | wc -l)
+          find agentcontrol-* -type f -exec cp -t release-files {} +
+          got=$(find release-files -type f | wc -l)
+          if [ "$got" != "$expect" ]; then
+            echo "::error::collision de noms d'artefacts ($got/$expect fichiers)"
+            exit 1
+          fi
+          (cd release-files && sha256sum -- * > SHA256SUMS)
+          cat release-files/SHA256SUMS
+          # La clé privée ne vit que dans $RUNNER_TEMP (umask 077, rm
+          # immédiat) — jamais sur le workspace, jamais en log.
+          KEY="$RUNNER_TEMP/agentcontrol-minisign.key"
+          umask 077
+          printf '%s\n' "$MINISIGN_KEY" > "$KEY"
+          # Mot de passe : MINISIGN_PASSWORD est lue par minisign ≥0.10 ;
+          # le pipe stdin couvre les versions antérieures sans tty.
+          printf '%s\n' "${MINISIGN_PASSWORD:-}" | timeout 60 minisign -S \
+            -m release-files/SHA256SUMS -x release-files/SHA256SUMS.minisig \
+            -s "$KEY" -t "release ${GITHUB_REF_NAME}"
+          rm -f "$KEY"
+          # Contre-vérif immédiate : la signature doit correspondre à la
+          # pubkey embarquée dans les binaires — une clé secrète qui ne
+          # matche pas packaging/agentcontrol.pub publierait des releases
+          # invérifiables chez tous les clients → casser la release ici.
+          minisign -V -m release-files/SHA256SUMS \
+            -x release-files/SHA256SUMS.minisig -p packaging/agentcontrol.pub
+      - name: Attestations de provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "release-files/*"
       - uses: softprops/action-gh-release@v2
         with:
-          files: "**/*"
+          files: "release-files/*"
           # Tags vX.Y.Z-rc.K → prerelease GitHub JAMAIS marquée "latest"
           # (sinon releases/latest — la sonde stable de l'app et le
           # Dockerfile devcontainer — renverrait la rc aux utilisateurs

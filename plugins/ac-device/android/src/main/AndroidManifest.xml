@@ -1,1 +1,23 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Update APK : l'app télécharge + vérifie l'artefact release
+       elle-même (update_client → fetch_apk, I1) puis l'installeur
+       système est lancé sur une URI FileProvider — permission
+       « installer des applications inconnues » propre à l'app
+       (le flux navigateur historique exigeait ce droit du
+       navigateur à la place). -->
+  <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+  <!-- Notification de secours « APK prêt » (PendingIntent) — redondante
+       avec tauri-plugin-notification mais le plugin doit se suffire. -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <application>
+    <provider
+      android:name="dev.agentcontrol.device.AcDeviceFileProvider"
+      android:authorities="${applicationId}.acdevice"
+      android:exported="false"
+      android:grantUriPermissions="true">
+      <meta-data
+        android:name="android.support.FILE_PROVIDER_PATHS"
+        android:resource="@xml/ac_device_paths" />
+    </provider>
+  </application>
+</manifest>

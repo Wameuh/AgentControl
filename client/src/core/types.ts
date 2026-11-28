@@ -35,8 +35,8 @@ export interface SessionMeta {
   advisor_models?: string[];
   config_options?: ConfigOption[];
   state: string;
-  /** Dernier échec de tour (état "error") — kind : rate_limit | model
-   *  | auth | other ; count = échecs consécutifs du même kind. */
+  /** Dernier échec de tour (état "error") — kind : rate_limit | quota
+   *  | model | auth | other ; count = échecs consécutifs du même kind. */
   last_error?: { message: string; kind: string; at: string; count: number; retry_at?: number | null };
   context_used?: number;
   context_size?: number;
@@ -49,6 +49,10 @@ export interface SessionMeta {
    *  "wait-asleep" (#189 : âge du waiter le plus ancien, son nom, son
    *  timeout ; #222 : wait-asleep = session endormie sous waiter). */
   wait?: { secs: number; name?: string; timeout?: number };
+  /** Horodatage (epoch s UTC) du dernier changement d'état persisté —
+   *  absent sur les vieux démons ; l'âge « asleep depuis … » en est
+   *  dérivé côté client (#383). */
+  state_since?: number;
 }
 
 /** Registre PR ↔ session du démon (prs.json) — badge sidebar. */
@@ -163,7 +167,33 @@ export interface AcEvent {
 
 export interface DirEntry { name: string; dir: boolean; size: number }
 
-export type AgentOpt = { id: string; name: string; available?: boolean; caps?: AgentCaps };
+export type AgentOpt = {
+  id: string;
+  name: string;
+  available?: boolean;
+  caps?: AgentCaps;
+  /** Provenance du profil : builtin | config ([agents.*]) | auto (adaptateur ACP découvert sur le PATH). */
+  via?: string;
+  /** Commande effective (premier candidat résolu) + toutes les
+   *  candidates essayées dans l'ordre (fallbacks). */
+  command?: string[];
+  commands?: string[][];
+  /** Présent quand available === false : pourquoi indisponible —
+   *  argv[0] recherchés + hint d'install. `installable` = le registre
+   *  connaît une commande d'installation (install_agent_adapter, #277)
+   *  → le client propose le bouton « installer ». */
+  unavailable?: {
+    searched?: string[];
+    hint?: string;
+    installable?: boolean;
+  } | null;
+  /** Modèles sélectionnables hors annonce ACP du profil
+   *  ([agents.<id>.extra_models] / registre auto — ex. opus de
+   *  claude) : le client les fusionne à caps.models dans la vue des
+   *  capacités ; au spawn ils rejoignent available_models via le
+   *  handshake (session/set_model les accepte tels quels). */
+  extra_models?: { value: string; label?: string }[];
+};
 
 /** Coût catalogue d'un modèle (RPC model_costs) : `label` compact pour
  *  le libellé d'option (« Free », « $1/$5 »), `detail` = texte brut du
@@ -177,6 +207,11 @@ export type SavedConn = {
   host?: string;
   addr?: string;
   path?: string;
+  /** Jeton `daemon.token` du transport TCP direct (auth 1re ligne,
+   *  B1) — saisi à la main (pas de canal SSH pour le lire) ; absent =
+   *  démon pré-B1 sans exigence. Les transports SSH ne le stockent
+   *  JAMAIS : il est relu sur le canal ssh à chaque connexion. */
+  token?: string;
   remote_port?: number;
   args?: string[];
   port?: number;
@@ -243,6 +278,10 @@ export interface ParamSpec {
    *  l'agent) — une valeur hors liste reste enregistrable, le client
    *  la signale « (?) » au lieu de bloquer. */
   open_enum?: boolean;
+  /** Section d'affichage du formulaire — les params d'un même groupe
+   *  sont rendus sous un titre (ex. orchestrateur : workers /
+   *  pipeline / pr_reviews / general). Absent = flux continu. */
+  group?: string | null;
 }
 
 /** Spec [[components]] de components.toml — lue et écrite telle quelle. */

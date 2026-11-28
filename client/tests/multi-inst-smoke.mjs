@@ -4,37 +4,15 @@
 // Deux pages Chromium = deux instances, chacune avec sa conn mockée.
 // Usage : node tests/multi-inst-smoke.mjs   (après npm run build)
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const EXE = process.env.CHROME_BIN ?? "/usr/bin/chromium";
-// detached:true → kill(-pid) tue tout le groupe (npx → sh → vite) : sinon le
-// preview survit orphelin après la fin du test.
-// Port éphémère (`--port 0`) lu sur la sortie vite — un port fixe est
-// squatté par les previews des autres worktrees et le test pilotait
-// alors leur build (faux négatifs déjà observés).
-const server = spawn("npx", ["vite", "preview", "--port", "0", "--strictPort"], { stdio: ["ignore", "pipe", "ignore"], detached: true });
-const BASE = await new Promise((res, rej) => {
-  let buf = "";
-  const to = setTimeout(() => rej(new Error("vite preview: URL introuvable")), 15000);
-  server.stdout.on("data", (d) => {
-    buf += d;
-    const m = buf.match(/https?:\/\/localhost:(\d+)/);
-    if (m) {
-      clearTimeout(to);
-      res(`http://localhost:${m[1]}`);
-    }
-  });
-});
-// Attendre que le preview serve (npx cold peut dépasser 2 s) — un
-// goto prématuré donnait ERR_CONNECTION_REFUSED avant le cleanup.
-for (let i = 0; i < 40; i++) {
-  try {
-    const r = await fetch(BASE + "/");
-    if (r.ok) break;
-  } catch {}
-  await new Promise((r) => setTimeout(r, 250));
-}
+// vite preview : port libre + poll HTTP jusqu'à réponse — la sortie
+// vite n'est pas un contrat fiable (muette >60 s sur runner GHA) et
+// un port fixe squatté piloterait le build d'un autre worktree
+// (faux négatifs déjà observés).
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: EXE, headless: true, args: ["--no-sandbox"] });
 const mock = readFileSync("tests/tauri-mock.js", "utf8");
 
@@ -61,10 +39,22 @@ const PATCH = `(() => {
       return new Promise((r) => setTimeout(r, d)).then(() => inv(cmd, args));
     }
     if (cmd === "disconnect") { window.__calls.disconnect.push(args?.conn); window.__live.delete(args?.conn); }
-    return inv(cmd, args).then((r) =>
-      cmd === "call" && args?.method === "list_sessions" && Array.isArray(r)
-        ? r.map((s) => ({ ...s, conn: args?.conn ?? [...window.__live].pop() ?? "local" }))
-        : r);
+    const ck = () => args?.params?.conn ?? args?.conn ?? [...window.__live].pop() ?? "local";
+    return inv(cmd, args).then((r) => {
+      if (cmd !== "call") return r;
+      // Les objets porteurs d'une clé conn (sessions, métas, entrées du
+      // registre PR) sont retaggés sur la conn de la page — list_sessions
+      // l'était déjà ; session_info.meta (app.current) et pr_list
+      // alimentent capable()/badges sur la même clé, sans ça ils
+      // pointaient vers la conn mockée en dur (« ssh:pi5.local:22 »).
+      if (args?.method === "list_sessions" && Array.isArray(r))
+        return r.map((s) => ({ ...s, conn: ck() }));
+      if (args?.method === "session_info" && r?.meta)
+        return { ...r, meta: { ...r.meta, conn: ck() } };
+      if (args?.method === "pr_list" && Array.isArray(r))
+        return r.map((x) => ({ ...x, conn: ck() }));
+      return r;
+    });
   };
 })();`;
 const initPage = async (saved, cliConn, delays = {}) => {

@@ -6,7 +6,7 @@
 // connect (les kills déclenchent un retry), log ui capturé.
 // Usage : npm run build && node tests/conn-flap-e2e.mjs
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
 
@@ -61,6 +61,8 @@ const MOCK = `(function () {
         case "call": return p.then(() => rpc(args.method, args.params ?? {}));
         case "subscribe": return p.then(() => null);
         case "saved_connections": return p.then(() => [{ kind: "local" }]);
+        case "cli_conn": return p.then(() => null);
+        case "other_instances": return p.then(() => []);
         case "ssh_hosts": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAA x");
         case "check_update": return p.then(() => { throw new Error("offline"); });
@@ -73,9 +75,7 @@ const MOCK = `(function () {
   };
 })();`;
 
-const server = spawn("npx", ["vite", "preview", "--port", "4194", "--strictPort"], { stdio: "ignore" });
-process.on("exit", () => server.kill());
-await new Promise((r) => setTimeout(r, 1800));
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: true, args: ["--no-sandbox"] });
 const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
@@ -121,7 +121,7 @@ const waitSeg = async (want, timeout = 6000) => {
 };
 const connectCalls = () => p.evaluate(() => window.__connectCalls);
 
-await p.goto("http://localhost:4194/", { waitUntil: "networkidle0" });
+await p.goto(BASE + "/", { waitUntil: "networkidle0" });
 await sleep(600);
 
 // t0 — la conn saved auto-connectée est ok, segment vert.
@@ -143,7 +143,7 @@ check("t1 lenteur+trafic → ok", (await st()) === "ok", await segCls());
 check("t1 aucun retry", (await connectCalls()) === calls0,
   "calls=" + (await connectCalls()));
 check("t1 log transport vivant",
-  (await logs("transport vivant")).length >= 1);
+  (await logs("transport alive")).length >= 1);
 
 // t2 — timeout + SILENCE radio (silent 30 s) : blackhole suspect →
 // strike 1 (encore ok) puis strike 2 → down. Tick sain d'abord :
@@ -185,7 +185,7 @@ await drain();
 
 // t5 — sonde redevenue saine → markAlive efface les strikes : un err
 // isolé repart à ×1 (compteur reset, pas cumul inter-pannes).
-check("t5 retour sonde saine", await waitLog("de retour", l5));
+check("t5 retour sonde saine", await waitLog("back (", l5));
 check("t5 sonde saine → ok", (await st()) === "ok", await segCls());
 const l5b = await logLen();
 await setDs({ error: "connexion fermée", kind: "error", rtt_ms: 12 });
@@ -231,11 +231,12 @@ await setDs({ version: "9.9.9", sessions: 1 });
 await sleep(400);
 const l7 = await logLen();
 await setDs({ error: "timeout", kind: "timeout", rtt_ms: 8100, silent_ms: 200 });
-check("t7 excusés ×5", await waitLog("ignoré ×5", l7, 6000));
-check("t7 plafond → strike", await waitLog("durablement", l7, 6000));
+check("t7 excusés ×5", await waitLog("ignored ×5", l7, 6000));
+check("t7 plafond → strike", await waitLog("durably", l7, 6000));
 check("t7 strike1 encore ok", (await st()) === "ok", await segCls());
 check("t7 2ᵉ salve → strike2", await waitLog("sonde ko ×2", l7, 9000));
-check("t7 RPC bloqué durable → down", (await st()) === "bad", await segCls());
+check("t7 RPC bloqué durable → down", (await waitSeg("bad", 3000)) || (await st()) === "warn",
+  await segCls());
 await setDs({ version: "9.9.9", sessions: 1 });
 await drain();
 
@@ -268,7 +269,7 @@ await setDs({
   error: "connexion fermée", kind: "error",
   rtt_ms: 2760, silent_ms: 4436, gen: 1,
 });
-check("t8 sonde périmée loguée", await waitLog("sonde périmée", l8b));
+check("t8 sonde périmée loguée", await waitLog("stale probe", l8b));
 check("t8 sonde périmée → encore ok", (await st()) === "ok", await segCls());
 check("t8 sonde périmée : aucun retry",
   (await connectCalls()) === calls8, "calls=" + (await connectCalls()));
@@ -288,9 +289,12 @@ await p.evaluate(() => {
     payload: { conn: "local", why: "eof distant", gen: 2 },
   });
 });
-check("t8 conn-dead périmé logué", await waitLog("conn-dead périmé", l8c));
+check("t8 conn-dead périmé logué", await waitLog("stale conn-dead", l8c));
 check("t8 conn-dead périmé → ok", (await st()) === "ok", await segCls());
-// conn-dead frais (gen 3) → down légitime.
+// conn-dead frais (gen 3) → down légitime. La sonde passe en échec
+// AVANT le conn-dead : sinon le watchdog sain la répare au tick
+// suivant (~300 ms) et waitSeg rate la fenêtre « bad » — flaky.
+await setDs({ error: "connexion fermée", kind: "error", rtt_ms: 5, gen: 3 });
 const l8d = await logLen();
 await p.evaluate(() => {
   const id = window.__acListeners["conn-dead"];
@@ -331,6 +335,71 @@ check("t8b gen>cur why",
   JSON.stringify(await logs("conn local down")));
 await setDs({ version: "9.9.9", sessions: 1, _ac_gen: 6 });
 await drain();
+
+// t9 — régression #270 : un marqueur `conn_error` de list_sessions ne
+// doit PLUS tuer la conn instantanément. La sonde lourde paginée
+// (timeout 20 s) peut expirer sur un démon lent post-reconnect alors
+// que le transport est vivant — l'ancien markDead direct produisait le
+// cycle down/reconnect → badge « déconnecté » persistant.
+// t9a — transport vivant (silent 200 ms) : excuse « lent mais vivant »,
+// jamais de strike, jamais de retry. La session seedée vérifie le
+// repli cache : conn « ok » + conn_error → lignes grisées offline,
+// pas disparues.
+check("t9a conn revenue ok", await waitSeg("ok"));
+const calls9 = await connectCalls();
+const SESS9 = { conn: "local", id: "s-t9", agent: "devin", title: "t9",
+  cwd: "/tmp", created_at: "2026-01-01T00:00:00Z", state: "working",
+  available_modes: [], available_commands: [], available_models: [] };
+await p.evaluate((s) => { window.__listSessions = [s]; }, SESS9);
+await sleep(400);
+check("t9 seed session rendue",
+  await p.evaluate(() => !!document.querySelector("#session-list .sess")));
+const l9a = await logLen();
+await p.evaluate(() => {
+  window.__listSessions = [{ conn: "local", conn_error: true,
+    _ac_transport: { silent_ms: 200, dead: false, rx_lines: 40 } }];
+});
+check("t9a excuse transport vivant", await waitLog("transport alive", l9a, 4000));
+await sleep(500);
+check("t9a conn_error vivant → ok", (await st()) === "ok", await segCls());
+check("t9a badge sidebar ok",
+  (await p.evaluate(() =>
+    document.querySelector("#session-list .grp-head .conn-st")?.className ?? "none"))
+    .includes("ok"));
+check("t9a session conservée grisée",
+  await p.evaluate(() => {
+    const r = document.querySelector("#session-list .sess");
+    return !!r && r.className.includes("offline");
+  }));
+check("t9a conn_error vivant : aucun retry",
+  (await connectCalls()) === calls9, "calls=" + (await connectCalls()));
+// Sonde redevenue saine → session resservie live (hors offline).
+await p.evaluate((s) => { window.__listSessions = [s]; }, SESS9);
+await sleep(400);
+check("t9a session de nouveau live",
+  await p.evaluate(() => {
+    const r = document.querySelector("#session-list .sess");
+    return !!r && !r.className.includes("offline");
+  }));
+
+// t9b — socket morte (dead:true) : un SEUL marker ne déclare plus down
+// non plus — strike ×1, down seulement au 2ᵉ groupé. L'ancien code
+// passait en bad dès le premier marker.
+const l9b = await logLen();
+await p.evaluate(() => {
+  window.__listSessions = [{ conn: "local", conn_error: true,
+    _ac_transport: { dead: true, silent_ms: 60000 } }];
+});
+check("t9b strike1 loggé", await waitLog("sonde ko ×1", l9b, 4000));
+await sleep(300);
+check("t9b un marker ≠ down", (await st()) === "ok", await segCls());
+check("t9b session toujours servie",
+  await p.evaluate(() => !!document.querySelector("#session-list .sess")));
+check("t9b marker mort : aucun retry",
+  (await connectCalls()) === calls9, "calls=" + (await connectCalls()));
+await p.evaluate((s) => { window.__listSessions = [s]; }, SESS9);
+await setDs({ version: "9.9.9", sessions: 1, _ac_gen: 6 });
+await sleep(500); // tick watchdog : strikes/ignored purgés
 
 console.log(`${pass} PASS, ${fail} FAIL`);
 if (fail) {

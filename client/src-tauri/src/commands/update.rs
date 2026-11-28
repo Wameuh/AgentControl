@@ -1,6 +1,7 @@
 //! Auto-update : sonde de version GitHub (API REST, sans gh) et
-//! installation en un clic (.deb/pkexec, NSIS/.bat). Non supporté
-//! sur Android (APK par release).
+//! installation en un clic (.deb/pkexec, NSIS/.bat, .dmg, APK Android
+//! via l'installeur système — FileProvider + intent, permission
+//! « apps inconnues » gérée côté plugin ac-device).
 
 use anyhow::Result;
 #[cfg(not(target_os = "android"))]
@@ -8,16 +9,21 @@ use anyhow::Context;
 #[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
 
+// Chemin APK Android : fetch + vérif d'intégrité avant que
+// `update_client` (bas de fichier) ne le remette à l'installeur
+// système via le plugin ac-device. `test` : apk_asset est couvert par
+// les tests unitaires du module parent.
+#[cfg(any(target_os = "android", test))]
+mod apk;
+
 /// Journal du chemin update dans client.log — chaque étape (check →
 /// download → verify → install → relaunch) doit y laisser une trace
 /// lisible : une install qui échoue sans log est indiagnostiquable.
-#[cfg(not(target_os = "android"))]
 #[track_caller]
 fn ulog(msg: impl std::fmt::Display) {
     client_core::log(client_core::Level::Info, format!("update: {msg}"));
 }
 
-#[cfg(not(target_os = "android"))]
 fn gh_get(url: &str) -> Result<serde_json::Value, String> {
     // Timeout global (connect+read) : le front borne déjà ses fetch — un
     // réseau en blackhole ne doit pas faire attendre le popup « outdated »
@@ -33,7 +39,6 @@ fn gh_get(url: &str) -> Result<serde_json::Value, String> {
 
 /// Compare semver minimal : `x.y.z` numérique puis identifiants de
 /// pré-release (stable > pré-release ; numérique < alphanum, semver §11).
-#[cfg(not(target_os = "android"))]
 fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     fn parse(v: &str) -> (Vec<u64>, Vec<String>) {
@@ -83,12 +88,13 @@ fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// Max semver des releases récentes — la liste inclut les prereleases
 /// (canal rc opt-in), contrairement à releases/latest.
-#[cfg(not(target_os = "android"))]
 fn latest_incl_rc() -> Result<String, String> {
     let rels = gh_get(
         "https://api.github.com/repos/Wameuh/AgentControl/releases?per_page=20",
     )?;
-    let arr = rels.as_array().ok_or("réponse releases inattendue")?;
+    let arr = rels
+        .as_array()
+        .ok_or("update-failed:check:unexpected releases response")?;
     let mut best = String::new();
     for r in arr {
         if r["draft"].as_bool().unwrap_or(false) {
@@ -101,7 +107,7 @@ fn latest_incl_rc() -> Result<String, String> {
         }
     }
     if best.is_empty() {
-        Err("aucune release listée".into())
+        Err("update-failed:check:no release listed".into())
     } else {
         Ok(best)
     }
@@ -110,7 +116,6 @@ fn latest_incl_rc() -> Result<String, String> {
 /// Dernière version publiée via l'API REST GitHub (aucun outil local requis) :
 /// releases/latest, fallback = package.json sur main. `include_rc` = canal
 /// opt-in des pré-releases (tester la release candidate avant merge).
-#[cfg(not(target_os = "android"))]
 #[tauri::command]
 pub(crate) async fn check_update(include_rc: Option<bool>) -> Result<String, String> {
     let rc = include_rc.unwrap_or(false);
@@ -141,27 +146,14 @@ pub(crate) async fn check_update(include_rc: Option<bool>) -> Result<String, Str
     r
 }
 
-#[cfg(target_os = "android")]
-#[tauri::command]
-pub(crate) async fn check_update(_include_rc: Option<bool>) -> Result<String, String> {
-    Err("non supporté sur Android — APK par release GitHub".into())
-}
-
-#[cfg(target_os = "android")]
-#[tauri::command]
-pub(crate) async fn update_client(_tag: String) -> Result<(), String> {
-    Err("non supporté sur Android — installez le nouvel APK".into())
-}
-
 /// Garde-fou post-téléchargement : fichier non vide + en-tête attendu
-/// (archive ar pour .deb, MZ pour .exe) — un transfert tronqué ou une
-/// page d'erreur HTTP sauvée comme binaire doit échouer ici avec une
-/// cause claire, pas plus tard dans pkexec/le setup.
-#[cfg(not(target_os = "android"))]
+/// (archive ar pour .deb, MZ pour .exe, PK pour .apk…) — un transfert
+/// tronqué ou une page d'erreur HTTP sauvée comme binaire doit échouer
+/// ici avec une cause claire, pas plus tard dans pkexec/le setup.
 fn verify_asset(path: &std::path::Path, name: &str) -> Result<(), String> {
     use std::io::Read;
     if std::fs::metadata(path).map_err(|e| e.to_string())?.len() == 0 {
-        return Err(format!("{name} téléchargé vide"));
+        return Err(format!("update-failed:verify:{name} downloaded empty"));
     }
     let mut head = [0u8; 8];
     if std::fs::File::open(path)
@@ -169,21 +161,28 @@ fn verify_asset(path: &std::path::Path, name: &str) -> Result<(), String> {
         .read_exact(&mut head)
         .is_err()
     {
-        return Err(format!("{name} invalide — fichier trop petit"));
+        return Err(format!("update-failed:verify:{name} invalid — file too small"));
     }
     if name.ends_with(".deb") && !head.starts_with(b"!<arch>") {
         return Err(format!(
-            "{name} invalide — pas une archive deb (téléchargement corrompu ?)"
+            "update-failed:verify:{name} invalid — not a .deb archive (corrupted download?)"
         ));
     }
     if name.ends_with(".exe") && !head.starts_with(b"MZ") {
         return Err(format!(
-            "{name} invalide — pas un exécutable (téléchargement corrompu ?)"
+            "update-failed:verify:{name} invalid — not an executable (corrupted download?)"
         ));
     }
     if name.ends_with(".msi") && !head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
         return Err(format!(
-            "{name} invalide — pas un installeur MSI (téléchargement corrompu ?)"
+            "update-failed:verify:{name} invalid — not an MSI installer (corrupted download?)"
+        ));
+    }
+    // L'APK est une archive ZIP (sérialisation Android de la signature
+    // v2/v3 en bloc de fin — l'en-tête locale PK suffit au garde-fou).
+    if name.ends_with(".apk") && !head.starts_with(b"PK\x03\x04") {
+        return Err(format!(
+            "update-failed:verify:{name} invalid — not an APK package (corrupted download?)"
         ));
     }
     Ok(())
@@ -312,7 +311,84 @@ fn resolve_relaunch_path(exe_before: Option<&std::path::Path>) -> Result<PathBuf
     candidates
         .into_iter()
         .find(|p| p.exists())
-        .ok_or_else(|| "aucun chemin de relance résolu".to_string())
+        .ok_or_else(|| "no relaunch path resolved".to_string())
+}
+
+/// Corps texte d'un asset nommé exact de la release `rel` — `Ok(None)`
+/// si l'asset n'existe pas (release plus ancienne que la publication du
+/// manifeste signé), `Err` si le transfert échoue.
+fn fetch_release_text(rel: &serde_json::Value, asset_name: &str) -> Result<Option<String>, String> {
+    let url = rel["assets"].as_array().and_then(|a| {
+        a.iter().find_map(|x| {
+            if x["name"].as_str() == Some(asset_name) {
+                x["browser_download_url"].as_str().map(String::from)
+            } else {
+                None
+            }
+        })
+    });
+    let Some(url) = url else { return Ok(None) };
+    ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(30))
+        .set("User-Agent", "agentcontrol-updater")
+        .call()
+        .map_err(|e| format!("{asset_name} : {e}"))?
+        .into_string()
+        .map(Some)
+        .map_err(|e| format!("{asset_name} : {e}"))
+}
+
+/// Intégrité de la release (I1) : `SHA256SUMS` + sa signature minisign
+/// `SHA256SUMS.minisig` — publiés par le job release, vérifiés contre la
+/// clé publique compilée (proto::release_verify). `aname` = nom réel de
+/// l'asset dans la release (celui listé dans le manifeste), pas le nom
+/// local du fichier. Une release sans manifeste (pré-signature) est
+/// refusée — repli de dépannage `AGENTCONTROL_ALLOW_UNSIGNED=1`
+/// (journalisé en warn) ; signature ou empreinte invalide → refus sec,
+/// jamais couvert par le repli.
+fn verify_release_integrity(
+    rel: &serde_json::Value,
+    path: &std::path::Path,
+    aname: &str,
+) -> Result<(), String> {
+    use proto::release_verify as rv;
+    let sums = fetch_release_text(rel, rv::SUMS_NAME)?;
+    let sig = fetch_release_text(rel, rv::SIG_NAME)?;
+    match (sums, sig) {
+        (Some(sums), Some(sig)) => {
+            let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            rv::verify(aname, f, &sums, &sig).inspect_err(|e| {
+                ulog(format!("{aname} rejeté à la vérif d'intégrité — {e}"));
+            })?;
+            ulog(format!("{aname} : signature minisign + empreinte sha256 vérifiés"));
+            Ok(())
+        }
+        (None, None) if rv::allow_unsigned() => {
+            ulog(format!(
+                "{aname} : release SANS {} — installée quand même (AGENTCONTROL_ALLOW_UNSIGNED)",
+                rv::SUMS_NAME
+            ));
+            Ok(())
+        }
+        (None, None) => {
+            let msg = format!(
+                "update-failed:verify:unsigned release — {} and {} missing (older releases: AGENTCONTROL_ALLOW_UNSIGNED=1 to force, not recommended)",
+                rv::SUMS_NAME,
+                rv::SIG_NAME
+            );
+            ulog(format!("{aname} rejeté — {msg}"));
+            Err(msg)
+        }
+        _ => {
+            let msg = format!(
+                "update-failed:verify:incomplete integrity manifest — only one of {}/{} published (tampered release?)",
+                rv::SUMS_NAME,
+                rv::SIG_NAME
+            );
+            ulog(format!("{aname} rejeté — {msg}"));
+            Err(msg)
+        }
+    }
 }
 
 /// Télécharge un asset de la release `tag` vers un dossier temporaire
@@ -320,30 +396,41 @@ fn resolve_relaunch_path(exe_before: Option<&std::path::Path>) -> Result<PathBuf
 /// Tag exact d'abord (les rc sont des prereleases — latest renverrait
 /// la STABLE à la place), latest en repli. `pred` choisit l'asset par
 /// nom (`.deb`, `-setup.exe`, `.dmg`+arch…) — `name` sert au chemin de
-/// destination et au message d'erreur. Sync → spawn_blocking requis.
+/// destination et au message d'erreur. L'intégrité est prouvée AVANT
+/// tout retour : bytes magiques (`verify_asset`, corruption) puis
+/// `SHA256SUMS` signé minisign (`verify_release_integrity`, origine —
+/// I1). Sync → spawn_blocking requis.
 #[cfg(not(target_os = "android"))]
 fn fetch_release_asset(
     tag: &str,
     name: &str,
     pred: impl Fn(&str) -> bool,
 ) -> Result<PathBuf, String> {
+    // `tag` vient de la release GitHub (tag_name → attacker-controlled
+    // sous le modèle I1) : whitelist semver AVANT l'URL d'API et tout
+    // usage — un tag arbitraire réécrirait la requête.
+    if !proto::release_verify::valid_tag(tag) {
+        return Err(format!("update-failed:tag:invalid release tag {tag:?}"));
+    }
     let rel = gh_get(&format!(
         "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
     ))
     .or_else(|_| gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest"))?;
-    let url = rel["assets"]
+    let (aname, url) = rel["assets"]
         .as_array()
         .and_then(|a| {
             a.iter().find_map(|x| {
                 let n = x["name"].as_str().unwrap_or("");
                 if pred(n) {
-                    x["browser_download_url"].as_str().map(String::from)
+                    x["browser_download_url"]
+                        .as_str()
+                        .map(|u| (n.to_string(), u.to_string()))
                 } else {
                     None
                 }
             })
         })
-        .with_context(|| format!("pas de {name} dans la release"))
+        .with_context(|| format!("update-failed:download:no {name} in the release"))
         .map_err(|e| e.to_string())?;
     let dir = std::env::temp_dir().join("agentcontrol-update");
     let _ = std::fs::remove_dir_all(&dir);
@@ -361,7 +448,63 @@ fn fetch_release_asset(
     verify_asset(&dest, name).inspect_err(|e| {
         ulog(format!("{name} rejeté à la vérif — {e}"));
     })?;
+    verify_release_integrity(&rel, &dest, &aname)?;
     Ok(dest)
+}
+
+/// Update en un clic (Android) : télécharge l'APK de la release dans
+/// le cache de l'app et prouve son intégrité (I1 — SHA256SUMS signé
+/// minisign + sha256, `verify_release_integrity`), puis demande au
+/// plugin ac-device de lancer l'installeur système (intent VIEW sur
+/// l'URI FileProvider du cache — la permission « installer des
+/// applications inconnues » et la reprise après retour sont gérées par
+/// le Kotlin : foreground seul pour startActivity, sinon APK armé +
+/// notification PendingIntent). Le process meurt avec le remplacement
+/// de l'APK — pas de statut post-install, l'utilisateur est sur l'écran
+/// de l'installeur.
+/// Retour : "launched" | "pending" | "permission_required".
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) async fn update_client(
+    app: tauri::AppHandle,
+    tag: String,
+    notify_title: Option<String>,
+    notify_text: Option<String>,
+) -> Result<String, String> {
+    use tauri::Manager;
+    ulog(format!("install v{tag} demandée (android)"));
+    let apk = apk::fetch_apk(&app, &tag).await?;
+    let dev = app.state::<tauri_plugin_ac_device::Device<tauri::Wry>>();
+    let path = apk.to_string_lossy().to_string();
+    let v = dev
+        .install_apk(
+            &path,
+            notify_title.as_deref().unwrap_or(""),
+            notify_text.as_deref().unwrap_or(""),
+        )
+        .map_err(|e| e.to_string())?;
+    match v["status"].as_str() {
+        Some("launched") => {
+            ulog(format!("install v{tag} : installeur système ouvert"));
+            Ok("launched".into())
+        }
+        Some("pending") => {
+            ulog(format!(
+                "install v{tag} : APK armé — reprise au retour premier plan"
+            ));
+            Ok("pending".into())
+        }
+        Some("permission_required") => {
+            ulog(format!("install v{tag} : permission « apps inconnues » requise"));
+            Ok("permission_required".into())
+        }
+        other => {
+            let msg =
+                format!("update-failed:install:unexpected installer reply {other:?}");
+            ulog(format!("install v{tag} échouée — {msg}"));
+            Err(msg)
+        }
+    }
 }
 
 /// Update en un clic : télécharge le .deb de la release via l'API REST et
@@ -384,7 +527,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     .map_err(|e| e.to_string())??;
     // Repli manuel cité dans TOUTES les erreurs ci-dessous : le .deb
     // reste dans le dossier temp jusqu'à la prochaine tentative.
-    let manual = format!("installez-le à la main : sudo dpkg -i {}", deb.display());
+    let manual = format!("install it by hand: sudo dpkg -i {}", deb.display());
     // pkexec : sans agent polkit de session l'auth peut ne jamais se
     // résoudre (hang) → timeout ; binaire absent → NotFound ; refus
     // utilisateur → 126 ; pkexec incapable de lancer → 127. stderr
@@ -398,16 +541,17 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     let run = pkexec.output();
     let out = match tokio::time::timeout(std::time::Duration::from_secs(300), run).await {
         Err(_) => {
-            let msg =
-                format!("aucune réponse de l'authentification (agent polkit absent ?) — {manual}");
+            let msg = format!(
+                "update-failed:auth-timeout:no answer from authentication (polkit agent missing?) — {manual}"
+            );
             ulog(format!("install v{tag} échouée — {msg}"));
             return Err(msg);
         }
         Ok(Err(e)) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                format!("pkexec introuvable (polkit/policykit non installé) — {manual}")
+                format!("update-failed:pkexec-missing:pkexec not found (polkit/policykit not installed) — {manual}")
             } else {
-                format!("pkexec non lançable : {e} — {manual}")
+                format!("update-failed:pkexec-launch:cannot launch pkexec: {e} — {manual}")
             };
             ulog(format!("install v{tag} échouée — {msg}"));
             return Err(msg);
@@ -424,12 +568,12 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
             }
         };
         let msg = match out.status.code() {
-            Some(126) => detail("autorisation refusée (demande annulée)"),
+            Some(126) => detail("update-failed:auth-cancelled:authorization refused (request cancelled)"),
             Some(127) => detail(
-                "pkexec n'a pas pu lancer l'installation (agent d'authentification absent ?)",
+                "update-failed:auth-agent:pkexec could not run the installer (authentication agent missing?)",
             ),
             code => detail(&format!(
-                "dpkg -i a échoué{}",
+                "update-failed:install:dpkg -i failed{}",
                 code.map(|c| format!(" (code {c})")).unwrap_or_default()
             )),
         };
@@ -457,10 +601,10 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
             std::process::exit(0);
         }
         Err(e) => {
-            write_update_status(&format!("WARN {tag} relance impossible : {e}"));
+            write_update_status(&format!("WARN {tag} update-failed:relaunch:{e}"));
             ulog(format!("install v{tag} OK mais relance impossible — {e}"));
             Err(format!(
-                "v{tag} installée mais relance impossible ({e}) — redémarrez l'app"
+                "update-failed:relaunch:v{tag} installed but relaunch failed ({e}) — restart the app"
             ))
         }
     }
@@ -481,7 +625,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     let app: PathBuf = exe
         .ancestors()
         .find(|p| p.extension().is_some_and(|e| e == "app"))
-        .ok_or("hors bundle .app — update manuelle via la page releases")?
+        .ok_or("update-failed:manual:outside a .app bundle — update manually via the releases page")?
         .to_path_buf();
     tokio::task::spawn_blocking({
         let app = app.clone();
@@ -495,7 +639,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
             let dmg = fetch_release_asset(&tag, "agentcontrol.dmg", |n| {
                 n.ends_with(".dmg") && n.contains(arch)
             })?;
-            let dir = dmg.parent().ok_or("chemin dmg inattendu")?;
+            let dir = dmg.parent().ok_or("update-failed:install:unexpected dmg path")?;
             let run = |cmd: &mut std::process::Command| -> Result<(), String> {
                 let st = cmd.status().map_err(|e| e.to_string())?;
                 if st.success() {
@@ -527,11 +671,11 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
                     .map_err(|e| e.to_string())?
                     .filter_map(|e| e.ok().map(|e| e.path()))
                     .find(|p| p.extension().is_some_and(|e| e == "app"))
-                    .ok_or("pas de .app dans le dmg")?;
+                    .ok_or("update-failed:install:no .app in the dmg")?;
                 let old = app.with_extension("app.old");
                 let _ = std::fs::remove_dir_all(&old);
                 std::fs::rename(&app, &old)
-                    .map_err(|e| format!("{} non remplaçable: {e}", app.display()))?;
+                    .map_err(|e| format!("update-failed:install:{} cannot be replaced: {e}", app.display()))?;
                 if let Err(e) = run(std::process::Command::new("ditto").arg(&src).arg(&app)) {
                     let _ = std::fs::remove_dir_all(&app);
                     let _ = std::fs::rename(&old, &app);
@@ -576,10 +720,10 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
             std::process::exit(0);
         }
         Err(e) => {
-            write_update_status(&format!("WARN {tag} relance impossible : {e}"));
+            write_update_status(&format!("WARN {tag} update-failed:relaunch:{e}"));
             ulog(format!("install v{tag} OK mais relance impossible — {e}"));
             Err(format!(
-                "v{tag} installée mais relance impossible ({e}) — redémarrez l'app"
+                "update-failed:relaunch:v{tag} installed but relaunch failed ({e}) — restart the app"
             ))
         }
     }
@@ -639,7 +783,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
                 format!("start \"\" /wait \"{}\" /S", setup.display()),
                 String::new(),
                 String::new(),
-                "installer exited with code %errorlevel%".into(),
+                "update-failed:install:installer exited with code %errorlevel%".into(),
             )
         } else if let Some(pf) = program_files_root(&cur_l) {
             ulog(format!("exe sous {pf} → chemin msi (per-machine, élévation UAC)"));
@@ -656,7 +800,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .map_err(|e| {
                 let msg = format!(
-                    "{e} — prenez l'installateur MSI v{tag} à la main : page releases"
+                    "{e} — grab the MSI installer v{tag} by hand: releases page"
                 );
                 ulog(format!("install v{tag} impossible — {msg}"));
                 msg
@@ -691,7 +835,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
                 ),
                 format!("del \"{}\"\r\n", ps1.display()),
                 String::new(),
-                "msiexec failed with code %errorlevel%".into(),
+                "update-failed:install:msiexec failed with code %errorlevel%".into(),
             )
         } else {
             dir_writable_or_err(&cur, &tag)?;
@@ -709,7 +853,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .map_err(|e| {
                 let msg = format!(
-                    "{e} — prenez le build portable v{tag} à la main : page releases"
+                    "{e} — grab the portable build v{tag} by hand: releases page"
                 );
                 ulog(format!("install v{tag} impossible — {msg}"));
                 msg
@@ -735,7 +879,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
                 ),
                 String::new(),
                 format!("del \"{new}\" 2>nul\r\n"),
-                "replace failed with code %errorlevel%".into(),
+                "update-failed:install:replace failed with code %errorlevel%".into(),
             )
         };
     // cmd /C : ping ≈ sleep 1 s sans console (timeout.exe exige un handle
@@ -758,7 +902,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     std::fs::write(
         &bat,
         format!(
-            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\n{action}\r\nif errorlevel 1 goto fail\r\n>\"{st}\" echo OK {tag}\r\ndel \"{dls}\"\r\n{ok_dels}start \"\" \"{curs}\"\r\nif errorlevel 1 >\"{st}\" echo WARN {tag} relance impossible\r\ndel \"%~f0\" & exit /b 0\r\n:fail\r\n>\"{st}\" echo FAIL {cause}\r\n{fail_dels}start \"\" \"{curs}\"\r\nexit /b 1\r\n"
+            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\n{action}\r\nif errorlevel 1 goto fail\r\n>\"{st}\" echo OK {tag}\r\ndel \"{dls}\"\r\n{ok_dels}start \"\" \"{curs}\"\r\nif errorlevel 1 >\"{st}\" echo WARN {tag} update-failed:relaunch:relaunch failed\r\ndel \"%~f0\" & exit /b 0\r\n:fail\r\n>\"{st}\" echo FAIL {cause}\r\n{fail_dels}start \"\" \"{curs}\"\r\nexit /b 1\r\n"
         ),
     )
     .map_err(|e| e.to_string())?;
@@ -811,9 +955,9 @@ fn dir_writable_or_err(cur: &std::path::Path, tag: &str) -> Result<(), String> {
         }
         Err(e) => {
             let msg = format!(
-                "dossier en lecture seule — {dir} non inscriptible ({e}) : \
-                 l'exe ne peut pas être remplacé ; déplacez-le ou prenez \
-                 le build portable v{tag} sur la page releases"
+                "update-failed:writable:read-only directory — {dir} not writable ({e}): \
+                 the exe cannot be replaced; move it or grab the portable \
+                 build v{tag} from the releases page"
             );
             ulog(format!("chemin portable refusé — {msg}"));
             Err(msg)
@@ -861,5 +1005,63 @@ mod tests {
         );
         let listing = "/etc/agentcontrol/agentcontrol.conf\n/usr/lib/agentcontrol/x\n";
         assert_eq!(deb_binary_from_listing(listing), None);
+    }
+
+    /// Sélection de l'asset APK de la release (chemin update Android) :
+    /// aarch64 prioritaire, tout `.apk` en repli, rien sinon — un
+    /// sélecteur trop large prendrait un asset non installable.
+    #[test]
+    fn apk_asset_picks_aarch64_release() {
+        let rel = serde_json::json!({
+            "assets": [
+                {"name": "AgentControl_0.10.4-rc.1_aarch64-release.apk",
+                 "browser_download_url": "https://x/apk"},
+                {"name": "SHA256SUMS", "browser_download_url": "https://x/sums"},
+                {"name": "agentcontrol-server-x86_64-linux.tar.gz",
+                 "browser_download_url": "https://x/tgz"}
+            ]
+        });
+        assert_eq!(
+            apk::apk_asset(&rel),
+            Some((
+                "AgentControl_0.10.4-rc.1_aarch64-release.apk".to_string(),
+                "https://x/apk".to_string()
+            ))
+        );
+        // Sans aarch64 dans le nom : n'importe quel .apk passe.
+        let rel = serde_json::json!({
+            "assets": [
+                {"name": "app.apk", "browser_download_url": "https://x/a"}
+            ]
+        });
+        assert_eq!(
+            apk::apk_asset(&rel),
+            Some(("app.apk".to_string(), "https://x/a".to_string()))
+        );
+        // Aucun APK → None (l'appelant rend update-failed:download).
+        let rel = serde_json::json!({"assets": []});
+        assert_eq!(apk::apk_asset(&rel), None);
+        // Asset .apk sans URL → ignoré, pas de panique.
+        let rel = serde_json::json!({
+            "assets": [{"name": "x.apk"}]
+        });
+        assert_eq!(apk::apk_asset(&rel), None);
+    }
+
+    /// Garde-fou binaire de l'APK : en-tête ZIP (PK) exigé — une page
+    /// d'erreur HTML ou un fichier tronqué téléchargé à la place de
+    /// l'artefact doit être refusé avant l'installeur.
+    #[test]
+    fn verify_asset_checks_apk_magic() {
+        let dir = std::env::temp_dir().join(format!("ac-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("a.apk");
+        std::fs::write(&good, b"PK\x03\x04rest").unwrap();
+        assert!(verify_asset(&good, "a.apk").is_ok());
+        let bad = dir.join("b.apk");
+        std::fs::write(&bad, b"<html>404</html>").unwrap();
+        let e = verify_asset(&bad, "b.apk").unwrap_err();
+        assert!(e.contains("not an APK"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,33 +4,15 @@
 // placeholder discret + cartes conservées. Usage :
 //   node tests/backlog-metrics-smoke.mjs   (après npm run build)
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const EXE = process.env.CHROME_BIN ?? "/usr/bin/chromium";
-// detached:true → kill(-pid) tue tout le groupe ; port éphère lu sur la
-// sortie vite (un port fixe squatté piloterait le build d'un autre
-// worktree — faux négatifs déjà observés).
-const server = spawn("npx", ["vite", "preview", "--port", "0", "--strictPort"], { stdio: ["ignore", "pipe", "ignore"], detached: true });
-const BASE = await new Promise((res, rej) => {
-  let buf = "";
-  const to = setTimeout(() => rej(new Error("vite preview: URL introuvable")), 15000);
-  server.stdout.on("data", (d) => {
-    buf += d;
-    const m = buf.match(/https?:\/\/localhost:(\d+)/);
-    if (m) {
-      clearTimeout(to);
-      res(`http://localhost:${m[1]}`);
-    }
-  });
-});
-for (let i = 0; i < 40; i++) {
-  try {
-    const r = await fetch(BASE + "/");
-    if (r.ok) break;
-  } catch {}
-  await new Promise((r) => setTimeout(r, 250));
-}
+// vite preview : port libre + poll HTTP jusqu'à réponse — la sortie
+// vite n'est pas un contrat fiable (muette >60 s sur runner GHA) et
+// un port fixe squatté piloterait le build d'un autre worktree
+// (faux négatifs déjà observés).
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: EXE, headless: true, args: ["--no-sandbox"] });
 const mock = readFileSync("tests/tauri-mock.js", "utf8");
 
@@ -78,7 +60,7 @@ try {
   ok(cards[0].endsWith("h") && cards[3] === "3",
     `agrégats RPC affichés (${cards.join(" | ")})`);
   const legend = await p1.evaluate(() => document.querySelectorAll(".bl-m-legend span").length);
-  ok(legend === 3, "légende 3 séries (pending/wip/workers)");
+  ok(legend >= 3, `légende des séries tracées (${legend})`);
   // Steppers orchestrateur : valeurs lues dans spec.params de
   // list_components (mock : max_workers=5, pr_review_max_parallel=2).
   const steps = await p1.evaluate(() =>

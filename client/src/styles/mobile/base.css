@@ -1,0 +1,95 @@
+/* ── Android / tactile — règles génériques + chrome de l'app ──────────── */
+#scrim {
+  position: fixed; inset: 0; z-index: 39;
+  background: rgba(0, 0, 0, .45);
+}
+#tb-more, #chat-more { display: none; }
+/* WebView Android : backdrop-filter rend flou/lent → surfaces solides. */
+body.android * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+body.android {
+  font-size: 15px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+  /* Titlebar : 56px utiles SOUS la status bar — l'inset s'ajoute à la
+    hauteur (border-box l'écraserait sinon : boutons 44px dans 56−inset). */
+  --tb-h: calc(56px + env(safe-area-inset-top));
+}
+body.android #titlebar,
+body.android #sidebar,
+body.android #file-panel,
+body.android #chat-header,
+body.android #composer,
+body.android #queue-bar,
+body.android #queue-panel,
+body.android #pins-panel,
+body.android #steps-panel,
+body.android .toast {
+  background: var(--panel-solid);
+}
+body.android #titlebar {
+  padding: env(safe-area-inset-top) 8px 0 8px;
+}
+body.android #titlebar-gem { width: 24px; height: 24px; }
+body.android #titlebar-title { font-size: 15px; }
+body.android .tb-btns button {
+  font-size: 17px; padding: 10px 13px; min-width: 44px; min-height: 44px;
+}
+body.android #tb-min, body.android #tb-max, body.android #tb-close,
+body.android .resize-edge, body.android #sidebar-resize {
+  display: none !important;
+}
+#tb-menu {
+  border: 0; background: transparent; color: var(--muted);
+  font-size: 18px; padding: 4px 10px; flex: none;
+}
+body.android #tb-menu { font-size: 24px; min-width: 44px; min-height: 44px; }
+/* Barre d'app mobile : un seul ⋮ au lieu des boutons fenêtre/settings —
+   #tb-logs aussi (l'entrée vit dans la feuille ⋮), et la pill update
+   (elle mange la place du titre d'accueil — l'entrée vit dans ⋮). */
+body.android #tb-settings, body.android #tb-about,
+body.android #tb-logs, body.android #tb-components,
+body.android .tb-update,
+body.android #tb-map { display: none; }
+/* Hors accueil, #chat (fixed inset:0) recouvre la titlebar : la masquer
+   évite qu'elle ne transparaisse sous les overlays transparents (#map-view). */
+body.android:not(.m-home) #titlebar { visibility: hidden; }
+body.android #tb-more { display: inline-block; font-size: 22px; min-width: 44px; min-height: 44px; padding: 10px 13px; }
+
+/* ── Cibles tactiles ≥44px (audit Android) ────────────────────────────── */
+/* Chip update dans la titlebar (56px de haut — 44 tient sans la gonfler) */
+body.android .tb-update { min-height: 44px; }
+/* Fermeture de toast : ✕ gardé petit visuellement, boîte transparente 44px. */
+body.android .toast-x { min-width: 44px; min-height: 44px; padding: 0; font-size: 12px; }
+/* Checkbox : vraie boîte 44px (cible mesurée), carré visuel ~26px dessiné
+   au centre — appearance:none rend les pseudo-éléments possibles dans la
+   WebView Chromium. --accent suivi → thèmes couleur OK. */
+body.android input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 44px; height: 44px; margin: 0; padding: 0; flex: none;
+  position: relative; border: 0; background: none;
+}
+body.android input[type="checkbox"]::before {
+  content: ""; position: absolute; inset: 9px;
+  border: 1.5px solid var(--line-strong); border-radius: 6px;
+  background: rgba(var(--tint-rgb), .06);
+}
+body.android input[type="checkbox"]:checked::before {
+  background: var(--accent); border-color: var(--accent);
+}
+body.android input[type="checkbox"]::after {
+  content: ""; position: absolute; left: 19px; top: 14px;
+  width: 5px; height: 11px;
+  border: solid transparent; border-width: 0 2.5px 2.5px 0;
+  transform: rotate(45deg);
+}
+body.android input[type="checkbox"]:checked::after {
+  border-color: var(--msg-user-fg);
+}
+body.android input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+body.android #statusbar { display: none; }

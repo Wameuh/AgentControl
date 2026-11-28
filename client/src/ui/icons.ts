@@ -24,6 +24,10 @@ const SHAPES: Record<string, string> = {
   refresh:
     '<path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/>' +
     '<path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/>',
+  // Demi-refresh (une seule flèche, en bas à gauche) — pour les actions de
+  // « re-sondage » (caps modèles/modes) à distinguer du reload de session.
+  sync:
+    '<path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/>',
   play: '<path d="M8 5v14l11-7Z"/>',
   merge:
     '<circle cx="6" cy="6" r="2.7"/><circle cx="18" cy="18" r="2.7"/>' +
@@ -40,7 +44,16 @@ const SHAPES: Record<string, string> = {
   terminal:
     '<rect x="3" y="4.5" width="18" height="15" rx="2"/>' +
     '<path d="m6.5 9 3.5 3-3.5 3"/><path d="M12.5 15.5H17"/>',
+  // Terminal réduit + badge « + » — « nouveau shell » (pas un reload).
+  "term-new":
+    '<rect x="2.5" y="5" width="14" height="11.5" rx="2"/>' +
+    '<path d="m5.5 8.5 2.6 2.3-2.6 2.3"/><path d="M9.6 13h2.9"/>' +
+    '<path d="M19.5 2.5v5M17 5h5"/>',
   panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9.5 4v16"/>',
+  // Raccrocher une fenêtre flottante au panneau (flèche rentrante)
+  dock:
+    '<rect x="3" y="4" width="18" height="16" rx="2"/>' +
+    '<path d="M17.5 12H8"/><path d="m11.5 8.5-3.5 3.5 3.5 3.5"/>',
   down: '<path d="M12 4v12"/><path d="m6 12 6 6 6-6"/><path d="M5 21h14"/>',
   steer: '<path d="m15 10 5 5-5 5"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/>',
   pin:
@@ -116,6 +129,12 @@ const SHAPES: Record<string, string> = {
     '<path d="M8.5 6h12M8.5 12h12M8.5 18h12"/>' +
     '<path d="m3 5.9 1.2 1.2 2.3-2.4"/><path d="m3 11.9 1.2 1.2 2.3-2.4"/>' +
     '<path d="m3 17.9 1.2 1.2 2.3-2.4"/>',
+  // Liste d'étapes de tâche (cases + traits — progression agent)
+  steps:
+    '<rect x="4" y="4.5" width="3.2" height="3.2" rx="0.8"/>' +
+    '<rect x="4" y="10.4" width="3.2" height="3.2" rx="0.8"/>' +
+    '<rect x="4" y="16.3" width="3.2" height="3.2" rx="0.8"/>' +
+    '<path d="M10.5 6h9.5M10.5 12h9.5M10.5 18h9.5"/>',
   // Panneau logs live (journaux client + démon)
   scroll:
     '<path d="M6 3.5h12A1.5 1.5 0 0 1 19.5 5v15.5l-3-2-3.5 2-3.5-2-3 2V5A1.5 1.5 0 0 1 6 3.5Z"/>' +
@@ -131,6 +150,10 @@ const SHAPES: Record<string, string> = {
   copy:
     '<rect x="9" y="9" width="12" height="12" rx="2"/>' +
     '<path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5"/>',
+  sliders:
+    '<path d="M4 6h16"/><circle cx="9" cy="6" r="2" fill="currentColor" stroke="none"/>' +
+    '<path d="M4 12h16"/><circle cx="15" cy="12" r="2" fill="currentColor" stroke="none"/>' +
+    '<path d="M4 18h16"/><circle cx="7" cy="18" r="2" fill="currentColor" stroke="none"/>',
   // QR code (appairage)
   qr:
     '<rect x="4" y="4" width="6" height="6" rx="1"/>' +
@@ -138,6 +161,33 @@ const SHAPES: Record<string, string> = {
     '<rect x="4" y="14" width="6" height="6" rx="1"/>' +
     '<path d="M14 14h2.5v2.5H14z"/><path d="M20 14v1.5"/>' +
     '<path d="M14 20h1.5"/><path d="M18.5 18.5H20V20h-1.5z"/>',
+  // Catégories des préférences (rail) + menu Options
+  palette:
+    '<path d="M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.3A4.7 4.7 0 0 0 21 9.7C21 6 17 3 12 3Z"/>' +
+    '<circle cx="7.5" cy="10.5" r="1" fill="currentColor" stroke="none"/>' +
+    '<circle cx="12" cy="7.5" r="1" fill="currentColor" stroke="none"/>' +
+    '<circle cx="16.5" cy="10.5" r="1" fill="currentColor" stroke="none"/>',
+  bell:
+    '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>' +
+    '<path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  msg: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>',
+  activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  key:
+    '<circle cx="7.5" cy="15.5" r="4.5"/>' +
+    '<path d="m10.7 12.3 8.8-8.8"/><path d="m17 6 3 3"/><path d="m14.5 8.5 2 2"/>',
+  users:
+    '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>' +
+    '<path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  monitor:
+    '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
+  server:
+    '<rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/>' +
+    '<path d="M6 7h.01"/><path d="M6 17h.01"/>',
+  undo: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+  // Retour à la ligne (bloc de code mobile)
+  wrap:
+    '<path d="M3.5 6h17"/><path d="M3.5 12h14a3 3 0 0 1 0 6H13"/>' +
+    '<path d="m15 15.5-2.5 2.5 2.5 2.5"/><path d="M3.5 18h5"/>',
 };
 
 export type IconName = keyof typeof SHAPES;
@@ -147,7 +197,7 @@ export type IconName = keyof typeof SHAPES;
 export function icon(name: IconName, cls = ""): string {
   let safe = name;
   if (!(name in SHAPES)) {
-    console.warn(`[icons] nom d'icône inconnu: ${name}`);
+    console.warn(`[icons] unknown icon name: ${name}`);
     safe = "sys";
   }
   return (

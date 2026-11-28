@@ -7,6 +7,8 @@ mod commands;
 mod instance;
 mod state;
 mod stream;
+#[cfg(target_os = "windows")]
+mod windows_pin;
 
 use state::AppState;
 use tauri::Manager;
@@ -103,6 +105,11 @@ pub fn run() {
     // les raccourcis des installateurs.
     #[cfg(target_os = "windows")]
     set_app_user_model_id(context.config().identifier.as_str());
+    // Pins taskbar créés avant l'AUMID explicite : .lnk sans
+    // System.AppUserModel.ID → icône « sautée » à chaque update.
+    // Réparation one-shot en arrière-plan (PowerShell + IPropertyStore).
+    #[cfg(target_os = "windows")]
+    windows_pin::spawn_fix(context.config().identifier.as_str());
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -151,12 +158,14 @@ pub fn run() {
             cli_conn: cli_conn_arg(),
             next_gen: std::sync::atomic::AtomicU64::new(0),
             list_page: Mutex::new(std::collections::HashMap::new()),
+            pr_page: Mutex::new(std::collections::HashMap::new()),
+            pr_cache: Mutex::new(std::collections::HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect::connect,
             commands::connect::disconnect,
             commands::connect::subscribe,
-            commands::connect::ensure_daemon,
+            commands::ensure_daemon::ensure_daemon,
             commands::session::call,
             commands::files::write_download,
             commands::files::clipboard_file_stat,
@@ -174,6 +183,7 @@ pub fn run() {
             commands::pair::pair_devices,
             commands::pair::pair_revoke,
             commands::pair::pair_attempt,
+            commands::open_url::open_url_ext,
             commands::system::app_version,
             commands::system::platform,
             commands::system::cli_conn,
@@ -181,6 +191,7 @@ pub fn run() {
             commands::system::spawn_instance,
             commands::system::ssh_pubkey,
             commands::system::sys_stats,
+            commands::system::mem_breakdown,
             commands::system::log_tail,
             commands::system::log_read,
             commands::system::log_write,
@@ -196,8 +207,12 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_ac_keystore::init())
         // Verdict « update in-place possible » (signature de l'APK
-        // installé vs certificat release) — garde-fou uninstall Android.
-        .plugin(tauri_plugin_ac_device::init());
+        // installé vs certificat release) — garde-fou uninstall Android
+        // (+ barres système lisibles dans les deux thèmes, Y4).
+        .plugin(tauri_plugin_ac_device::init())
+        // Retour haptique : envoi, réponse à une demande, question au
+        // premier plan — coupé avec les sons côté webview.
+        .plugin(tauri_plugin_haptics::init());
     builder
         .run(context)
         .expect("error while running tauri application");

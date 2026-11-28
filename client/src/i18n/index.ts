@@ -6,10 +6,10 @@
 // {mod} est un placeholder implicite, substitué par t() dans toutes les
 // chaînes (ex. "{mod}+Enter = force"). Détection UA synchrone, cohérente
 // avec isAndroid/isWindows de core/chrome.
-import { en, type Key } from "./en";
-import { fr } from "./fr";
-import { es } from "./es";
-import { de } from "./de";
+import { en, type Key } from "./en.ts";
+import { fr } from "./fr.ts";
+import { es } from "./es.ts";
+import { de } from "./de.ts";
 
 const MOD = /Mac OS X|Macintosh/i.test(navigator.userAgent) ? "Cmd" : "Ctrl";
 
@@ -49,7 +49,8 @@ export function t(k: Key, vars?: Record<string, string | number>): string {
   return s;
 }
 
-/** Traduit les éléments marqués data-i18n / data-i18n-ph / data-i18n-title. */
+/** Traduit les éléments marqués data-i18n / data-i18n-ph / data-i18n-title
+ *  / data-i18n-aria (aria-label — ex. boutons iconifiés sous Android). */
 export function applyStatic() {
   document.documentElement.lang = lang;
   for (const el of document.querySelectorAll<HTMLElement>("[data-i18n]")) {
@@ -60,5 +61,8 @@ export function applyStatic() {
   }
   for (const el of document.querySelectorAll<HTMLElement>("[data-i18n-title]")) {
     el.title = t(el.dataset.i18nTitle as Key);
+  }
+  for (const el of document.querySelectorAll<HTMLElement>("[data-i18n-aria]")) {
+    el.setAttribute("aria-label", t(el.dataset.i18nAria as Key));
   }
 }

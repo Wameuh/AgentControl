@@ -14,17 +14,15 @@
 //      encore ouvert n'est jamais stripé par le close de l'autre.
 //   J. Clic sur une session de la sidebar pendant que la vue est
 //      ouverte → la vue se ferme (comme le panneau settings).
+//   K. TOFU natif : auto-connect → hostkey-unknown → dialogue avec
+//      l'empreinte → confirmation → retry épinglé + profil persisté.
 // Usage : node tests/conn-view-smoke.mjs   (après npm run build)
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const EXE = process.env.CHROME_BIN ?? "/usr/bin/chromium";
-const PORT = process.env.PORT ?? "4210";
-// detached:true → kill(-pid) tue tout le groupe (npx → sh → vite) : sinon le
-// preview survit orphelin après la fin du test.
-const server = spawn("npx", ["vite", "preview", "--port", PORT, "--strictPort"], { stdio: "ignore", detached: true });
-await new Promise((r) => setTimeout(r, 1800));
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: EXE, headless: true, args: ["--no-sandbox"] });
 const mock = readFileSync("tests/tauri-mock.js", "utf8");
 
@@ -33,7 +31,7 @@ const PATCH = `(() => {
   const inv = window.__TAURI_INTERNALS__.invoke;
   const keyOf = (c) => !c ? "" : c.kind === "ssh" ? \`\${c.native ? "ssh-native" : "ssh"}:\${c.host}:\${c.port ?? 22}\`
     : c.kind === "tcp" ? \`tcp:\${c.addr}\` : c.kind === "web" ? "web" : "local";
-  window.__saved = window.__saved ?? []; window.__calls = { save: [], remove: [], connect: [] };
+  window.__saved = window.__saved ?? []; window.__calls = { save: [], remove: [], connect: [], pair_begin: [] };
   window.__TAURI_INTERNALS__.invoke = (cmd, args) => {
     if (cmd === "saved_connections") return Promise.resolve(window.__saved);
     if (cmd === "cli_conn") return Promise.resolve(null);
@@ -47,7 +45,24 @@ const PATCH = `(() => {
       window.__saved = window.__saved.filter((c) => keyOf(c) !== keyOf(args?.cfg));
       return Promise.resolve(null);
     }
-    if (cmd === "connect") { window.__calls.connect.push(args?.cfg); }
+    if (cmd === "connect") {
+      window.__calls.connect.push(args?.cfg);
+      // Rejet injecté par le test (consommé une fois) — scénario TOFU :
+      // hostkey-unknown doit ouvrir le dialogue de confirmation avant retry.
+      if (window.__connectReject) {
+        const e = window.__connectReject;
+        window.__connectReject = null;
+        return Promise.reject(e);
+      }
+    }
+    if (cmd === "pair_begin") {
+      window.__calls.pair_begin.push(args);
+      if (window.__pairBeginReject) {
+        const e = window.__pairBeginReject;
+        window.__pairBeginReject = null;
+        return Promise.reject(e);
+      }
+    }
     return inv(cmd, args);
   };
 })();`;
@@ -59,7 +74,7 @@ const initPage = async (saved, hash = "#desktop", extra = "") => {
   await p.evaluateOnNewDocument(mock);
   await p.evaluateOnNewDocument(PATCH);
   await p.evaluateOnNewDocument(`window.__saved = ${JSON.stringify(saved)};` + extra);
-  await p.goto(`http://localhost:${PORT}/${hash}`, { waitUntil: "domcontentloaded" });
+  await p.goto(`${BASE}/${hash}`, { waitUntil: "domcontentloaded" });
   await p.waitForSelector("#btn-connect", { timeout: 15000 });
   await sleep(1200);
   return p;
@@ -206,6 +221,60 @@ await sleep(500);
 ok(!(await viewOpen(pJ)), "J2 clic session → conn-view fermée (comme settings)");
 ok(!(await pJ.evaluate(() => document.getElementById("composer").inert)),
   "J3 #input réutilisable après ouverture de la session");
+
+// ---------- K : TOFU — hostkey-unknown → confirmation → pin + retry ----------
+// Conn ssh-native sauvegardée sans host_keys : l'auto-connect reçoit
+// « hostkey-unknown:<fp> » → le dialogue doit montrer l'empreinte, la
+// confirmation l'épingle (cfg + profil persisté) puis réessaie.
+const SAVED_K = [{ kind: "ssh", host: "tofu.example", user: "u", port: 22,
+  remote_port: 7331, native: true }];
+const pK = await initPage(SAVED_K, "#desktop",
+  `localStorage.removeItem("ac-autoconnect");
+   window.__connectReject = "hostkey-unknown:SHA256:abc";`);
+await sleep(600);
+ok(await pK.evaluate(() => {
+  const d = document.getElementById("dlg-pair");
+  return d.open &&
+    document.getElementById("pair-msg").textContent.includes("SHA256:abc") &&
+    document.getElementById("pair-msg").textContent.includes("ssh-keygen -lf");
+}), "K1 hostkey-unknown → dialogue TOFU affiché avec l'empreinte");
+await pK.evaluate(() => document.getElementById("pair-go").click());
+await sleep(1000);
+const callsK = await pK.evaluate(() => window.__calls);
+ok(callsK.connect.length === 2, "K2 connect réessayé après confirmation");
+ok(JSON.stringify(callsK.connect[1]?.host_keys) === '["SHA256:abc"]',
+  "K3 retry avec host_keys épinglé");
+ok(callsK.save.some((c) => JSON.stringify(c?.host_keys) === '["SHA256:abc"]'),
+  "K4 empreinte persistée via save_connection");
+ok(await pK.evaluate(() => !document.getElementById("dlg-pair").open),
+  "K5 dialogue refermé après confirmation");
+
+// ---------- L : TOFU pair_begin — hôte frais → dialogue → pin + retry ----------
+// Même besoin côté appairage : l'install exec échoue en hostkey-unknown
+// → le dialogue confirme, le profil est épinglé, l'appairage repart.
+const pL = await initPage(SAVED_K, "#desktop",
+  `localStorage.setItem("ac-autoconnect", "0");
+   window.__pairBeginReject = "hostkey-unknown:SHA256:pair42";`);
+await sleep(300);
+await pL.evaluate(() => document.querySelector("#cv-saved .cv-qr").click());
+await sleep(400);
+await pL.evaluate(() => document.getElementById("qr-gen").click());
+await sleep(700);
+ok(await pL.evaluate(() => {
+  const d = document.getElementById("dlg-pair");
+  return d.open &&
+    document.getElementById("pair-msg").textContent.includes("SHA256:pair42");
+}), "L1 pair_begin hostkey-unknown → dialogue TOFU sur la modale QR");
+await pL.evaluate(() => document.getElementById("pair-go").click());
+await sleep(1200);
+const callsL = await pL.evaluate(() => window.__calls);
+ok(callsL.pair_begin.length === 2, "L2 pair_begin réessayé après confirmation");
+ok(JSON.stringify(callsL.pair_begin[1]?.cfg?.host_keys) === '["SHA256:pair42"]',
+  "L3 retry pair_begin avec host_keys épinglé");
+ok(callsL.save.some((c) => JSON.stringify(c?.host_keys) === '["SHA256:pair42"]'),
+  "L4 empreinte persistée via save_connection");
+ok(await pL.evaluate(() => document.getElementById("dlg-pair").open === false),
+  "L5 dialogue TOFU refermé — appairage poursuivi");
 
 console.log(`\n${fails === 0 ? "SMOKE OK" : "SMOKE FAIL"} — ${fails} échec(s)`);
 await b.close();

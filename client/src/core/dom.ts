@@ -4,6 +4,10 @@
 
 import { invoke } from "./bridge";
 
+// esc/q vivent dans ./escape (pur, sans DOM) — ré-exportés ici pour ne
+// pas casser les ~30 imports existants `from "./dom"`.
+export { esc, q } from "./escape";
+
 export const $ = <T extends HTMLElement>(id: string) =>
   document.getElementById(id) as T;
 
@@ -13,14 +17,7 @@ export function logUi(level: "debug" | "info" | "warn" | "error", msg: string) {
   invoke("log_write", { level, msg }).catch(() => {});
 }
 
-export function esc(s: string): string {
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
-}
-
-// Pour les valeurs insérées dans un attribut "…" : esc() n'échappe pas '"'.
-export const q = (s: string) => s.replace(/"/g, "&quot;");
+// esc/q : voir ./escape (ré-exporté ci-dessus).
 
 // ---------------------------------------------------------------------------
 // Notifications toast (coin haut-droit) : info/success/warn/error empilés.

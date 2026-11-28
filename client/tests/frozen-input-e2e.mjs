@@ -6,7 +6,7 @@
 //  3. Watchdog : inert résiduel retiré ; dialog open-invisible fermé.
 // Usage : npm run build && node tests/frozen-input-e2e.mjs
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
 
@@ -73,7 +73,7 @@ const MOCK = `(function () {
           return p.then(() => {
             if (args.cfg.kind === "ssh" && !window.__sshTried) {
               window.__sshTried = true;
-              throw "connection refused";
+              throw "connect-failed:daemon-absent:connection refused";
             }
             return { version: "0.6.0", sessions: 1, servers: 1 };
           });
@@ -81,6 +81,7 @@ const MOCK = `(function () {
         case "call": return p.then(() => rpc(args.method, args.params ?? {}));
         case "subscribe": return p.then(() => null);
         case "saved_connections": case "ssh_hosts": return p.then(() => []);
+        case "other_instances": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAA x");
         case "check_update": return p.then(() => { throw new Error("offline"); });
         case "get_version": return p.then(() => "0.6.0");
@@ -90,9 +91,7 @@ const MOCK = `(function () {
   };
 })();`;
 
-const server = spawn("npx", ["vite", "preview", "--port", "4194", "--strictPort"], { stdio: "ignore" });
-process.on("exit", () => server.kill());
-await new Promise((r) => setTimeout(r, 1800));
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: true, args: ["--no-sandbox"] });
 const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
@@ -126,7 +125,7 @@ const typedDuringModal = async (id) => {
   return { before, after, blocked: after === before };
 };
 
-await p.goto("http://localhost:4194/", { waitUntil: "networkidle0" });
+await p.goto(BASE + "/", { waitUntil: "networkidle0" });
 await p.waitForSelector("#btn-connect", { timeout: 15000 });
 await click("#btn-connect"); await sleep(300);
 await p.evaluate(() => {
@@ -205,7 +204,7 @@ await sleep(2600);
 check("watchdog : inert résiduel retiré", await p.evaluate(
   () => !document.getElementById("events").inert));
 const logs = await p.evaluate(() => window.__logs.join("\n"));
-check("watchdog : réparation loguée", /inert résiduel/.test(logs),
+check("watchdog : réparation loguée", /residual inert/.test(logs),
   logs.split("\n").filter((l) => l.includes("watchdog")).join(" | "));
 
 await p.evaluate(() => {
@@ -216,7 +215,7 @@ await p.evaluate(() => {
 await sleep(2600);
 check("watchdog : dialog invisible fermé", !(await dlgOpen("dlg-about")));
 const logs2 = await p.evaluate(() => window.__logs.join("\n"));
-check("watchdog : dialog invisible logué", /invisible → fermé/.test(logs2));
+check("watchdog : dialog invisible logué", /invisible → closed/.test(logs2));
 check("modal open logué dans client.log", /modal \+#dlg-about/.test(logs2));
 
 console.log(`\n${pass} PASS, ${fail} FAIL`);

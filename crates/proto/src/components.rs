@@ -238,6 +238,11 @@ pub struct ParamSpec {
     /// `comp_param_badenum`. Sans effet hors `kind=enum`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub open_enum: bool,
+    /// Section d'affichage du formulaire (« workers », « pipeline »…)
+    /// — les params consécutifs de même groupe sont regroupés sous un
+    /// titre côté client ; absent/vide = flux continu.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// Cible de rendu de la config utilisateur — template TOML dans lequel

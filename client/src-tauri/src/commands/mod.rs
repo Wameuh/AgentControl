@@ -3,7 +3,9 @@
 //! au module de chaque commande).
 
 pub mod connect;
+pub mod ensure_daemon;
 pub mod files;
+pub mod open_url;
 pub mod pair;
 pub mod saved;
 pub mod session;

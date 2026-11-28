@@ -23,9 +23,53 @@ import type { ConnectionManager } from "./connections";
 
 // Étapes du script ensure_daemon — chaque `echo step:<id>` distant est
 // streamé (stderr/stdout selon le transport) en event `daemon-step`.
-const SCRIPT_STEPS = ["check", "download", "install", "service", "verify"];
+const SCRIPT_STEPS = ["check", "download", "integrity", "push", "install", "service", "verify"];
 // Variante pour l'auto-update via ReqKind::UpdateDaemon (pas de script).
 const SELF_STEPS = ["send", "restart"];
+
+/** Préfixe d'erreur typée émis par la commande Tauri `connect` :
+ *  `connect-failed:<kind>:<detail>` — kinds `transport` |
+ *  `daemon-absent` | `daemon-unresponsive` | `auth`
+ *  (commands/connect.rs — `auth` = rejet du jeton démon, B1).
+ *  Seul `daemon-absent` justifie la proposition d'install : tout autre
+ *  échec (auth, DNS, timeout, démon gelé) doit montrer sa cause réelle. */
+const CONNECT_FAIL_RE =
+  /^connect-failed:(transport|daemon-absent|daemon-unresponsive|auth):([\s\S]*)$/;
+
+/// « addr » d'une conn TCP directe en loopback ? Mêmes critères que
+/// check_loopback côté démon : 127.0.0.0/8, ::1 ou localhost (brackets
+/// IPv6 et « host:port » acceptés ; pas de résolution DNS ici).
+function isLoopbackAddr(addr: string): boolean {
+  let h = addr.trim();
+  if (h.startsWith("[")) {
+    const end = h.indexOf("]");
+    if (end > 0) h = h.slice(1, end);
+  } else if ((h.match(/:/g) ?? []).length === 1) {
+    h = h.slice(0, h.indexOf(":"));
+  }
+  const v4 = h.split(".");
+  return (
+    h === "localhost" ||
+    h === "::1" ||
+    (v4.length === 4 && v4.every((p) => /^\d{1,3}$/.test(p)) && v4[0] === "127")
+  );
+}
+
+/** Signature reconnaissable dans le détail d'un échec → clé i18n du
+ *  message (cause + hint d'action) ; repli = libellé générique, le détail
+ *  brut suit toujours le message. */
+function transportHint(detail: string): Key {
+  const d = detail.toLowerCase();
+  if (/permission denied|password refused|auth failed|key refused|disposable key refused/.test(d))
+    return "connfail_auth";
+  if (/could not resolve|name or service|nodename nor servname|temporary failure in name|no such host/.test(d))
+    return "connfail_dns";
+  if (/timed? ?out|no route to host|network is unreachable/.test(d))
+    return "connfail_unreachable";
+  if (/connection refused|refused|refus/.test(d)) return "connfail_refused";
+  if (/openssh|spawn ssh/.test(d)) return "connfail_ssh_missing";
+  return "connfail_transport";
+}
 
 export class ConnView {
   private conns!: ConnectionManager;
@@ -82,6 +126,31 @@ export class ConnView {
   private report(msg: string, level: "info" | "success" | "warn" | "error" = "error") {
     if (this.isOpen()) dlgErr("c-err", msg);
     else notify(level, msg);
+  }
+
+  /** Message affichable d'un échec `connect` : l'erreur typée
+   *  `connect-failed:<kind>:<detail>` est traduite en libellé i18n +
+   *  cause brute (bornée côté Rust) ; sans préfixe (vieux client-core,
+   *  transport web) l'erreur brute EST la cause réelle. La classe
+   *  n'est jamais mémorisée — chaque tentative est reclassée. */
+  private connectErrorMsg(e: unknown, cfg: Record<string, unknown>): string {
+    const s = String(e);
+    const m = CONNECT_FAIL_RE.exec(s);
+    const kind = m?.[1];
+    const detail = (m?.[2] ?? s).replace(/\s+/g, " ").trim();
+    const host = String(cfg.host ?? cfg.addr ?? cfg.path ?? "local");
+    const msg =
+      kind === "daemon-unresponsive"
+        ? t("connfail_unresponsive", {
+            host,
+            port: Number(cfg.remote_port) || 7331,
+          })
+        : kind === "daemon-absent"
+          ? t("connfail_absent", { host })
+          : kind === "auth"
+            ? t("connfail_daemon_auth")
+            : t(transportHint(detail));
+    return detail ? `${msg} — ${detail}` : msg;
   }
 
   /** Ligne de statut du flux de connexion (étape en cours). */
@@ -203,13 +272,17 @@ export class ConnView {
   }
 
   /** `ensure_daemon` via le script distant, derrière la progression inline.
-   *  Retourne la réponse ("ok:*"|"newer:*"|"busy:*"|"installed:*"). */
+   *  Retourne la réponse ("ok:*"|"newer:*"|"busy:*"|"managed:*"|"installed:*").
+   *  `allowManaged` ne se passe qu'après confirmation explicite de
+   *  l'utilisateur — la sonde saute alors sa garde « managé ailleurs ». */
   private async runDaemonScript(
     cfg: Record<string, unknown>, tag: string, msg: string,
+    allowManaged = false,
   ): Promise<string> {
     this.daemonShow(msg, SCRIPT_STEPS);
     try {
-      const res = await invoke<string>("ensure_daemon", daemonParams(cfg, tag));
+      const res = await invoke<string>(
+        "ensure_daemon", daemonParams(cfg, tag, allowManaged));
       this.daemonFinish();
       // Laisser voir l'état « toutes étapes ✓ » un instant avant de cacher.
       await new Promise((r) => setTimeout(r, 450));
@@ -226,6 +299,15 @@ export class ConnView {
    *  erreur. */
   private async confirmDaemonInstall(host: string): Promise<boolean> {
     return this.daemonAction(t("dinstall_h"), t("dinstall_msg", { host }), t("install_now"));
+  }
+
+  /** Sonde `managed:*` : des traces d'une gestion ailleurs (clé
+   *  appairée, ~/.agentcontrol, conteneur/compose docker) ou un démon
+   *  down indiquent que l'install locale serait une erreur — proposer
+   *  « installer quand même » comme choix explicite, jamais par défaut. */
+  private confirmDaemonManaged(host: string, detail: string): Promise<boolean> {
+    return this.daemonAction(
+      t("dmanaged_h"), t("dmanaged_msg", { host, detail }), t("install_anyway"));
   }
 
   /** Dialogue de confirmation générique pour une action mutante sur le
@@ -271,34 +353,65 @@ export class ConnView {
       // Toujours établir la connexion — daemon_status fusionné renvoie Ok
       // même sans connexions, il ne peut pas servir de pré-vérification.
       status = await invoke("connect", { cfg });
-    } catch (e) {
-      // Host key divergée d'un profil appairé : rotation possible, mais
-      // JAMAIS acceptée silencieusement — re-confirmation explicite,
-      // puis le nouveau fp remplace le pinning persisté (la save qui
-      // suit propage la nouvelle empreinte).
-      const m = /hostkey-mismatch:(\S+)/.exec(String(e));
-      if (m && cfg.kind === "ssh") {
+    } catch (e0) {
+      let e = e0;
+      // Host key divergée d'un profil épinglé, ou inconnue à la première
+      // connexion native : rotation possible, mais JAMAIS acceptée
+      // silencieusement — confirmation explicite, puis le fp devient le
+      // pinning persisté (TOFU). L'erreur du retry repasse par la
+      // classification normale (daemon-absent → bootstrap…).
+      const mm = /hostkey-mismatch:(\S+)/.exec(String(e));
+      const mu = /hostkey-unknown:(\S+)/.exec(String(e));
+      if ((mm || mu) && cfg.kind === "ssh") {
+        const fp = (mm ?? mu)![1];
+        const where = `${cfg.user ? cfg.user + "@" : ""}${cfg.host}:${cfg.port ?? 22}`;
         const ok = await confirmPair(
-          t("hk_h"),
-          t("hk_msg", { where: `${cfg.user ? cfg.user + "@" : ""}${cfg.host}:${cfg.port ?? 22}`, fp: m[1] }),
-          t("hk_go"),
+          mm ? t("hk_h") : t("hk_new_h"),
+          mm ? t("hk_msg", { where, fp }) : t("hk_new_msg", { where, fp }),
+          mm ? t("hk_go") : t("hk_new_go"),
         );
         if (!ok) throw e;
-        cfg.host_keys = [m[1]];
+        cfg.host_keys = [fp];
+        // Épinglage persisté tout de suite : tous les chemins —
+        // liste des connexions, auto-connect, formulaire — voient la
+        // confirmation survivre (go() le ré-écrira après succès).
+        await invoke("save_connection", { cfg }).catch(() => {});
         this.cStatus(t("connecting_to", { host }));
-        status = await invoke("connect", { cfg });
-      } else {
-      // SSH : échec → démon absent ou arrêté → bootstrap depuis la release.
-      if (cfg.kind !== "ssh" || !cfg.host) throw e;
+        try {
+          status = await invoke("connect", { cfg });
+        } catch (e2) {
+          e = e2;
+        }
+      }
+      if (status === undefined) {
+      // Erreur typée `connect-failed:<kind>:<detail>` : SEUL
+      // `daemon-absent` (transport OK, port démon refusé) justifie le
+      // bootstrap — auth refusée, DNS, timeout, démon gelé ou kind
+      // inconnu (vieux client-core) affichent la cause réelle, jamais
+      // d'install proposée.
+      const cf = CONNECT_FAIL_RE.exec(String(e));
+      if (cf?.[1] === "daemon-absent" && cfg.kind === "ssh" && cfg.host) {
       const ver = await getVersion().catch(() => "0.0.0");
       // L'install copie des binaires + une unit systemd sur l'hôte : si la
       // connexion pointe un démon managé autrement (conteneur, superviseur,
       // port forwardé) mais momentanément down, installer ici écraserait
       // l'hôte — confirmation explicite avant toute mutation.
-      if (!(await this.confirmDaemonInstall(String(cfg.host)))) throw e;
-      const res = await this.runDaemonScript(
+      if (!(await this.confirmDaemonInstall(String(cfg.host))))
+        throw this.connectErrorMsg(e, cfg);
+      let res = await this.runDaemonScript(
         cfg, ver, t("installing_daemon") + " — " + host,
       );
+      // `managed:*` : la sonde a trouvé des traces d'une install
+      // managée (incident v0.11.0-rc.2 BUG C) — pas d'install
+      // silencieuse : l'utilisateur choisit explicitement, ou on
+      // abandonne la connexion.
+      if (res.startsWith("managed:")) {
+        if (!(await this.confirmDaemonManaged(String(cfg.host), res.slice(8))))
+          throw this.connectErrorMsg(e, cfg);
+        res = await this.runDaemonScript(
+          cfg, ver, t("installing_daemon") + " — " + host, true,
+        );
+      }
       // Démon plus récent : le script distant refuse le downgrade.
       if (res.startsWith("newer:")) newerDaemon = res.slice(6);
       else if (res.startsWith("busy:")) {
@@ -309,8 +422,11 @@ export class ConnView {
       this.cStatus(t("connecting_to", { host }));
       status = await invoke("connect", { cfg }).catch((e2) => {
         if (newerDaemon) showOutdated(ver, newerDaemon);
-        throw e2;
+        throw this.connectErrorMsg(e2, cfg);
       });
+      } else {
+        throw this.connectErrorMsg(e, cfg);
+      }
       }
     }
     // Incompatibilité de version mineure (x.y) — jamais à chaque patch.
@@ -361,6 +477,9 @@ export class ConnView {
             if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
             else if (res.startsWith("busy:")) {
               this.report(t("dupdate_busy", { host, addr: res.slice(5) }), "warn");
+            } else if (res.startsWith("managed:")) {
+              this.report(
+                t("dmanaged_msg", { host, detail: res.slice(8) }), "warn");
             } else if (res) {
               if (res.startsWith("installed:")) {
                 const got = res.slice(10);
@@ -426,6 +545,7 @@ export class ConnView {
     ($("c-host") as HTMLInputElement).value = c.host ?? c.addr ?? c.path ?? "";
     ($("c-port") as HTMLInputElement).value = String(c.remote_port ?? 7331);
     ($("c-args") as HTMLInputElement).value = (c.args ?? []).join(" ");
+    ($("c-token") as HTMLInputElement).value = c.token ?? "";
     ($("c-sport") as HTMLInputElement).value = String(c.port ?? 22);
     ($("c-user") as HTMLInputElement).value = c.user ?? "";
     ($("c-pass") as HTMLInputElement).value = c.password ?? "";
@@ -440,9 +560,10 @@ export class ConnView {
     this.editing = null;
     ($("cv-form-title") as HTMLElement).textContent = t("new_conn");
     ($("cv-form-reset") as HTMLButtonElement).hidden = true;
+    ($("cv-save") as HTMLButtonElement).hidden = true;
     // Défaut ssh : le cas nominal (démon sur serveur distant).
     ($("c-kind") as HTMLSelectElement).value = "ssh";
-    for (const id of ["c-host", "c-args", "c-user", "c-pass"]) {
+    for (const id of ["c-host", "c-args", "c-user", "c-pass", "c-token"]) {
       ($(id) as HTMLInputElement).value = "";
     }
     ($("c-port") as HTMLInputElement).value = "7331";
@@ -461,6 +582,7 @@ export class ConnView {
     this.fillForm(c);
     ($("cv-form-title") as HTMLElement).textContent = t("edit_conn");
     ($("cv-form-reset") as HTMLButtonElement).hidden = false;
+    ($("cv-save") as HTMLButtonElement).hidden = false;
     const pacc = $("cv-pacc");
     pacc.hidden = c.kind !== "ssh" || isWeb;
     if (!pacc.hidden) {
@@ -485,7 +607,21 @@ export class ConnView {
     ($("c-native-wrap") as HTMLElement).style.display = ssh && !isAndroid() ? "" : "none";
     ($("c-host") as HTMLInputElement).style.display = kind === "local" ? "none" : "";
     ($("c-port") as HTMLInputElement).style.display = ssh ? "" : "none";
+    // Jeton daemon.token : TCP direct seulement (SSH le relit sur le
+    // canal authentifié — rien à saisir ni à persister pour lui).
+    ($("c-token-wrap") as HTMLElement).style.display = kind === "tcp" ? "" : "none";
+    this.syncTcpWarn();
     if (ssh && nat) void this.showPubkey();
+  }
+
+  /** TCP direct vers une adresse non-loopback : avertir — transport non
+   *  chiffré, et le démon distant refuse le bind sans
+   *  `allow_non_loopback_tcp = true`. Consultatif (le démon tranche via
+   *  check_loopback), n'empêche pas la connexion. */
+  private syncTcpWarn() {
+    const kind = ($("c-kind") as HTMLSelectElement).value;
+    const addr = ($("c-host") as HTMLInputElement).value.trim();
+    $("c-tcp-warn").hidden = kind !== "tcp" || addr === "" || isLoopbackAddr(addr);
   }
 
   private async showPubkey() {
@@ -734,6 +870,34 @@ export class ConnView {
     }
   }
 
+  /** « Enregistrer » en mode édition : persiste la cfg SANS toucher au
+   *  transport — change couleur/label d'une conn active sans reconnecter.
+   *  Si l'édition visait la conn liée ici, son accent/titre se ré-appliquent
+   *  en live (updateBound → chromeForCurrent) ; sinon la prochaine
+   *  activation la prend via le bind. Host/port modifiés = autre clé conn
+   *  → save_connection ajoute une entrée : l'ancienne est purgée pour ne
+   *  pas laisser un doublon orphelin. */
+  private async saveOnly() {
+    const cfg = this.cfgFromForm();
+    const btn = $("cv-save") as HTMLButtonElement;
+    btn.disabled = true;
+    try {
+      await invoke("save_connection", { cfg });
+      const old = this.editing;
+      if (old && this.conns.keyOf(old) !== this.conns.keyOf(cfg)) {
+        await invoke("remove_connection", { cfg: old }).catch(() => {});
+      }
+      this.conns.updateBound(cfg);
+      this.saved = await invoke<SavedConn[]>("saved_connections").catch(() => this.saved);
+      if (this.isOpen()) this.renderSavedList();
+      this.resetForm();
+    } catch (e) {
+      dlgErr("c-err", String(e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   private cfgFromForm(): Record<string, unknown> {
     const kind = ($("c-kind") as HTMLSelectElement).value;
     const cfg: Record<string, unknown> =
@@ -749,7 +913,11 @@ export class ConnView {
             native: ($("c-native") as HTMLInputElement).checked || isAndroid() || undefined,
           }
         : kind === "tcp"
-          ? { kind: "tcp", addr: ($("c-host") as HTMLInputElement).value }
+          ? {
+              kind: "tcp",
+              addr: ($("c-host") as HTMLInputElement).value,
+              token: ($("c-token") as HTMLInputElement).value || undefined,
+            }
           : { kind: "local" };
     // Couleur propre à la connexion ("" = accent global des réglages).
     cfg.color = ($("c-accent") as HTMLSelectElement).value || undefined;
@@ -796,6 +964,7 @@ export class ConnView {
     };
     ($("c-kind") as HTMLSelectElement).onchange = () => this.syncSshFields();
     ($("c-native") as HTMLInputElement).onchange = () => this.syncSshFields();
+    ($("c-host") as HTMLInputElement).oninput = () => this.syncTcpWarn();
     $("cv-form-reset").onclick = () => this.resetForm();
     bindLogView($("cv-logs") as HTMLDetailsElement);
     initPairing();
@@ -820,6 +989,10 @@ export class ConnView {
     $("c-go").addEventListener("click", async (e) => {
       e.preventDefault();
       await this.go(this.cfgFromForm());
+    });
+    $("cv-save").addEventListener("click", (e) => {
+      e.preventDefault();
+      void this.saveOnly();
     });
   }
 

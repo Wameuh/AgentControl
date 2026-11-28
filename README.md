@@ -1,5 +1,8 @@
 # AgentControl
 
+[![build](https://github.com/Wameuh/AgentControl/actions/workflows/build.yml/badge.svg)](https://github.com/Wameuh/AgentControl/actions/workflows/build.yml)
+[![test](https://github.com/Wameuh/AgentControl/actions/workflows/test.yml/badge.svg?branch=next_release)](https://github.com/Wameuh/AgentControl/actions/workflows/test.yml)
+
 **Mission control for your coding agents — they run on your server, you
 drive them from anywhere.**
 
@@ -52,22 +55,28 @@ the device keeps its own:
 
 ![AgentControl — pair a device by QR](docs/screenshots/desktop-pair.png)
 
-| Watch the shared backlog — queue, in-flight work, throughput | Tune the feel — themes, accents, sounds, notifications, updates |
+| Watch the shared backlog — queue, in-flight work, throughput | Tune the feel — themes, accents, sounds, notifications |
 |:-:|:-:|
 | ![AgentControl — backlog panel](docs/screenshots/desktop-backlog.png) | ![AgentControl — settings](docs/screenshots/desktop-settings.png) |
 
+Configure the backlog orchestrator from the app — worker team, plan and
+PR reviews — and check every change before it is applied:
+
+![AgentControl — orchestrator configuration](docs/screenshots/desktop-orchestrator.png)
+
 Same sessions, same agents — native mobile UI on Android:
 
-| Chat | Sessions & groups | Files |
+| Chat | Sessions at a glance | Files |
 |:-:|:-:|:-:|
-| ![Android chat](docs/screenshots/android-chat.png) | ![Android drawer](docs/screenshots/android-drawer.png) | ![Android files](docs/screenshots/android-files.png) |
+| ![Android chat](docs/screenshots/android-chat.png) | ![Android home](docs/screenshots/android-home.png) | ![Android files](docs/screenshots/android-files.png) |
 
 ## Install
 
 ### You need
 
 - **A Linux server** (x86_64 or aarch64) reachable over SSH — that's
-  where the agents run.
+  where the agents run. Run it on a server account you don't share
+  (see [Security model](#security-model)).
 - **At least one coding agent** on that server. Anything that speaks
   [ACP](https://agentclientprotocol.com) over stdio works: Devin
   (`devin acp`) and Cursor (`cursor-agent acp`) natively, Codex and
@@ -78,9 +87,38 @@ Same sessions, same agents — native mobile UI on Android:
   | Platform | Download |
   |---|---|
   | Windows | NSIS installer (`.exe`), `.msi`, or portable `.exe` |
-  | macOS (Apple Silicon) | `.dmg` — on first launch, right-click the app → **Open** |
+  | macOS (Apple Silicon) | `.dmg` |
   | Ubuntu / Linux | `.deb`, AppImage, or the standalone binary |
   | Android | `.apk` (arm64) — allow installs from this source |
+
+  The Windows and macOS apps are **not code-signed yet** (no Apple
+  notarization, no SmartScreen certificate) — the OS warns on first
+  launch, and that's expected. Verify the download against the signed
+  checksums below, then bypass the warning:
+
+  - **macOS 15+**: open the app once — it is refused — then go to
+    **System Settings → Privacy & Security** and click **Open Anyway**
+    next to AgentControl (right-click → *Open* no longer bypasses
+    Gatekeeper for unnotarized apps). If the app is reported as
+    *"damaged"*, remove the quarantine flag instead:
+    `xattr -dr com.apple.quarantine /Applications/AgentControl.app`
+    (adjust the path if the app lives elsewhere).
+  - **Windows 11**: on the *"Windows protected your PC"* SmartScreen
+    prompt, click **More info → Run anyway**.
+
+  Every release is signed — `SHA256SUMS` + `SHA256SUMS.minisig`
+  (minisign/Ed25519) plus GitHub build-provenance attestations. The
+  app and the daemon verify the signature before installing anything;
+  to check a download by hand:
+
+  ```bash
+  minisign -Vm SHA256SUMS -P "$(grep -v '^untrusted' packaging/agentcontrol.pub | head -n1)"
+  sha256sum -c SHA256SUMS --ignore-missing
+  ```
+
+  (`packaging/agentcontrol.pub` ships the public key. Releases older
+  than signed publishing have no manifest and are refused unless
+  `AGENTCONTROL_ALLOW_UNSIGNED=1` — troubleshooting only.)
 
   Rather compile it yourself? See [build from source](#for-developers).
 
@@ -147,19 +185,38 @@ A few concrete setups — every bullet is something you can do today:
   drains the shared `agentbacklog` queue on its own — one worker session
   per item, an optional plan → review → implementation pipeline, and
   native PR reviews that watch your PRs, spawn read-only reviewers on the
-  exact head and post the verdict as a comment. Worker and review
+  exact head and post the verdict as a comment — automatic triggers
+  only fire on trusted changes (same-repo branch or
+  OWNER/MEMBER/COLLABORATOR author; `auto_review_untrusted` relaxes it).
+  Worker and review
   concurrency, per-role agent profiles and repo routing are all tunable
   live — and sessions stalled on a rate-limited provider are
   automatically migrated to another profile when the role's agent is
   switched.
 - **Pilot several agent providers side by side**: Devin and Cursor ship
-  as built-in profiles; any ACP-speaking agent can be declared as a
-  custom `[agents.*]` profile (Claude via `claude-code-acp`, Codex via
-  its adapter…). Each orchestrator role — worker, planner, reviewer,
+  as built-in profiles; known ACP adapters (Claude via the bundled
+  `acp-claude`, Codex via `codex-acp`, Gemini, OpenCode…) are auto-discovered on the
+  daemon's PATH — installing one makes its profile appear with no config
+  and no restart, and unavailable profiles say why (binary looked for +
+  install hint) — the daemon can even run the install itself
+  (`install_agent_adapter`: the agents dialog's Install button or
+  `acctl agents install <id>`, user npm prefix only, never sudo). Any ACP-speaking agent can also be declared as a
+  custom `[agents.*]` profile, which always wins over auto-detection —
+  `command` even accepts ordered fallbacks (`[["bin1"], ["bin2", "arg"]]`).
+  Each orchestrator role — worker, planner, reviewer,
   PR reviewer — can run on a different profile and mode; model and
   reasoning effort are shared pipeline settings (PR reviewers get a
   dedicated model), and sessions can carry an optional advisor model
   declared per profile.
+- **Give every agent AgentControl's skills for free**: at each spawn the
+  daemon syncs its bundled skills (`acctl`, `ac-wait`, `ac-steps`) into
+  the directories your provider scans (`.claude/skills/`,
+  `.agents/skills/`…) inside the session's folder — and adds them to the
+  repo's `.git/info/exclude`, so `git status` stays clean without
+  touching your `.gitignore` (nothing is excluded if your repo already
+  tracks its skills directory). Sync is manifest-managed: your own
+  skills are never overwritten. Set `provision_skills = false`
+  (globally or per `[agents.*]` profile) to opt out.
 - **Let agents wait without burning turns**: agents delegate long waits
   (CI checks, review verdicts, merges) to `ac-wait` — background waiters
   that wake the session the moment the condition fires, surviving even
@@ -205,7 +262,7 @@ A few concrete setups — every bullet is something you can do today:
 - **Search and replay everything**: the daemon journals every event, so
   history is never lost.
 - **Tune the feel**: dark & light themes, accent colors, animated
-  background, sound alerts, English or French UI.
+  background, sound alerts, UI in English, French, German or Spanish.
 - **Stay up to date effortlessly**: the desktop app updates itself in
   place, upgrades the daemon on your server over SSH, and an opt-in
   channel serves release candidates.
@@ -214,17 +271,55 @@ Prefer a browser to an app? The daemon can also **serve the same UI over
 HTTP** on the server (`bind_http` in `config.toml` — loopback + SSH
 tunnel, token-protected): zero install on the client side.
 
+## Security model
+
+AgentControl assumes **one trusted user per server account**.
+
+- **Who can drive the daemon.** It listens on a Unix socket
+  (`~/.agentcontrol/daemon.sock`, mode `0600`) and on loopback TCP for
+  the SSH tunnel — a non-loopback bind needs the explicit
+  `allow_non_loopback_tcp` opt-in. Every TCP connection must present
+  the per-install token (`~/.agentcontrol/daemon.token`, mode `0600`),
+  which the app reads over the already-authenticated SSH channel.
+  Loopback alone is not per-user isolation: don't run the daemon on an
+  account other people can log into.
+- **Server identity.** Every SSH transport verifies the server's host
+  key — pinned by QR pairing, matched against your `known_hosts`, or
+  confirmed once on first connect — and a later change must be
+  explicitly re-confirmed.
+- **What agents can do.** Agents run as your user, with your shell,
+  files and credentials (`gh`, SSH keys, API tokens). Permission modes
+  that skip approvals let an agent run any command — use them only in
+  workspaces you'd let a junior engineer work in unsupervised.
+- **Untrusted content.** Agents read repositories, issues and pull
+  requests — text there can try to steer the agent (prompt injection).
+  The orchestrator's PR review is opt-in: a trigger comment only fires
+  from a repository member, and the automatic modes only fire on
+  trusted changes — a same-repo source branch or an
+  owner/member/collaborator author (`auto_review_untrusted` relaxes the
+  filter if you really mean it).
+- **Agents talking to agents.** The built-in MCP server lets an agent
+  create sessions and message its peers on the same daemon.
+- **Updates.** Releases ship `SHA256SUMS` signed with minisign
+  (Ed25519) plus GitHub build-provenance attestations; the app, the
+  daemon self-update and the remote install all verify the signature
+  and checksums before installing.
+- **Reporting a vulnerability.** See [SECURITY.md](SECURITY.md).
+
 ## For developers
 
 AgentControl is a Rust workspace (daemon, protocol, client core, CLI)
 plus a Tauri 2 front end (vanilla TypeScript).
 
 - Architecture, protocol and design rationale: [ANALYSE.md](ANALYSE.md)
+- Managed components model:
+  [docs/components-integration.md](docs/components-integration.md)
 - Review registry across forges (GitHub/GitLab/Gerrit):
   [docs/forges.md](docs/forges.md)
 - Manual server setup & systemd unit:
   [packaging/INSTALL.md](packaging/INSTALL.md)
-- Repo workflow & conventions: [AGENTS.md](AGENTS.md)
+- Contributor guide: [AGENTS.md](AGENTS.md) — maintainer workflow:
+  [docs/maintainer.md](docs/maintainer.md)
 
 Build from source:
 

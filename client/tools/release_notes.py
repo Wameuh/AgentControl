@@ -52,11 +52,11 @@ MARK_END = "<!-- release-notes:end -->"
 # `Merge pull request #N`. Section optionnelle `[feat|fix|perf]` juste
 # après la clé — requise pour les sujets de commit non conventionnels
 # (sans préfixe feat:/fix:/perf:), seule façon de les catégoriser ;
-# ignorée sinon.
+# `skip` exclut la PR des notes (fix interne sans valeur utilisateur).
 EN_NOTES = os.path.join(ROOT, "client", "tools", "release_notes_en.txt")
 EN_LINE = re.compile(
     r"\s*(?:(\d+)|sha:([0-9a-fA-F]{7,40}))\s*:\s*"
-    r"(?:\[(feat|fix|perf)\]\s*)?(.+?)\s*$")
+    r"(?:\[(feat|fix|perf|skip)\]\s*)?(.+?)\s*$")
 
 # type conventional -> section user-facing ; les autres types (docs,
 # test, chore, ci, build, refactor, style, …) sont internes et exclus.
@@ -74,6 +74,10 @@ FALLBACK_PR = re.compile(r"\(#(\d+)\)\s*$")
 SEMVER = re.compile(r"^v\d+\.\d+\.\d+$")
 # Mots-clés de bump : info pipeline, jamais montrée à l'utilisateur.
 KEYWORD = re.compile(r"\s*\((?:major|minor|sync|patch)\)", re.IGNORECASE)
+# Références `(#N)` internes éventuellement nichées dans le titre
+# (« … (#item) (#PR) ») : le suffixe final est capturé par SUBJECT,
+# ceux de l'intérieur doivent être retirés du repli sujet brut.
+INNER_PR = re.compile(r"\s*\(#\d+\)")
 
 # Bloc process interne, replié : comment la release se publie. Miroir du
 # commentaire d'en-tête de auto-release-pr.yml.
@@ -117,7 +121,7 @@ def find_bound(ref):
 def bump_level(rev_range):
     # Règle mots-clés → niveau : detect_level de bump_version.py fait
     # foi (version.yml l'appelle en --detect-level) — pas de duplicata.
-    return detect_level(git("log", "--format=%B", rev_range))
+    return detect_level(git("log", "--format=%x1e%B", rev_range))
 
 
 def next_version(rev_range):
@@ -203,6 +207,8 @@ def entries(rev_range):
             pr = fb.group(1) if fb else None
             if (hit := note_for(en, pr, sha)):
                 sec, note = hit
+                if sec == "skip":
+                    continue
                 if sec and note and (note, pr or sha) not in seen:
                     seen.add((note, pr or sha))
                     out[types[sec]].append((note, pr))
@@ -215,9 +221,12 @@ def entries(rev_range):
         if m.group(1) not in types:
             continue
         pr = m.group(3) or owner.get(sha)
-        title = ((note_for(en, pr, sha) or (None, ""))[1]).strip() or None
+        hit = note_for(en, pr, sha)
+        if hit and hit[0] == "skip":
+            continue
+        title = (hit[1] if hit else "").strip() or None
         if title is None:
-            title = KEYWORD.sub("", m.group(2)).strip()
+            title = INNER_PR.sub("", KEYWORD.sub("", m.group(2))).strip()
             if not title:
                 continue
             title = title[0].upper() + title[1:]

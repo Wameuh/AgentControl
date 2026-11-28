@@ -2,9 +2,16 @@
 //! Tout est en JSON Lines (un objet JSON par ligne) sur socket Unix ou TCP.
 
 mod components;
+pub mod release_verify;
 pub use components::*;
 
 use serde::{Deserialize, Serialize};
+
+/// Erreur renvoyée par le démon quand une connexion TCP présente un
+/// jeton absent/invalide — ou une 1re ligne qui n'est pas `auth`.
+/// Chaîne fixe partagée client↔démon (le client la reconnaît pour
+/// relire le jeton et retenter, cf. client-core::auth_handshake).
+pub const ERR_AUTH_REQUIRED: &str = "auth-required";
 
 // ---------------------------------------------------------------------------
 // Journal events
@@ -64,6 +71,14 @@ pub enum EventKind {
         size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         diff: Option<String>,
+        /// Blob du diff complet quand `diff` ne porte qu'un extrait
+        /// (diff > MAX_INLINE externalisé — un Write/Edit de gros
+        /// fichier ne doit pas produire de ligne NDJSON géante, #302).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff_blob: Option<String>,
+        /// Taille totale du diff en octets quand il est externalisé.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         locations: Option<Vec<String>>,
         /// Paramètres d'appel formatés (`rawInput` ACP : commande exec,
@@ -84,6 +99,12 @@ pub enum EventKind {
         size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         diff: Option<String>,
+        /// Blob du diff complet quand `diff` ne porte qu'un extrait —
+        /// même politique d'externalisation que ToolCall (#302).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff_blob: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff_size: Option<u64>,
     },
     /// L'agent demande la permission d'exécuter quelque chose.
     PermissionRequest {
@@ -139,6 +160,13 @@ pub enum EventKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         currency: Option<String>,
     },
+    /// Étapes de la tâche publiées par l'agent (session_set_steps) :
+    /// remplacement complet de la liste — l'event porte l'état entier
+    /// pour que le client reconstruise sans replay. Persistée dans
+    /// steps.json (sidecar) et relue par session_info (`steps`).
+    Steps {
+        steps: Vec<SessionStep>,
+    },
     /// État du run : idle | working | waiting_input | dead
     StatusChanged {
         state: String,
@@ -169,6 +197,18 @@ pub enum EventKind {
     /// terminal, jamais journalisé : poussé sur le flux juste avant
     /// fermeture pour prévenir les clients abonnés.
     SessionDeleted {},
+    /// Fin d'un session/load « refill » (skip_replay=false — fork,
+    /// rebind : le journal est reconstruit depuis
+    /// l'historique rejoué). Les events rejoués ont été journalisés
+    /// mais volontairement PAS broadcastés un par un (#300) — ce
+    /// marqueur terminal dit aux clients abonnés de recharger la
+    /// queue du journal plutôt que le DOM n'a vu que les syslines
+    /// de progression. Journalisé (seq stable, visible dans le
+    /// paging) ; `events` = updates session/update vues pendant le
+    /// load.
+    HistoryReplayed {
+        events: u64,
+    },
 }
 
 impl EventKind {
@@ -188,12 +228,14 @@ impl EventKind {
             Self::CommandsAvailable { .. } => "commands_available",
             Self::ConfigOptions { .. } => "config_options",
             Self::UsageUpdate { .. } => "usage_update",
+            Self::Steps { .. } => "steps",
             Self::StatusChanged { .. } => "status_changed",
             Self::Error { .. } => "error",
             Self::System { .. } => "system",
             Self::PeerMessage { .. } => "peer_message",
             Self::SessionCleared {} => "session_cleared",
             Self::SessionDeleted {} => "session_deleted",
+            Self::HistoryReplayed { .. } => "history_replayed",
         }
     }
 
@@ -219,7 +261,9 @@ impl EventKind {
                 to_title,
                 text,
                 ..
-            } => joined([Some(from_title), Some(to_title), Some(text)].map(|o| o.map(String::as_str))),
+            } => joined(
+                [Some(from_title), Some(to_title), Some(text)].map(|o| o.map(String::as_str)),
+            ),
             Self::ToolCall {
                 title,
                 kind,
@@ -262,13 +306,19 @@ impl EventKind {
                 .map(|c| format!("{} {}", c.name(), c.description()))
                 .collect::<Vec<_>>()
                 .join("\n"),
+            Self::Steps { steps } => steps
+                .iter()
+                .map(|s| format!("{} {}", s.status.as_str(), s.name))
+                .collect::<Vec<_>>()
+                .join("\n"),
             Self::ConfigOptions { .. }
             | Self::UsageUpdate { .. }
             | Self::ModeChanged { .. }
             | Self::StatusChanged { .. }
             | Self::PermissionResolved { .. }
             | Self::SessionCleared {}
-            | Self::SessionDeleted {} => String::new(),
+            | Self::SessionDeleted {}
+            | Self::HistoryReplayed { .. } => String::new(),
         }
     }
 }
@@ -358,10 +408,14 @@ pub struct AgentCaps {
     /// Horodatage ISO de la dernière moisson.
     #[serde(default)]
     pub updated_at: String,
-    /// Modes ACP (`modes.availableModes` : id→`value`, name).
+    /// Modes ACP (`modes.availableModes` : id→`value`, name — ∪
+    /// `configOptions` id|category « mode » : certains agents n'annoncent
+    /// leurs modes que par configOption).
     #[serde(default)]
     pub modes: Vec<ConfigOpt>,
-    /// Modèles ACP (`models.availableModels` : modelId→`value`, name).
+    /// Modèles ACP (`models.availableModels` : modelId→`value`, name —
+    /// ∪ `configOptions` id|category « model » : codex/devin n'annoncent
+    /// leurs modèles que par configOption, jamais availableModels).
     #[serde(default)]
     pub models: Vec<ConfigOpt>,
     /// Options de config dynamiques (extension `config_option_update` —
@@ -399,6 +453,41 @@ pub struct ExtraModel {
 }
 
 // ---------------------------------------------------------------------------
+// Étapes de tâche (skill ac-steps / session_set_steps)
+// ---------------------------------------------------------------------------
+
+/// Statut d'une étape — vocabulaire minimal voulu (pas de sous-tâches,
+/// pas de descriptions) : todo | in_progress | done | abandoned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    Todo,
+    InProgress,
+    Done,
+    Abandoned,
+}
+
+impl StepStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Todo => "todo",
+            Self::InProgress => "in_progress",
+            Self::Done => "done",
+            Self::Abandoned => "abandoned",
+        }
+    }
+}
+
+/// Une étape de la liste publiée par l'agent : nom court + statut.
+/// La liste est remplacée ENTIÈRE à chaque `session_set_steps` (état
+/// borné côté démon, ~100 étapes max).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionStep {
+    pub name: String,
+    pub status: StepStatus,
+}
+
+// ---------------------------------------------------------------------------
 // Métadonnées de session (meta.json)
 // ---------------------------------------------------------------------------
 
@@ -408,6 +497,15 @@ pub struct SessionMeta {
     pub agent: String,
     pub title: String,
     pub cwd: String,
+    /// Cwd « effectif » déclaré par l'agent (`session_set_cwd` /
+    /// `acctl cwd`) — typiquement le worktree dédié d'un worker
+    /// backlog, différent du cwd de spawn (`cwd`). Consommé par
+    /// term_open avec repli sur `cwd` si absent ou invalide ;
+    /// jamais utilisé pour borner les outils fichier (le workspace
+    /// déclaré reste `cwd`). Additif — None sur les meta.json
+    /// écrits avant le champ.
+    #[serde(default)]
+    pub reported_cwd: Option<String>,
     pub created_at: String,
     /// ID de session natif côté agent (pour session/load ou -r)
     #[serde(default)]
@@ -505,8 +603,11 @@ pub struct SessionMeta {
     #[serde(default)]
     pub context_size: Option<u64>,
     /// Dernier échec de tour session/prompt (état "error") — kind :
-    /// rate_limit | model | auth | other. Effacé au premier tour
-    /// réussi ou reset de cycle (spawn, /clear, set_model…).
+    /// rate_limit | quota | model | auth | other. `rate_limit` =
+    /// throttle transitoire à reprise auto ; `quota` = forfait/compte
+    /// épuisé, bloqué sans retry jusqu'à action humaine. Effacé au
+    /// premier tour réussi ou reset de cycle (spawn, /clear,
+    /// set_model…).
     #[serde(default)]
     pub last_error: Option<LastError>,
     /// Détail du waiter ac-wait — présent seulement quand `state` est
@@ -514,6 +615,13 @@ pub struct SessionMeta {
     /// jamais persisté).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<WaitInfo>,
+    /// Horodatage (epoch secondes UTC) du dernier changement d'état
+    /// persisté — posé à la création puis par chaque transition
+    /// (`set_state`, reconcile au boot) ; le client en tire l'âge
+    /// « asleep depuis … » (#383). None sur les meta.json écrits
+    /// avant l'introduction du champ (additif — pas de bump (sync)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_since: Option<i64>,
 }
 
 /// Détail du waiter ac-wait vivant qui justifie l'état `wait` — le
@@ -537,15 +645,17 @@ pub struct WaitInfo {
 pub struct LastError {
     /// Message d'erreur brut (tronqué à la pose).
     pub message: String,
-    /// Classification : rate_limit | model | auth | other.
+    /// Classification : rate_limit | quota | model | auth | other.
     pub kind: String,
     /// Horodatage du premier échec de la série.
     pub at: String,
     /// Échecs consécutifs du même kind.
     pub count: u32,
     /// Retry programmé pour `rate_limit` (epoch secondes UTC) — calé
-    /// sur l'échéance annoncée par le provider quand le message la
-    /// porte, sinon now + backoff. None = pas de retry automatique.
+    /// sur l'échéance de reset annoncée par le provider quand le
+    /// message la porte (fenêtre de quota quotidienne incluse),
+    /// sinon now + backoff. None = pas de retry automatique
+    /// (quota/model/auth/other).
     #[serde(default)]
     pub retry_at: Option<i64>,
 }
@@ -669,6 +779,18 @@ pub struct Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "req", rename_all = "snake_case")]
 pub enum ReqKind {
+    /// Authentifie une connexion TCP (loopback ≠ par-utilisateur : un
+    /// autre utilisateur local ou un tunnel `ssh -L` atteint le port
+    /// bind_tcp). Exigée en PREMIÈRE ligne non vide de toute connexion
+    /// TCP, sous 10 s ; le serveur la traite dans la couche connexion
+    /// (jamais dispatchée aux handlers) et compare le jeton en temps
+    /// constant — `daemon.token` à la racine du démon, mode 0600.
+    /// Les conns Unix et le pont WebSocket (auth `web.token` + Origin)
+    /// n'envoient jamais cette requête. Compat : un vieux démon répond
+    /// « unknown variant auth » → le client repasse en mode pré-auth.
+    Auth {
+        token: String,
+    },
     /// Crée une session et démarre l'agent.
     NewSession {
         agent: String,
@@ -698,19 +820,31 @@ pub enum ReqKind {
     },
     /// Reprend une session existante (respawn agent + session/load).
     /// native_id : reprendre une AUTRE session native de l'agent.
+    /// fresh : abandonner le contexte natif et repartir en session/new
+    /// (journal local conservé) — issue explicite quand le replay d'une
+    /// très longue session native est trop long ou voué à l'échec
+    /// (« resume --fresh », bouton client pendant le chargement).
+    /// Ignoré par les démons anciens (dégradation douce : resume
+    /// normal sur le contexte natif).
     ResumeSession {
         session: String,
         #[serde(default)]
         native_id: Option<String>,
+        #[serde(default)]
+        fresh: bool,
     },
     /// Liste les sessions natives de l'agent (ACP session/list) via une
     /// session vivante de cet agent.
-    ListNativeSessions { session: String },
+    ListNativeSessions {
+        session: String,
+    },
     /// Fork la session native (pas de méthode ACP — on pilote le TUI de
     /// l'agent dans un PTY : `devin -r` + /fork), puis attache la session
     /// forkée dans une nouvelle session AgentControl (même groupe, titre
     /// suffixé "_fork"). La source est libérée puis ré-ouverte.
-    ForkSession { session: String },
+    ForkSession {
+        session: String,
+    },
     /// Attache une session native de l'agent (créée hors AgentControl) :
     /// respawn + session/load sur l'ID natif fourni.
     AttachSession {
@@ -740,12 +874,16 @@ pub enum ReqKind {
     /// Coûts catalogue des modèles d'un profil agent (sonde provider
     /// type `devin models`, cache côté démon) — {"models": {id: {label,
     /// detail}}}. Map vide quand le provider n'expose pas de coût.
-    ModelCosts { agent: String },
+    ModelCosts {
+        agent: String,
+    },
     /// Catalogue complet des modèles d'un profil agent (clés
     /// `catalogue_cmd`/`model_override_cmd` de `[agents.*]`) —
     /// {"models": [{value, label}]} ; vide quand le profil n'a pas de
     /// commande catalogue ou si la sonde échoue.
-    ModelCatalog { agent: String },
+    ModelCatalog {
+        agent: String,
+    },
     Send {
         session: String,
         text: String,
@@ -818,8 +956,8 @@ pub enum ReqKind {
     /// offset+delete_len) — `delete_len` est clampé à la fin du fichier
     /// (u64::MAX = « remplacer tout »). `if_mtime_ms` : garde
     /// anti-écrasement — la mtime disque doit égaler celle lue par le
-    /// client, sinon erreur préfixée "conflit: <mtime_ms>" (fichier
-    /// supprimé entre-temps → conflit aussi). Écriture atomique
+    /// client, sinon erreur préfixée "conflict: <mtime_ms>" (fichier
+    /// supprimé entre-temps → conflict aussi). Écriture atomique
     /// (.part + rename, mode unix préservé). Réponse
     /// {path, size, mtime_ms} — la nouvelle mtime réarme la garde.
     WriteFile {
@@ -909,18 +1047,40 @@ pub enum ReqKind {
         path: Option<String>,
     },
     /// Gestion de la file de prompts (index = position dans la file).
-    QueueList { session: String },
-    QueueEdit { session: String, index: u64, text: String },
-    QueueDrop { session: String, index: u64 },
+    QueueList {
+        session: String,
+    },
+    QueueEdit {
+        session: String,
+        index: u64,
+        text: String,
+    },
+    QueueDrop {
+        session: String,
+        index: u64,
+    },
     /// Tête de file + annulation du tour courant = envoi forcé.
-    QueuePromote { session: String, index: u64 },
+    QueuePromote {
+        session: String,
+        index: u64,
+    },
     /// Retire l'entrée `index` de la file et tente de l'injecter en
     /// steer dans le tour en cours (session/prompt concurrent, SANS
     /// annuler le tour — ≠ QueuePromote). Refus ou impossibilité →
     /// l'entrée est remise à sa position. Réponse {delivered, reason?,
     /// queue} — delivered : "steer" | "sent" | "requeued" | "held" |
     /// "gone".
-    QueueSteer { session: String, index: u64 },
+    QueueSteer {
+        session: String,
+        index: u64,
+    },
+    /// Vide toute la file d'un coup — atomique côté démon (pas de
+    /// course avec un enqueue concurrent, contrairement à une boucle
+    /// queue_drop côté client). Ne touche JAMAIS au tour en cours ni
+    /// aux retenues : file uniquement. Réponse {cleared, queue}.
+    QueueClear {
+        session: String,
+    },
     /// Page d'historique : les `limit` événements avant `before_seq`
     /// (before_seq absent ou 0 = depuis la fin), ou — si `after_seq` est
     /// fourni — les `limit` événements après `after_seq` en ordre croissant
@@ -1015,17 +1175,50 @@ pub enum ReqKind {
         config_id: String,
         value: String,
     },
+    /// Remplace la liste d'étapes de la tâche de la session (publiée
+    /// par l'agent via `acctl steps set`, skill ac-steps) : nom +
+    /// statut ∈ todo|in_progress|done|abandoned, ≤ ~100 étapes, liste
+    /// entière à chaque appel (idempotent — l'agent garde sa liste et
+    /// repousse tout). Persistée dans steps.json (sidecar, pattern
+    /// pinned.json) et journalisée en event `steps` (live update +
+    /// reconstruction à l'ouverture) — relue par session_info
+    /// (`steps`).
+    /// Réponse : `{steps: [..]}` — la liste normalisée stockée.
+    /// Extension additive : démons anciens → erreur « req inconnue ».
+    SessionSetSteps {
+        session: String,
+        steps: Vec<SessionStep>,
+    },
+    /// Déclare le cwd « effectif » de la session (skill/outillage
+    /// agent, `acctl cwd`) — typiquement le worktree dédié dans
+    /// lequel l'agent travaille réellement alors que `meta.cwd` reste
+    /// le workspace de spawn. Persisté dans meta.json
+    /// (`reported_cwd`) ; `cwd: None` efface la déclaration.
+    /// Consommé par term_open (repli sur `cwd` si absent/invalide) —
+    /// les outils fichier restent bornés à `meta.cwd`.
+    /// Réponse : `{cwd: <chemin|null>}` — la valeur stockée.
+    /// Extension additive : démons anciens → erreur « req inconnue ».
+    SessionSetCwd {
+        session: String,
+        cwd: Option<String>,
+    },
     /// Tue l'agent et supprime la session + ses fichiers (journal/blobs).
-    DeleteSession { session: String },
+    DeleteSession {
+        session: String,
+    },
     /// /clear — vide le journal et repart sur une session native neuve
     /// (session/new), même session AgentControl (id, titre, groupe, cwd).
-    ClearSession { session: String },
+    ClearSession {
+        session: String,
+    },
     /// Endort la session : le process agent est libéré mais la session
     /// native (et le journal) sont conservés — état persisté "asleep".
     /// Le prochain prompt (user ou peer) la réveille via session/load ;
     /// un resume explicite la réveille aussi. ≠ KillSession (crash-like :
     /// "dead" + pas de réveil implicite sur envoi user).
-    SleepSession { session: String },
+    SleepSession {
+        session: String,
+    },
     /// Renomme la session (meta local + session/rename chez l'agent si dispo).
     RenameSession {
         session: String,
@@ -1094,6 +1287,32 @@ pub enum ReqKind {
         #[serde(default)]
         session: Option<String>,
     },
+    /// Variante paginée de PrList — même motif que ListSessionsPage :
+    /// le registre complet dépassait 1,9 Mo en une seule ligne NDJSON
+    /// sur les grosses instances, ce qui saturait le lien et déclenchait
+    /// des retry storms (item #367). Réponse
+    /// `{"prs": [...], "next_offset": n|null, "total": t, "version": v}`
+    /// ; `if_version` = version d'un fetch précédent → `{"unchanged":
+    /// true}` quand rien n'a bougé (registre + reviews natives). Requête
+    /// inconnue des vieux démons (`parse: unknown variant`) → le client
+    /// retombe sur PrList (réponse unique).
+    PrListPage {
+        #[serde(default)]
+        session: Option<String>,
+        /// Taille de page indicative (défaut côté démon : 50, plafond
+        /// 200) — la page est aussi bornée en octets (~128 Kio) pour
+        /// rester sous le seuil « giant line » quelle que soit la
+        /// taille des entrées.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        /// Décalage dans la liste (plus récent d'abord).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
+        /// `version` renvoyée par un fetch précédent — inchangée →
+        /// réponse `{"unchanged": true}` sans sérialiser les entrées.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_version: Option<String>,
+    },
     /// Upsert manuel d'une entrée (champs Some écrasent, None conservent —
     /// `session` requis pour une entrée nouvelle). Prime sur `via: detected`.
     /// `forge`/`host`/`change_id`/`url` adressent les forges non-GitHub
@@ -1160,12 +1379,20 @@ pub enum ReqKind {
     /// last_exit/description/source.
     ListComponents,
     /// Spec complète + état détaillé d'un composant.
-    ComponentInfo { name: String },
+    ComponentInfo {
+        name: String,
+    },
     /// Cycle de vie — `process` managés seulement : internal/external/
     /// tool sont refusés (pas de process à piloter). Réponse {name,state}.
-    ComponentStart { name: String },
-    ComponentStop { name: String },
-    ComponentRestart { name: String },
+    ComponentStart {
+        name: String,
+    },
+    ComponentStop {
+        name: String,
+    },
+    ComponentRestart {
+        name: String,
+    },
     /// Tail paginé du log `<root>/components/<name>.log` : `offset`
     /// (absent = dernière page) + `limit` (défaut 64 Kio, cap 256 Kio) →
     /// {data(b64), offset, size, truncated} (`truncated` = il reste
@@ -1189,7 +1416,9 @@ pub enum ReqKind {
     /// Retire une spec déclarée (un `process` vivant est arrêté
     /// proprement d'abord). Les `internal`, déclarés en code, sont
     /// inatteignables → « composant inconnu ».
-    ComponentRemove { name: String },
+    ComponentRemove {
+        name: String,
+    },
     /// Catalogue embarqué (§2.5) : métadonnées + `installed`/`version`
     /// détectés + `latest_version`/`latest_notes` upstream — cache
     /// ~5 min, `refresh:true` force le refetch ; échec réseau → champs
@@ -1226,7 +1455,10 @@ pub enum ReqKind {
     /// `agentbacklog --list --json`). Réponse :
     /// `{code, data(b64), size, truncated, stderr?(b64)}` ; absent =
     /// composant ou query inconnue → erreur.
-    ComponentQuery { name: String, query: String },
+    ComponentQuery {
+        name: String,
+        query: String,
+    },
     /// Token de vue plugin éphémère (option B — vue en iframe
     /// sandboxée servie par le démon) : émis pour `name`, TTL ~5 min,
     /// scopé au composant, exigé par la route HTTP `/plugin/<name>/`
@@ -1235,14 +1467,18 @@ pub enum ReqKind {
     /// déclarer une vue (`spec.view_dir` ou convention
     /// `components/<name>/web/`). Réponse :
     /// `{component, token, ttl_s}`.
-    PluginViewToken { name: String },
+    PluginViewToken {
+        name: String,
+    },
     /// Bascule à chaud l'orchestrateur backlog natif (composant interne
     /// `backlog-orchestrator`, section `[backlog_orchestrator]` de
     /// config.toml pour l'activation par défaut) — bascule runtime
     /// seulement, la config n'est pas réécrite. Réponse :
     /// `{enabled, status}` — status = instantané exposé aussi dans
     /// `ListComponents`/`ComponentInfo`.
-    OrchestratorSet { enabled: bool },
+    OrchestratorSet {
+        enabled: bool,
+    },
     /// Lecture/édition à chaud de la config de l'orchestrateur backlog.
     /// `patch` absent = get → `{config, status}` ; `patch` présent =
     /// merge partiel validé par champ (clés = celles de
@@ -1267,7 +1503,9 @@ pub enum ReqKind {
     /// `orchestrator.workspaces` dans le status). Idempotent : un
     /// Manager vivant pour ce repo est renvoyé tel quel. Réponse :
     /// `{session, repo, cwd, title, existing}`.
-    ManagerSpawn { repo: String },
+    ManagerSpawn {
+        repo: String,
+    },
     /// Métriques backlog : série temporelle échantillonnée par le tick
     /// de l'orchestrateur natif (`~/.agentbacklog/metrics.jsonl`) +
     /// agrégats calculés à la volée sur les timestamps des items
@@ -1306,7 +1544,8 @@ pub enum ReqKind {
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
     /// doit coller à la version du client, pas la dépasser). Le démon
     /// télécharge `agentcontrol-server-<arch>-linux.tar.gz`, remplace
-    /// son binaire (rename atomique) puis sort pour être relancé par
+    /// ses binaires (démon + adaptateurs `acp-*`, rename atomique)
+    /// puis sort pour être relancé par
     /// son superviseur — le marqueur pid conservé déclenche la reprise
     /// auto des sessions au boot. Réponse : `{updated, path,
     /// restarting}` — `restarting:false` = binaire remplacé mais aucun
@@ -1314,7 +1553,19 @@ pub enum ReqKind {
     /// (acctl sans arg) résout la dernière release publiée ; si elle
     /// n'est pas plus récente que le binaire courant, réponse
     /// `{noop: true, version, current, restarting:false}` sans update.
-    UpdateDaemon { version: String },
+    UpdateDaemon {
+        version: String,
+    },
+    /// Régénère `daemon.token` (32 octets aléatoires, écriture atomique
+    /// mode 0600) et révoque les connexions TCP ouvertes — elles
+    /// devront se ré-authentifier avec le nouveau jeton. Réservé aux
+    /// connexions déjà authentifiées (socket Unix — pas d'auth — ou
+    /// TCP authentifiée) : un appelant non authentifié ne peut jamais
+    /// atteindre ce handler, la conn TCP est refermée avant le dispatch.
+    /// Réponse `{rotated:true}` — le jeton lui-même n'est JAMAIS
+    /// renvoyé par RPC (il se lit dans le fichier, 0600, côté admin).
+    /// Extension additive : démons anciens → erreur « req inconnue ».
+    TokenRotate,
     /// Moissonne les capacités d'un profil agent par un spawn jetable
     /// (initialize + session/new dans un cwd scratch, drain bref des
     /// notifications, kill) puis met à jour le cache `agent_caps.json`
@@ -1323,7 +1574,23 @@ pub enum ReqKind {
     /// (bouton refresh du client), jamais en boucle. Réponse :
     /// `{agent, caps, sessions:[ids rafraîchis]}`. Extension additive :
     /// démons anciens → erreur « req inconnue ».
-    RefreshAgentCaps { agent: String },
+    RefreshAgentCaps {
+        agent: String,
+    },
+    /// Provisionne l'adaptateur ACP d'un agent du registre
+    /// (agents_auto) côté démon — exécute les commandes d'installation
+    /// déclarées (`npm i -g …`, dans le HOME de l'utilisateur, jamais
+    /// de sudo, timeout borné ; `unavailable.installable` de
+    /// list_agents annonce la capacité). Déclenché par l'utilisateur
+    /// (bouton « installer » du dialogue nouvelle session,
+    /// `acctl agents install <id>`). No-op `{already:true}` quand un
+    /// adaptateur est déjà résolvable ; les candidates sont essayées
+    /// dans l'ordre jusqu'à ce qu'un binaire du profil resolve.
+    /// Réponse : `{agent, installed, already?, command?, resolved?}`.
+    /// Extension additive : démons anciens → erreur « req inconnue ».
+    InstallAgentAdapter {
+        agent: String,
+    },
     /// Verdict de review de PR rendu en A2A par la session reviewer
     /// (pont MCP `agentcontrol_report_verdict`) : push direct au démon,
     /// qui poste lui-même le commentaire GitHub — la sortie de review
@@ -1354,6 +1621,64 @@ pub enum ReqKind {
         repo: String,
         pr: u64,
     },
+    /// Demande de revue LOCALE générique (file `review-queue` du
+    /// démon — indépendante du pipeline `/mr review`/PR) : un agent
+    /// (ou l'utilisateur via `acctl review request`) demande la revue
+    /// d'une branche ou d'un diff à cheval sur plusieurs dépôts
+    /// locaux. `session` = demandeur A2A (None = utilisateur/acctl →
+    /// pas de notification du résultat) ; `repos` = checkout(s)
+    /// locaux `{path, branch?, base?}` — `branch` vide = branche
+    /// courante du checkout, `base` vide = base par défaut du
+    /// reviewer. La file gère session-par-thread (réutilisée entre
+    /// rounds), compact-first, slot sémaphore et reaper forge.
+    /// Extension additive : démons anciens → erreur « req inconnue ».
+    ReviewQueueRequest {
+        #[serde(default)]
+        session: Option<String>,
+        repos: Vec<ReviewRepoSpec>,
+        #[serde(default)]
+        instructions: Option<String>,
+    },
+    /// État de la file de reviews locales : threads (session reviewer
+    /// par couple [repo,branche] canonique), requêtes et configuration
+    /// effective — lecture seule, pour `acctl review status` et le
+    /// futur panneau client. Extension additive : démons anciens →
+    /// erreur « req inconnue ».
+    ReviewQueueStatus {},
+    /// Lecture/édition à chaud de la config `review_queue`
+    /// (section `[review_queue]` de config.toml — même mécanique que
+    /// `OrchestratorConfig`) : `patch` absent = get → `{config,
+    /// status}` ; `patch` présent = merge validé puis section
+    /// réécrite (survit aux redémarrages) → `{config, applied,
+    /// persisted, status}`. Extension additive : démons anciens →
+    /// erreur « req inconnue ».
+    ReviewQueueConfig {
+        #[serde(default)]
+        patch: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    },
+    /// Force une passe du reaper de la file de reviews locales
+    /// (suppression des sessions reviewer dont les MR/PR sont clos
+    /// ou dont l'idle dépasse le TTL) — le tick périodique fait la
+    /// même chose ; RPC = déclenchement manuel / test. Réponse :
+    /// `{reaped: [thread_id…], checked}`.
+    ReviewQueueReap {},
+}
+
+/// Un dépôt local visé par une revue de la file `review-queue` :
+/// checkout + branche relue + base de diff optionnelle.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReviewRepoSpec {
+    /// Chemin absolu (ou `~`/`$VAR` — expansé côté démon) du
+    /// checkout git à reviewer.
+    pub path: String,
+    /// Branche à reviewer — vide/absent = branche courante du
+    /// checkout (`git rev-parse --abbrev-ref HEAD`).
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Base du diff — vide/absent = base par défaut du reviewer
+    /// (`origin/HEAD` quand il résout).
+    #[serde(default)]
+    pub base: Option<String>,
 }
 
 impl ReqKind {
@@ -1361,6 +1686,7 @@ impl ReqKind {
     /// (qui peut contenir des prompts/texte volumineux ou sensibles).
     pub fn kind_name(&self) -> &'static str {
         match self {
+            Self::Auth { .. } => "auth",
             Self::NewSession { .. } => "new_session",
             Self::ResumeSession { .. } => "resume_session",
             Self::ListNativeSessions { .. } => "list_native_sessions",
@@ -1388,6 +1714,7 @@ impl ReqKind {
             Self::QueueDrop { .. } => "queue_drop",
             Self::QueuePromote { .. } => "queue_promote",
             Self::QueueSteer { .. } => "queue_steer",
+            Self::QueueClear { .. } => "queue_clear",
             Self::Events { .. } => "events",
             Self::SearchEvents { .. } => "search_events",
             Self::FirstPost { .. } => "first_post",
@@ -1401,6 +1728,8 @@ impl ReqKind {
             Self::SetModel { .. } => "set_model",
             Self::SetAdvisor { .. } => "set_advisor",
             Self::SetConfigOption { .. } => "set_config_option",
+            Self::SessionSetSteps { .. } => "session_set_steps",
+            Self::SessionSetCwd { .. } => "session_set_cwd",
             Self::DeleteSession { .. } => "delete_session",
             Self::ClearSession { .. } => "clear_session",
             Self::SleepSession { .. } => "sleep_session",
@@ -1414,6 +1743,7 @@ impl ReqKind {
             Self::TermResize { .. } => "term_resize",
             Self::TermClose { .. } => "term_close",
             Self::PrList { .. } => "pr_list",
+            Self::PrListPage { .. } => "pr_list_page",
             Self::PrTrack { .. } => "pr_track",
             Self::PrUntrack { .. } => "pr_untrack",
             Self::ForgeList {} => "forge_list",
@@ -1438,9 +1768,15 @@ impl ReqKind {
             Self::DaemonLogTail { .. } => "daemon_log_tail",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
+            Self::TokenRotate => "token_rotate",
             Self::RefreshAgentCaps { .. } => "refresh_agent_caps",
+            Self::InstallAgentAdapter { .. } => "install_agent_adapter",
             Self::ReviewReport { .. } => "review_report",
             Self::PrReviewRequest { .. } => "pr_review_request",
+            Self::ReviewQueueRequest { .. } => "review_queue_request",
+            Self::ReviewQueueStatus {} => "review_queue_status",
+            Self::ReviewQueueConfig { .. } => "review_queue_config",
+            Self::ReviewQueueReap {} => "review_queue_reap",
         }
     }
 }
@@ -1450,11 +1786,12 @@ impl ReqKind {
 // ---------------------------------------------------------------------------
 
 /// Hôte implicite d'une forge — "" (entrée legacy) se résout là.
-/// Gerrit n'a pas d'hôte implicite : toujours déclaré via `[[forges]]`.
+/// Gerrit et git nu n'ont pas d'hôte implicite : toujours déclarés
+/// via `[[forges]]`.
 pub fn forge_default_host(forge: &str) -> &'static str {
     match forge_kind(forge) {
         "gitlab" => "gitlab.com",
-        "gerrit" => "",
+        "gerrit" | "git" => "",
         _ => "github.com",
     }
 }
@@ -1469,7 +1806,8 @@ pub fn forge_kind(forge: &str) -> &str {
 }
 
 /// URL canonique web d'une référence — lien d'ouverture côté client.
-/// Gerrit sans numéro : URL de recherche du Change-Id.
+/// Gerrit sans numéro : URL de recherche du Change-Id. Git nu : pas
+/// de référence forge, lien vers le projet.
 pub fn forge_url(forge: &str, host: &str, repo: &str, pr: u64, change_id: Option<&str>) -> String {
     match forge_kind(forge) {
         "gitlab" => format!("https://{host}/{repo}/-/merge_requests/{pr}"),
@@ -1480,7 +1818,20 @@ pub fn forge_url(forge: &str, host: &str, repo: &str, pr: u64, change_id: Option
                 format!("https://{host}/q/{}", change_id.unwrap_or_default())
             }
         }
+        "git" => format!("https://{host}/{repo}"),
         _ => format!("https://{host}/{repo}/pull/{pr}"),
+    }
+}
+
+/// Nom de la référence selon la forge — « PR » github, « MR » gitlab,
+/// « Change » gerrit : libellés UI (client, acctl) qui disent « PR,
+/// MR ou Change » selon l'entrée affichée.
+pub fn forge_noun(forge: &str) -> &'static str {
+    match forge_kind(forge) {
+        "gitlab" => "MR",
+        "gerrit" => "Change",
+        "git" => "Ref",
+        _ => "PR",
     }
 }
 
@@ -1494,8 +1845,7 @@ pub fn forge_badge(forge: &str, pr: u64, change_id: Option<&str>) -> String {
             if pr > 0 {
                 format!("c#{pr}")
             } else {
-                let short: String =
-                    change_id.unwrap_or("").chars().take(9).collect();
+                let short: String = change_id.unwrap_or("").chars().take(9).collect();
                 format!("c#{short}")
             }
         }
@@ -1562,6 +1912,15 @@ pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// Secondes epoch UTC courantes — pour les champs d'horodatage
+/// numériques (state_since, retry_at…).
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// ID court type "s-a3f9c2d1".
 pub fn new_id(prefix: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1581,40 +1940,4 @@ pub fn new_id(prefix: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `group` sur `new_session` : présent il traverse le fil, absent il
-    /// désérialise à None (dégradation douce côté vieux clients/démons).
-    #[test]
-    fn new_session_group_wire() {
-        let req = Request {
-            id: 1,
-            req: ReqKind::NewSession {
-                agent: "devin".into(),
-                cwd: "/w".into(),
-                title: None,
-                model: None,
-                mode: None,
-                prompt: None,
-                origin: Some("component:agentreviewer".into()),
-                group: Some("AgentReviewer".into()),
-            },
-        };
-        let txt = serde_json::to_string(&req).unwrap();
-        let back: Request = serde_json::from_str(&txt).unwrap();
-        let ReqKind::NewSession { group, origin, .. } = back.req else {
-            panic!("variant inattendue");
-        };
-        assert_eq!(group.as_deref(), Some("AgentReviewer"));
-        assert_eq!(origin.as_deref(), Some("component:agentreviewer"));
-
-        // Un client ancien n'envoie pas `group` → None, pas d'erreur.
-        let legacy = r#"{"id":2,"req":"new_session","agent":"devin","cwd":"/w"}"#;
-        let back: Request = serde_json::from_str(legacy).unwrap();
-        let ReqKind::NewSession { group, .. } = back.req else {
-            panic!("variant inattendue");
-        };
-        assert!(group.is_none());
-    }
-}
+mod tests;

@@ -94,7 +94,7 @@ class SoundAlerts {
         this.ctx = new AudioContext();
       } catch (e) {
         this.ctxFailed = true;
-        logUi("error", `audio: AudioContext indisponible: ${e}`);
+        logUi("error", `audio: AudioContext unavailable: ${e}`);
         return null;
       }
       // Déverrouillage autoplay : le contexte démarre "suspended" tant que
@@ -128,7 +128,7 @@ class SoundAlerts {
     if (ctx.state !== "running") {
       if (!this.warnedBlocked) {
         this.warnedBlocked = true;
-        logUi("warn", "audio: bloqué par la politique autoplay — un clic débloque");
+        logUi("warn", "audio: blocked by autoplay policy — one click unblocks");
       }
       return;
     }

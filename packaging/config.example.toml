@@ -1,148 +1,288 @@
-# Configuration agentcontrol-daemon — ~/.agentcontrol/config.toml
+# agentcontrol-daemon configuration — ~/.agentcontrol/config.toml
 
-# Listener TCP loopback (tunnelé par le client via ssh -L). Ne pas binder 0.0.0.0
-# sans TLS/auth — tout le monde sur la machine pourrait piloter les agents.
+# Loopback-only TCP listener (the client tunnels to it via ssh -L). The
+# daemon refuses to start on another address unless
+# `allow_non_loopback_tcp = true` — network exposure would give anyone on
+# the network control of the agents.
+# Every TCP connection authenticates on its first line with the
+# <root>/daemon.token token (generated on first start, mode 0600) —
+# loopback alone is not per-user isolation (other local account,
+# forwarded port). Rotation: `acctl token rotate` (revokes open TCP
+# connections). The unix socket (mode 0600) and the web UI (web.token)
+# have their own trust.
 bind_tcp = "127.0.0.1:7331"
+# Explicit escape hatch for the loopback guard (isolated private network,
+# container): the bind is accepted off-loopback, a warn is logged at every
+# start, and daemon.token auth still applies to every TCP connection.
+# Note: inside a container (/.dockerenv, /run/.containerenv or a
+# docker/containerd cgroup) a non-loopback bind_tcp is already accepted
+# with a warn — 0.0.0.0 is the only reachable bind there and exposure
+# stays bounded by the runtime's port publishing. AGENTCONTROL_CONTAINER=1|0
+# forces the verdict (tests, marker-less runtimes).
+# allow_non_loopback_tcp = false
 
-# Interface web : le démon sert la même SPA que le client Tauri — sessions,
-# chat live (WebSocket), fichiers, terminal, téléchargements. Loopback
-# obligatoire : l'accès distant passe par un tunnel SSH
-# (`ssh -N -L <port local>:127.0.0.1:<bind_http> hôte`). Le token d'accès est
-# généré dans <root>/web.token (l'URL complète est donnée par `acctl status`).
+# Web interface: the daemon serves the same SPA as the Tauri client —
+# sessions, live chat (WebSocket), files, terminal, downloads. Loopback
+# only: remote access goes through an SSH tunnel
+# (`ssh -N -L <local port>:127.0.0.1:<bind_http> host`). The access token
+# is generated in <root>/web.token (`acctl status` prints the full URL).
 # bind_http = "127.0.0.1:7332"
-# Dossier des assets SPA — défaut : embarqués dans le binaire, puis
-# <root>/web, <exe>/web. Utile en dev (`client/dist`) ou install manuelle.
-# web_dir = "/chemin/vers/dist"
+# SPA assets directory — default: embedded in the binary, then
+# <root>/web, <exe>/web. Useful in dev (`client/dist`) or manual installs.
+# web_dir = "/path/to/dist"
 
-# Reprise auto après un arrêt brutal (crash, SIGKILL, OOM) : les sessions
-# qui travaillaient sont relancées (session/load) et reçoivent un prompt
-# "continue please". Les sessions idle ne sont jamais relancées. Un arrêt
-# propre (SIGTERM/SIGINT) ne déclenche pas de reprise au boot suivant.
+# Automatic resume after a brutal stop (crash, SIGKILL, OOM): sessions
+# that were working are relaunched (session/load) and sent a
+# "continue please" prompt. Idle sessions are never relaunched. A clean
+# stop (SIGTERM/SIGINT) does not trigger a resume on the next boot.
 auto_resume = true
 
 # ---------------------------------------------------------------------------
-# Rétention / stockage — un janitor applique ces limites périodiquement.
+# Embedded agent skills (acctl, ac-wait, ac-steps…): compiled into the
+# binary, the daemon syncs them into the directories each provider
+# scans — .devin/skills (devin), .claude/skills (claude),
+# .agents/skills + .cursor/skills (cursor), .agents/skills (codex and
+# unknown profiles) — in each session's cwd, on every spawn and once
+# at boot. Nothing to copy: a fresh install exposes the skills
+# everywhere.
+#
+# The sync is managed: a .agentcontrol-skills.json manifest per
+# directory tracks the files it laid down; content is rewritten when
+# the embedded version changes (daemon upgrade = up-to-date skills). A
+# skill directory already present WITHOUT a manifest is never
+# overwritten: adopted if identical to the embedded content, otherwise
+# skipped with a warn in the log — to keep your own version of a
+# shipped skill, rename or remove it (the embedded version will take
+# the name).
+# Inside a git repo, the daemon itself adds the provisioned roots to
+# the repo's .git/info/exclude (commondir — shared across worktrees):
+# git status stays clean without touching your .gitignore. Nothing is
+# added if the skills directory is already tracked by git (a repo that
+# versions its skills).
+#
+# Disable globally: provision_skills = false
+# Disable for a single profile: [agents.<id>] provision_skills = false
+#
+# Custom skills: a skill of yours in <cwd>/.devin/skills/ (or the
+# provider's equivalent) is never overwritten as long as its name does
+# not collide with an embedded skill. For a skill to be embedded in the
+# daemon (distributed to every install), add it in the AgentControl
+# repo under skills/<name>/SKILL.md — see docs/maintainer.md.
+# ---------------------------------------------------------------------------
+# provision_skills = true
+
+# ---------------------------------------------------------------------------
+# Retention / storage — a janitor enforces these limits periodically.
 # ---------------------------------------------------------------------------
 [retention]
-# events.jsonl compacté au-delà de ce seuil (la queue est conservée)
+# events.jsonl compacted beyond this threshold (the tail is kept)
 journal_max_mb = 64
 journal_keep_mb = 32
-# Quota de blobs par session : les plus anciens sont supprimés (LRU)
+# Per-session blob quota: oldest are deleted (LRU)
 blob_max_mb = 512
-# Purge les sessions inactives (agent mort) sans event depuis N jours. 0 = off
+# Purge idle sessions (dead agent) with no event for N days. 0 = off
 purge_days = 0
-# Période du janitor (secondes, min 30)
+# Janitor period (seconds, min 30)
 interval_secs = 600
 
 # ---------------------------------------------------------------------------
-# Communication agent↔agent — chaque session reçoit un serveur MCP
-# "agentcontrol" (tools: list_sessions / send_message / create_session /
-# read_events) et l'env AGENTCONTROL_SOCK + AGENTCONTROL_SESSION (fallback
-# via `acctl msg` / `acctl spawn`).
-# Un message vers une session morte la relance automatiquement.
+# Agent↔agent communication — each session gets an "agentcontrol" MCP
+# server (tools: list_sessions / send_message / create_session /
+# read_events) and the AGENTCONTROL_SOCK + AGENTCONTROL_SESSION env
+# (fallback via `acctl msg` / `acctl spawn`).
+# A message to a dead session relaunches it automatically.
 # ---------------------------------------------------------------------------
 [a2a]
 enabled = true
-# Max messages par minute et par paire émetteur→cible (anti-boucle, 0 = illimité)
+# Max messages per minute per sender→target pair (anti-loop, 0 = unlimited)
 rate_per_min = 20
-# Max sessions créées par minute et par session créatrice
-# (agentcontrol_create_session — 0 = illimité, comme rate_per_min)
+# Max sessions created per minute per creator session
+# (agentcontrol_create_session — 0 = unlimited, like rate_per_min)
 spawn_per_min = 10
-# Max sessions agent→agent existantes au total (vivantes ou mortes) —
-# borne le fan-out récursif (chaque fille est une créatrice).
-# 0 = spawn agent→agent interdit.
+# Max total existing agent→agent sessions (alive or dead) — bounds the
+# recursive fan-out (each child is itself a creator).
+# 0 = agent→agent spawn forbidden.
 spawn_max_sessions = 20
 
 # ---------------------------------------------------------------------------
-# Agents ACP. Les placeholders {model} et {mode} sont substitués à la création
-# de session (omis si vides).
+# ACP agents. The {model} and {mode} placeholders are substituted at
+# session creation (omitted when empty).
+#
+# Auto-discovery: the daemon probes the PATH on every list_agents /
+# daemon_status / spawn and registers known ACP adapters by itself
+# (claude via `acp-claude`, codex via `codex-acp`, gemini, opencode) —
+# profiles flagged `via: "auto"` in list_agents, with no restart or
+# declaration. An `[agents.*]` profile declared HERE always wins over
+# auto-detection (same id → config wins). When the tool is installed
+# but the adapter is missing (e.g. the `claude` CLI without
+# `acp-claude`), the profile shows as unavailable with the reason +
+# install hint.
+#
+# `command` also accepts fallbacks: a list of candidate commands tried
+# in order — the first whose binary (argv[0]) resolves on PATH wins —
+# e.g.
+#   command = [["my-adapter"], ["my-adapter", "--acp"]]
+#
+# The [agents.*] sections are hot-reloaded: a section added, edited
+# or removed in this file converges at the next list_agents /
+# daemon_status / spawn — and within ~60 s via the periodic rescan —
+# without restarting the daemon. Hand-edited [[forges]] sections are
+# hot-reloaded the same way (first use + periodic rescan). The other
+# config sections are still only read at startup.
 # ---------------------------------------------------------------------------
 
 [agents.devin]
 name = "Devin CLI"
 command = ["devin", "acp"]
 
-# DEVIN_PERMISSION_MODE est lue par le CLI au démarrage.
-#
-# Variantes modèle hors annonce ACP (ex. swe-2-flash-max que Devin
-# n'expose pas dans config_options) : les deux clés ci-dessous activent
-# le catalogue + l'override side-channel. `catalogue_cmd` liste les
-# variantes complètes ; `model_override_cmd` persiste la valeur dans le
-# store provider entre le kill de l'agent ACP et le session/load —
-# {native_sid} et {model} sont substitués. Sans elles, seules les
-# valeurs annoncées ACP sont sélectionnables.
-# catalogue_cmd = "devin models list"
-# model_override_cmd = "devin -r {native_sid} --model {model} --respect-workspace-trust false"
+# Model variants outside the ACP announcement (e.g. swe-2-flash-max,
+# which Devin does not expose in config_options): the built-in preset
+# already declares `catalogue_cmd` (`devin models list` probe, ~1 h
+# cache) + `model_override_cmd` (persists the value in the provider
+# store between the ACP agent kill and the session/load — {native_sid}
+# and {model} substituted pre-quoted, run via sh -c) + a static
+# `extra_models` fallback. ⚠️ An [agents.devin] section written here
+# REPLACES the whole preset: to keep the catalog you must re-declare
+# the three keys below (`devin -r` exits 1 on non-TTY stdout once the
+# model is persisted — the `|| test $? -eq 1` tolerance avoids a false
+# failure).
+catalogue_cmd = "devin models list"
+model_override_cmd = "devin -r {native_sid} --model {model} --respect-workspace-trust false || test $? -eq 1"
+# Static fallback of the preset — served when `devin models list`
+# fails (CLI too old), merged into the catalog otherwise (deduplicated
+# by value).
+extra_models = [
+  { value = "adaptive", label = "Adaptive" },
+  { value = "swe-2-max", label = "SWE-2 Max" },
+  { value = "swe-2-high", label = "SWE-2 High" },
+  { value = "swe-2-medium", label = "SWE-2 Medium" },
+  { value = "swe-2-max-lightning", label = "SWE-2 Max Lightning" },
+  { value = "swe-2-high-lightning", label = "SWE-2 High Lightning" },
+  { value = "swe-2-medium-lightning", label = "SWE-2 Medium Lightning" },
+  { value = "swe-2-flash-max", label = "SWE-2 Flash Max" },
+  { value = "swe-2-flash-high", label = "SWE-2 Flash High" },
+  { value = "swe-2-flash-medium", label = "SWE-2 Flash Medium" },
+  { value = "swe-2-flash-max-lightning", label = "SWE-2 Flash Max Lightning" },
+  { value = "swe-2-flash-high-lightning", label = "SWE-2 Flash High Lightning" },
+  { value = "swe-2-flash-medium-lightning", label = "SWE-2 Flash Medium Lightning" },
+]
+
+# DEVIN_PERMISSION_MODE is read by the CLI at startup; DEVIN_MODEL
+# (built-in preset, "{model}") sets the model requested at session
+# creation — re-declared here for the same reasons.
 [agents.devin.env]
 DEVIN_PERMISSION_MODE = "{mode}"
+DEVIN_MODEL = "{model}"
 
-# Cursor CLI — ACP natif, preset BUILT-IN (id `cursor`, affiché dans le
-# sélecteur de session sans rien déclarer ici). argv[0] est résolu sur
-# le PATH au boot (`cursor-agent` puis l'alias `agent`) en chemin
-# absolu, puis re-résolu à chaud à chaque `available`/spawn — une
-# install postérieure au démarrage du démon est détectée sans restart.
-# Login préalable : `cursor-agent login` (ou `agent login`).
-# Le mode/modèle demandés à la création sont appliqués via ACP après
-# session/new (pas de placeholder).
-# Surcharger la commande sans éditer ce fichier : options →
-# composants → « agents » (ou `acctl comp set agents cursor
-# "agent,acp"`) — persisté ici en `[agents.cursor]` complet.
+# Cursor CLI — native ACP, BUILT-IN preset (id `cursor`, shown in the
+# session picker with nothing to declare here). argv[0] is resolved on
+# PATH at boot (`cursor-agent` then the `agent` alias) to an absolute
+# path, then re-resolved hot on every `available`/spawn — an install
+# after daemon startup is detected without a restart.
+# Log in first: `cursor-agent login` (or `agent login`).
+# The mode/model requested at creation are applied via ACP after
+# session/new (no placeholder).
+# Override the command without editing this file: options →
+# components → "agents" (or `acctl comp set agents cursor
+# "agent,acp"`) — persisted here as a full `[agents.cursor]`.
 # [agents.cursor]
 # name = "Cursor CLI"
 # command = ["agent", "acp"]
 
-# Codex CLI — pas d'ACP natif : via l'adaptateur officiel
-# `npm i -g @agentclientprotocol/codex-acp` (repo zed-industries archivé,
-# développement déplacé vers agentclientprotocol). Nécessite node sur le
-# PATH du démon (ensure_agent_path couvre les dossiers agents usuels :
-# ~/.local/bin, ~/.npm-global/bin, shims mise, cargo, nvm…).
-# CODEX_PATH doit pointer le binaire codex installé : sans lui,
-# l'adaptateur lance son @openai/codex npm embarqué (et sous npx,
-# "codex" dans PATH serait le wrapper npm, pas le vrai CLI).
+# Codex CLI — no native ACP: via the official adapter
+# `npm i -g @agentclientprotocol/codex-acp` (zed-industries repo
+# archived, development moved to agentclientprotocol). The `codex` CLI
+# alone does NOT speak ACP — installing codex without the adapter
+# leaves the profile unavailable (auto-discovery: `codex` detected →
+# greyed-out "Codex CLI" profile + install hint). With no declaration,
+# the `codex` profile is auto-registered anyway as soon as `codex-acp`
+# is on PATH — this section only exists to override
+# (name/env/max_instances…). Requires node on the daemon's PATH
+# (ensure_agent_path covers the usual agent directories:
+# ~/.local/bin, ~/.npm-global/bin, mise shims, cargo, nvm…).
+# CODEX_PATH must point to the installed codex binary: without it the
+# adapter runs its bundled @openai/codex npm package (and under npx,
+# "codex" in PATH would be the npm wrapper, not the real CLI).
 [agents.codex]
 name = "Codex CLI"
 command = ["codex-acp"]
 
 [agents.codex.env]
-CODEX_PATH = "/home/wameuh/.local/bin/codex" # adapter : chemin absolu du codex standalone
+# CODEX_PATH = "/absolute/path/to/codex" # adapter: absolute path of the standalone codex
 
-# Claude — pas d'ACP natif non plus : via l'adaptateur officiel
-# `npm i -g @agentclientprotocol/claude-agent-acp` (embarque le Claude
-# Agent SDK → le CLI `claude` n'est PAS requis). Auth requise — l'une
-# des deux variables ci-dessous, ou OAuth existant dans ~/.claude :
-#   - ANTHROPIC_API_KEY (facturation API)
-#   - CLAUDE_CODE_OAUTH_TOKEN : `npm i -g @anthropic-ai/claude-code`
-#     puis `claude setup-token` (marche en headless : URL → code).
-[agents.claude]
-name = "Claude"
-command = ["claude-agent-acp"]
+# Claude — in-house `acp-claude` adapter, shipped in the tarball next
+# to the daemon (and laid down by daemon-update): no npm required, the
+# `claude` profile auto-registers as soon as `acp-claude` AND the
+# `claude` CLI (native installer → ~/.local/bin/claude) are on PATH.
+# Missing `acp-claude` → greyed-out profile with the "update the
+# daemon" hint — the historical npm adapters (claude-code-acp /
+# claude-agent-acp) are no longer tried automatically (#285), but a
+# hand-declared [agents.claude] can still point at them explicitly
+# (e.g. for the `_meta.claudeCode.options` advisor, see below).
+# Declaring [agents.claude] wins over auto (env, extra_models,
+# max_instances…).
+# Auth required — one of the two variables below, or existing OAuth
+# in ~/.claude:
+#   - ANTHROPIC_API_KEY (API billing)
+#   - CLAUDE_CODE_OAUTH_TOKEN: `npm i -g @anthropic-ai/claude-code`
+#     then `claude setup-token` (works headless: URL → code).
+# [agents.claude]
+# name = "Claude"
+# command = ["acp-claude"]
 
 # [agents.claude.env]
 # CLAUDE_CODE_OAUTH_TOKEN = "…"
 
-# Modèles « extra » hors annonce ACP : claude-code-acp (adaptateur Zed)
-# n'expose que default/sonnet/opus/haiku — les variantes Fable restent
-# sélectionnables en les déclarant ici (session/set_model accepte la
-# valeur telle quelle ; les ids complets claude-fable-5 / claude-fable-5-1
-# passent aussi). `label` = libellé affiché dans le sélecteur.
+# "Extra" models outside the ACP announcement: merged into the
+# displayed list when the adapter doesn't announce them
+# (session/set_model accepts the value as-is; the full ids
+# claude-fable-5 / claude-fable-5-1 also work). `label` = text shown in
+# the picker.
 # extra_models = [
 #   { value = "fable", label = "Fable" },
 #   { value = "fable[1m]", label = "Fable 1M" },
 # ]
 #
-# Advisor (outil de consultation facturé en crédits d'usage — la valeur
-# doit être « au moins aussi capable » que le modèle de base, sinon
-# Claude la refuse ; certains modèles de base exigent en plus
-# CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 dans [agents.claude.env]) :
-# `advisor_models` affiche un sélecteur par session ; la valeur est
-# injectée au spawn via `_meta.claudeCode.options` — mécanisme propre à
-# l'adaptateur @zed-industries/claude-code-acp — l'adaptateur officiel
-# @agentclientprotocol/claude-agent-acp ne le connaît pas). "off" est
-# toujours proposé (désactive explicitement). Changer de valeur recycle
-# le process agent. Sans clé : aucun sélecteur.
+# Advisor (a consultation tool billed in usage credits — the value
+# must be "at least as capable" as the base model or Claude refuses
+# it; some base models also require
+# CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 in [agents.claude.env]):
+# `advisor_models` shows a per-session picker; the value is injected
+# at spawn via `_meta.claudeCode.options` — a mechanism of the
+# @zed-industries/claude-code-acp adapter, which `acp-claude` does not
+# implement: to use it, declare [agents.claude] with
+# `command = ["claude-code-acp"]` (npm i -g @zed-industries/claude-code-acp)
+# — the official @agentclientprotocol/claude-agent-acp adapter doesn't
+# know it either. "off" is always offered (explicitly disables).
+# Changing the value recycles the agent process. No key: no picker.
 # advisor_models = ["fable", "opus", "sonnet"]
 
-# Exemples d'autres agents ACP (adapter la commande) :
+# Examples of other ACP agents (adapt the command):
 # [agents.gemini]
 # name = "Gemini CLI"
 # command = ["gemini", "--experimental-acp"]
+
+# ---------------------------------------------------------------------------
+# Component catalog — [catalog.<name>] overrides per embedded entry
+# (names known at boot: agentbacklog, agentreviewer…). Repoint the
+# install/metadata source to a fork, a mirror or a local path without
+# recompiling the daemon. Unknown names or param keys → warn at
+# startup, ignored.
+#
+#   repo      — upstream repository probed for latest_version
+#               ("owner/name" format, GitHub API probe); homepage
+#               derived if absent.
+#   homepage  — documentation URL shown by the client.
+#   params    — defaults of the entry's declared params; the value
+#               provided at install (dialog, component_install --set)
+#               always wins over these defaults.
+#
+# `install_spec` (entries installed via `uv tool install`) accepts an
+# index package name, a `git+<url>` or a local path — e.g.:
+# [catalog.agentbacklog]
+# repo = "acme/AgentBacklog"
+# params.install_spec = "git+https://git.acme.corp/AgentBacklog"
+#
+# [catalog.agentreviewer]
+# params.install_spec = "/opt/checkouts/agentreviewer"
+# ---------------------------------------------------------------------------

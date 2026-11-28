@@ -6,7 +6,7 @@
 // (working / waiting_input) — hors ces états les deux modes se confondent.
 // Usage : npm run build && node tests/alt-send-e2e.mjs
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
 
@@ -59,6 +59,7 @@ const MOCK = `(function () {
         case "call": return p.then(() => rpc(args.method, args.params ?? {}));
         case "subscribe": return p.then(() => null);
         case "saved_connections": case "ssh_hosts": return p.then(() => []);
+        case "other_instances": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAA x");
         case "check_update": return p.then(() => { throw new Error("offline"); });
         default: return p.then(() => null);
@@ -67,9 +68,7 @@ const MOCK = `(function () {
   };
 })();`;
 
-const server = spawn("npx", ["vite", "preview", "--port", "4193", "--strictPort"], { stdio: "ignore" });
-process.on("exit", () => server.kill());
-await new Promise((r) => setTimeout(r, 1800));
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: true, args: ["--no-sandbox"] });
 const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
@@ -97,12 +96,14 @@ const typeInput = (txt) => p.evaluate((t) => {
   i.value = t;
   i.dispatchEvent(new Event("input", { bubbles: true }));
 }, txt);
-// Change la préférence via le select des settings (chemin utilisateur réel).
+// Change la préférence via le select des settings (chemin utilisateur réel)
+// — modèle stagé : le changement n'est actif qu'après « Save ».
 const setPref = (v) => p.evaluate(async (val) => {
   document.getElementById("tb-settings").click();
   const s = document.getElementById("s-sendmode");
   s.value = val;
   s.dispatchEvent(new Event("change"));
+  document.getElementById("s-save").click();
   document.getElementById("settings-close").click();
 }, v);
 // Pousse un état live (status_changed → updateHeader → syncAltBtn).
@@ -112,7 +113,7 @@ const setState = (state, seq) => p.evaluate((s, q) => {
     session: "s1", event: { seq: q, ts: "x", type: "status_changed", state: s } } });
 }, state, seq);
 
-await p.goto("http://localhost:4193/", { waitUntil: "networkidle0" });
+await p.goto(BASE + "/", { waitUntil: "networkidle0" });
 await p.waitForSelector("#btn-connect", { timeout: 15000 });
 await click("#btn-connect"); await sleep(300);
 await p.type("#c-host", "local"); await click("#c-go"); await sleep(1200);

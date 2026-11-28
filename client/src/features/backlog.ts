@@ -1,9 +1,12 @@
 // ---------------------------------------------------------------------------
 // Vue « Backlog » de la sidebar (onglet sv-backlog → #backlog-list) : file
-// AgentBacklog exposée par le composant démon `agentbacklog`. Le client
-// n'appelle JAMAIS le CLI directement — il demande `component_query
-// {name:"agentbacklog", query:"list"}` : l'argv audité vit dans la spec
-// déclarée (components.toml → spec.queries.list), exécuté borné côté démon.
+// AgentBacklog exposée par un composant démon déclarant la query `list`.
+// Le client n'appelle JAMAIS le CLI directement — il demande
+// `component_query {name:<composant découvert>, query:"list"}` : l'argv
+// audité vit dans la spec déclarée (components.toml → spec.queries.list),
+// exécuté borné côté démon. Le composant est DÉCOUVERT dans
+// `list_components` par sa query `list`, pas par son nom : un spec
+// tiers (components.toml) portant le même contrat fonctionne tel quel.
 //
 // Refresh (spec #35) : fetch à l'ouverture de l'onglet + intervalle court
 // (~4 s) tant que l'onglet est actif + invalidation debouncée sur
@@ -29,11 +32,13 @@ import { nav } from "../ui/nav";
 import { t, type Key } from "../i18n";
 import type { CompItem } from "../core/types";
 
-const COMP = "agentbacklog";
+/** Nom canonique du composant file dans le catalogue embarqué —
+ *  utilisé pour l'installation (recette upstream) et comme préférence
+ *  de découverte ; jamais comme nom de spec interrogée. */
+const CANONICAL = "agentbacklog";
 const ORCH_COMP = "backlog-orchestrator";
 /** `origin` posé au spawn d'un Manager — constante partagée avec le
- *  démon (orch.rs `MANAGER_ORIGIN`), comme `COMP` pour le nom du
- *  composant. */
+ *  démon (orch.rs `MANAGER_ORIGIN`). */
 const MGR_ORIGIN = "feature:backlog-manager";
 const QUERY = "list";
 const POLL_MS = 4000;
@@ -271,10 +276,22 @@ export class BacklogView {
       this.render();
       return;
     }
-    const comp = comps.find((c) => c.name === COMP);
+    // Découverte : tout composant déclarant la query `list` fournit la
+    // file (un spec components.toml tiers nomme librement sa section).
+    // Le nom canonique prime en cas d'ambiguïté ; un `agentbacklog`
+    // déclaré SANS la query conserve le diagnostic « noquery » (spec
+    // cassée) plutôt que « absent ».
+    const hasList = (c: CompItem) => {
+      const q = (c.spec?.queries ?? {}) as Record<string, string[]>;
+      return !!q[QUERY]?.length;
+    };
+    const comp =
+      comps.find((c) => c.name === CANONICAL && hasList(c)) ??
+      comps.find(hasList) ??
+      comps.find((c) => c.name === CANONICAL);
     // Surface « Manager » : workspaces routés exposés par
     // l'orchestrateur actif (status.workspaces) — détection voulue
-    // = composant agentbacklog déclaré + orchestrateur actif.
+    // = composant file découvert + orchestrateur actif.
     const orchItem = comps.find((c) => c.name === ORCH_COMP);
     const orch = orchItem?.orchestrator;
     this.orchParams = (orchItem?.spec?.params ?? {}) as Record<
@@ -306,7 +323,7 @@ export class BacklogView {
     }
     const r = await callBg<QueryResp>("component_query", {
       conn,
-      name: COMP,
+      name: comp.name,
       query: QUERY,
     }).catch((e: unknown) => ({ err: String(e) }));
     if ("err" in r) {
@@ -388,7 +405,10 @@ export class BacklogView {
     this.installing = true;
     this.render();
     const conn = this.deps.conn();
-    const err = await call("component_install", { conn, name: COMP }).then(
+    const err = await call("component_install", {
+      conn,
+      name: CANONICAL,
+    }).then(
       () => null,
       (e: unknown) => String(e),
     );

@@ -77,7 +77,7 @@ impl Daemon {
                     return TermReply::Resp(Response::err(
                         id,
                         format!(
-                            "trop de terminaux ouverts sur cette connexion (max {MAX_TERMS_PER_CONN})"
+                            "too many terminals open on this connection (max {MAX_TERMS_PER_CONN})"
                         ),
                     ));
                 }
@@ -88,7 +88,7 @@ impl Daemon {
                     if terms.contains_key(t.as_str()) {
                         return TermReply::Resp(Response::err(
                             id,
-                            format!("id terminal déjà utilisé: {t}"),
+                            format!("terminal id already used: {t}"),
                         ));
                     }
                 }
@@ -107,14 +107,14 @@ impl Daemon {
                     // session) — le bug « open très lent » se mesure ici.
                     match &res {
                         Ok((t, _, _)) => info!(
-                            "[{}] terminal {} ouvert ({}x{}) en {} ms",
+                            "[{}] terminal {} opened ({}x{}) in {} ms",
                             session,
                             t.id,
                             cols,
                             rows,
                             t0.elapsed().as_millis()
                         ),
-                        Err(e) => warn!("[{}] term_open a échoué: {}", session, e),
+                        Err(e) => warn!("[{}] term_open failed: {}", session, e),
                     }
                     let _ = evt.send(TermEvt::Spawned(Box::new(SpawnedTerm {
                         id,
@@ -157,7 +157,7 @@ impl Daemon {
                 // drop → kill() du shell → reader EIO → reap
                 TermReply::Resp(Response::ok(id, json!({})))
             }
-            _ => return TermReply::Pass,
+            _ => TermReply::Pass,
         }
     }
 
@@ -169,10 +169,11 @@ impl Daemon {
         id_hint: Option<String>,
         cols: u16,
         rows: u16,
-    ) -> Result<(Term, mpsc::Receiver<TermMsg>, String)>
-    {
+    ) -> Result<(Term, mpsc::Receiver<TermMsg>, String)> {
         let s = self.get_session(&session).await?;
-        let cwd = s.meta_snapshot().cwd;
+        // Workspace effectif déclaré par l'agent (worktree…) quand il
+        // existe, sinon cwd de session — cf. session/cwd.rs.
+        let cwd = s.term_cwd();
         // Comme les agents : acctl/pont A2A utilisables dans le shell.
         let envs: Vec<(String, String)> = if self.a2a.enabled {
             vec![
@@ -221,8 +222,7 @@ impl Daemon {
             while let Some(m) = rx.recv().await {
                 match m {
                     TermMsg::Data(b) => {
-                        let frame =
-                            json!({"push":"term_data","term":tid2,"data":b64(&b)});
+                        let frame = json!({"push":"term_data","term":tid2,"data":b64(&b)});
                         // File saturée → la conn est condamnée (signalé
                         // dans line()) ; le relais s'arrête, le term est
                         // démonté avec elle.
@@ -239,7 +239,11 @@ impl Daemon {
             // Nettoyage de la map côté boucle de lecture (le term peut
             // être déjà parti via TermClose — sans effet alors ; la gen
             // protège un éventuel reopen sous le même id).
-            let _ = evt.send(TermEvt::Done { id: tid2, gen, code });
+            let _ = evt.send(TermEvt::Done {
+                id: tid2,
+                gen,
+                code,
+            });
         });
     }
 }

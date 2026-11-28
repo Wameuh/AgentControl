@@ -20,7 +20,11 @@ export function connKeyOf(cfg: Record<string, unknown>, isAndroid = false) {
 }
 
 /// Params ensure_daemon — forward les champs ssh de la cfg (natif ou CLI).
-export function daemonParams(cfg: Record<string, unknown>, tag: string) {
+/// `allowManaged` = l'utilisateur a confirmé « installer quand même »
+/// après une réponse `managed:*` de la sonde (garde « managé ailleurs »).
+export function daemonParams(
+  cfg: Record<string, unknown>, tag: string, allowManaged = false,
+) {
   return {
     host: cfg.host,
     args: cfg.args ?? [],
@@ -32,6 +36,7 @@ export function daemonParams(cfg: Record<string, unknown>, tag: string) {
     key: cfg.key ?? null,
     native: cfg.native ?? null,
     hostKeys: cfg.host_keys ?? null,
+    allowManaged,
   };
 }
 

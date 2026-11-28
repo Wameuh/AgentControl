@@ -4,11 +4,12 @@
 // quand le démon est plus récent (minor).
 // ---------------------------------------------------------------------------
 
-import { invoke, getVersion, isWeb } from "../core/bridge";
+import { invoke, getVersion, isWeb, listen, listenPlugin } from "../core/bridge";
 import { $, esc, logUi, notify } from "../core/dom";
+import { codedErrorMsg } from "../core/errcode";
 import { icon } from "../ui/icons";
 import { isAndroid, shellOpen } from "../core/chrome";
-import { cmpVer, connLabel, daemonParams } from "../core/conn";
+import { cmpVer, connKeyOf, connLabel, daemonParams } from "../core/conn";
 import { call } from "../core/rpc";
 import { t } from "../i18n";
 import { confirmPair } from "./pairing";
@@ -25,7 +26,7 @@ export const rcChannel = () =>
 // page inerte) des dizaines de secondes après l'action — incompréhensible.
 const FETCH_TIMEOUT = 15_000;
 
-async function remoteVersion(): Promise<string> {
+export async function remoteVersion(): Promise<string> {
   if (rcChannel()) {
     try {
       const r = await fetch(
@@ -65,42 +66,6 @@ async function remoteVersion(): Promise<string> {
   return invoke<string>("check_update", { includeRc: rcChannel() });
 }
 
-/// URL de l'APK de la release `tag` (asset `.apk`), fallback = page de
-/// la release du tag — PAS /releases/latest : sur le canal rc, latest
-/// pointerait la stable et l'utilisateur installerait la mauvaise
-/// version (le APK visé doit suivre `tag` même en échec d'énumération).
-async function apkReleaseUrl(tag: string): Promise<string> {
-  try {
-    const r = await fetch(
-      `https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v${tag}`,
-      { signal: AbortSignal.timeout(FETCH_TIMEOUT) },
-    );
-    if (r.ok) {
-      const j = (await r.json()) as {
-        assets?: { name?: string; browser_download_url?: string }[];
-      };
-      const a = j.assets?.find((x) => x.name?.endsWith(".apk"));
-      if (a?.browser_download_url) return a.browser_download_url;
-    }
-  } catch {
-    /* réseau */
-  }
-  return `https://github.com/Wameuh/AgentControl/releases/tag/v${tag}`;
-}
-
-/// Flow Android vérifié (backlog #232) : `shellOpen` → opener plugin →
-/// navigateur système → GitHub sert l'asset APK (content-type
-/// octet-stream) → téléchargement → l'utilisateur ouvre le fichier
-/// depuis ses téléchargements → package installer. « Install unknown
-/// apps » est une permission de l'app SOURCE (le navigateur) : Android
-/// la demande à la première install, un refus = échec côté installeur
-/// invisible pour nous — d'où le toast « rouvrez l'app » (le process
-/// peut être tué par le remplacement, Android ne relance jamais
-/// l'app). L'APK release est signé par l'upload keystore (#200) →
-/// update in-place possible UNIQUEMENT si l'app installée porte la
-/// même signature ; un appareil sur build debug-signé (rc pré-#200 ou
-/// build --debug) ne peut pas upgrader → uninstall → perte des accès
-/// (Keystore non exportables, #160) → re-pairing QR obligatoire.
 /// `app_signing` (plugin ac-device → PackageManager) rend le verdict :
 /// "impossible" = debuggable ou signataire ≠ certificat release.
 async function androidReinstallRisk(): Promise<boolean> {
@@ -109,14 +74,136 @@ async function androidReinstallRisk(): Promise<boolean> {
   return info?.update_in_place === "impossible";
 }
 
+// Progression du téléchargement APK + états du plugin ac-device : le
+// backend émet `update-progress` pendant le fetch et le Kotlin trigger
+// `update_install_state` au retour de l'installeur/réglages (install
+// annulée, bloquée, permission, installée). Le tag mémorisé garde la
+// relance « une case » possible sans redownload (cache Rust conservé).
+type UpdateProgressPayload = {
+  tag?: string;
+  downloaded?: number;
+  total?: number | null;
+  percent?: number | null;
+};
+type AndroidInstallState = { status?: string; message?: string };
+
+// Le tag est persisté : un kill du process pendant l'install (cas
+// nominal — l'APK remplace l'app) recharge le module à zéro, et le
+// dialogue « installation annulée ? » doit pouvoir relancer sans
+// retélécharger (le cache Rust est conservé).
+let androidUpdateTag: string | null = isWeb
+  ? null
+  : localStorage.getItem("ac-android-update-tag");
+let androidUpdateListeners = false;
+let updateProgressEl: HTMLElement | null = null;
+
+function ensureAndroidUpdateListeners() {
+  if (androidUpdateListeners) return;
+  androidUpdateListeners = true;
+  void listen<UpdateProgressPayload>("update-progress", (e) => {
+    const p = e.payload;
+    if (!p) return;
+    if (androidUpdateTag && p.tag && p.tag !== androidUpdateTag) return;
+    showUpdateProgress(p);
+  });
+  void listenPlugin<AndroidInstallState>(
+    "ac-device",
+    "update_install_state",
+    (p) => void onAndroidInstallState(p),
+  );
+}
+
+function showUpdateProgress(p: UpdateProgressPayload) {
+  // Le cap de toasts (notify) peut évincer le toast de progression :
+  // recréer s'il a été détaché du DOM.
+  if (!updateProgressEl || !updateProgressEl.isConnected) {
+    const d = document.createElement("div");
+    d.className = "toast t-info update-progress";
+    d.innerHTML =
+      '<div class="upd-p-msg"></div><div class="upd-p-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><i></i></div>';
+    $("toasts").appendChild(d);
+    updateProgressEl = d;
+  }
+  const msg = updateProgressEl.querySelector(".upd-p-msg") as HTMLElement;
+  const barWrap = updateProgressEl.querySelector(".upd-p-bar") as HTMLElement;
+  const bar = updateProgressEl.querySelector(".upd-p-bar i") as HTMLElement;
+  const tag = p.tag || androidUpdateTag || "";
+  const pct = typeof p.percent === "number"
+    ? Math.max(0, Math.min(100, p.percent))
+    : null;
+  if (pct != null) {
+    updateProgressEl.classList.remove("indeterminate");
+    bar.style.width = `${pct}%`;
+    barWrap.setAttribute("aria-valuenow", String(pct));
+    msg.textContent = t("update_download_progress", { v: tag, pct });
+  } else {
+    updateProgressEl.classList.add("indeterminate");
+    bar.style.width = "40%";
+    barWrap.removeAttribute("aria-valuenow");
+    const mb = Math.max(1, Math.ceil((p.downloaded ?? 0) / 1_048_576));
+    msg.textContent = t("update_download_progress_mb", { v: tag, mb });
+  }
+}
+
+function hideUpdateProgress() {
+  updateProgressEl?.remove();
+  updateProgressEl = null;
+}
+
+async function onAndroidInstallState(p: AndroidInstallState) {
+  const tag = androidUpdateTag;
+  if (p.status === "launched") {
+    notify("info", t("update_android_reopen"));
+    return;
+  }
+  if (p.status === "permission_required") {
+    notify("warn", t("update_android_permission"));
+    return;
+  }
+  if (p.status === "installed") {
+    androidUpdateTag = null;
+    localStorage.removeItem("ac-android-update-tag");
+    notify("success", t("update_android_installed"));
+    return;
+  }
+  if (p.status === "unchanged" || p.status === "launch_blocked") {
+    const cancelled = p.status === "unchanged";
+    const ok = await confirmPair(
+      cancelled ? t("update_android_cancelled_h") : t("update_android_blocked_h"),
+      cancelled ? t("update_android_cancelled_msg") : t("update_android_blocked_msg"),
+      t("update_now"),
+    );
+    if (ok && tag) void performClientUpdate(tag);
+    return;
+  }
+  if (p.status === "missing" || p.status === "error") {
+    notify("error", t("update_failed_reason", {
+      reason: codedErrorMsg(p.message ?? "update", "update"),
+    }));
+  }
+}
+
 /// Update du client vers `tag` : desktop = installeur auto
-/// (`update_client`) ; Android = APK ouvert dans le navigateur — le
-/// gestionnaire de paquets fait la maj in-place (signature identique).
-/// Jamais silencieux : étapes versées à client.log, toast info au
-/// départ puis succès / échec AVEC la raison (les erreurs backend
-/// citent le repli manuel — commande ou page releases).
+/// (`update_client`) ; Android = `update_client` aussi — le backend
+/// télécharge l'APK dans le cache de l'app, vérifie l'intégrité de la
+/// release (SHA256SUMS signé minisign + sha256, I1) puis le plugin
+/// ac-device lance l'installeur système (FileProvider + intent ; la
+/// permission « apps inconnues » peut être demandée par Android —
+/// statut `permission_required`). « Install unknown apps » devient
+/// une permission de l'APP (plus du navigateur) : Android la demande
+/// une fois, un refus = échec côté installeur invisible pour nous —
+/// d'où le toast « rouvrez l'app » (le process peut être tué par le
+/// remplacement, Android ne relance jamais l'app). L'APK release est
+/// signé par l'upload keystore (#200) → update in-place possible
+/// UNIQUEMENT si l'app installée porte la même signature ; un
+/// appareil sur build debug-signé (rc pré-#200 ou build --debug) ne
+/// peut pas upgrader → uninstall → perte des accès (Keystore non
+/// exportables, #160) → re-pairing QR obligatoire.
 export async function performClientUpdate(tag: string) {
   if (isAndroid()) {
+    ensureAndroidUpdateListeners();
+    androidUpdateTag = tag;
+    localStorage.setItem("ac-android-update-tag", tag);
     // Garde-fou uninstall : si l'app installée ne peut pas upgrader
     // in-place (signature ≠ release), le chemin impose une
     // désinstallation qui efface TOUTES les données (allowBackup=false,
@@ -130,11 +217,42 @@ export async function performClientUpdate(tag: string) {
       );
       if (!ok) return;
     }
-    shellOpen(await apkReleaseUrl(tag));
-    // L'APK s'installe dans le gestionnaire de paquets : le process meurt
-    // avec l'app et Android ne permet pas à une app remplacée de se
-    // relancer seule — on guide explicitement au lieu de laisser
-    // l'utilisateur dans le navigateur sans mode d'emploi.
+    notify("info", t("update_installing", { v: tag }));
+    let status = "";
+    try {
+      status = await invoke<string>("update_client", {
+        tag,
+        notifyTitle: t("update_android_notify_title"),
+        notifyText: t("update_android_notify_text", { v: tag }),
+      });
+    } catch (e) {
+      const reason = codedErrorMsg(e, "update");
+      notify("error", t("update_failed_reason", { reason }));
+      // Repli « page releases » : l'APK s'y télécharge à la main —
+      // l'erreur backend cite déjà la cause exacte.
+      shellOpen(`https://github.com/Wameuh/AgentControl/releases/tag/v${tag}`);
+      return;
+    } finally {
+      hideUpdateProgress();
+    }
+    if (status === "permission_required") {
+      // Android a ouvert les réglages « sources inconnues » de l'app ou
+      // armé l'APK pour la reprise : le cache Rust évite le
+      // retéléchargement quand l'utilisateur revient.
+      notify("warn", t("update_android_permission"));
+      return;
+    }
+    if (status === "pending") {
+      // L'app était en arrière-plan à la fin du téléchargement : le
+      // plugin a armé l'APK + notification — onResume relance
+      // l'installeur (ou les réglages si la permission manque).
+      notify("info", t("update_android_pending"));
+      return;
+    }
+    // "launched" = l'installeur système est réellement ouvert (le plugin
+    // ne le rend plus sans startActivity au premier plan). Le process
+    // meurt avec le remplacement de l'APK et Android ne permet pas à une
+    // app remplacée de se relancer seule — on guide explicitement.
     notify("info", t("update_android_reopen"));
     return;
   }
@@ -144,10 +262,12 @@ export async function performClientUpdate(tag: string) {
     await invoke("update_client", { tag });
   } catch (e) {
     const reason = String(e);
-    notify("error", t("update_failed_reason", { reason }));
+    notify("error", t("update_failed_reason", {
+      reason: codedErrorMsg(e, "update"),
+    }));
     // Repli « page releases » quand le backend le désigne (hors bundle
     // .app, build portable…) — l'erreur affiche déjà la cause exacte.
-    if (reason.includes("page releases")) {
+    if (/releases? page|update-failed:(manual|writable)/.test(reason)) {
       shellOpen(`https://github.com/Wameuh/AgentControl/releases/tag/v${tag}`);
     }
     return;
@@ -175,8 +295,12 @@ export async function performDaemonUpdate(o: {
   // conn-view (ni dead ni interrupted ni asleep). Échec → compteur inconnu.
   const sessions = await call<SessionMeta[]>("list_sessions", { conn: o.conn })
     .catch(() => null);
+  // Sessions sans champ conn (réponse brute mono-serveur, ex. web) ne
+  // peuvent appartenir qu'à la conn "web" — les clés desktop sont
+  // toujours préfixées ssh/tcp/local.
   const n = sessions?.filter((s) =>
-    s.conn === o.conn && s.state !== "dead" && s.state !== "interrupted" &&
+    (s.conn ?? "web") === o.conn && s.state !== "dead" &&
+    s.state !== "interrupted" &&
     s.state !== "asleep" && s.state !== "wait-asleep").length;
   const ok = await confirmPair(
     t("dupdate_h"),
@@ -189,7 +313,7 @@ export async function performDaemonUpdate(o: {
   // Corrélation client.log : une mise à jour démon (surtout ensure_daemon
   // ssh) peut coïncider avec un flap transport — la ligne porte conn +
   // versions pour la retrouver sans fouiller les toasts.
-  logUi("info", `daemon update conn=${o.conn} ${o.current}->${o.target} confirmé`);
+  logUi("info", `daemon update conn=${o.conn} ${o.current}->${o.target} confirmed`);
   // Capacité fraîche (le statut du check peut dater) : self_update
   // annonce que le démon connaît ReqKind::UpdateDaemon — un plus vieux
   // répondrait `parse: unknown variant` en id=0, droppé par le routage
@@ -218,7 +342,7 @@ export async function performDaemonUpdate(o: {
           o.cfg?.kind === "ssh") {
         await daemonViaScript(o, host);
       } else {
-        notify("error", msg);
+        notify("error", codedErrorMsg(e, "update"));
       }
     }
     return;
@@ -246,6 +370,10 @@ async function daemonViaScript(
       notify("warn", t("dupdate_stale", { host, want: o.target, got: res.slice(6) }));
     } else if (res.startsWith("busy:")) {
       notify("warn", t("dupdate_busy", { host, addr: res.slice(5) }));
+    } else if (res.startsWith("managed:")) {
+      // Traces d'une gestion ailleurs — jamais d'install forcée ici :
+      // le flux de connexion proposera « installer quand même ».
+      notify("warn", t("dmanaged_msg", { host, detail: res.slice(8) }));
     } else if (res.startsWith("installed:")) {
       const got = res.slice(10);
       if (got === o.target) {
@@ -259,8 +387,81 @@ async function daemonViaScript(
       notify("error", res || t("update_failed"));
     }
   } catch (e) {
-    notify("error", String(e));
+    // Host key encore inconnue du profil (première connexion native) :
+    // même TOFU que le flux de connexion — confirmation explicite,
+    // épinglage persisté, puis le script est rejoué avec le pin.
+    const u = /hostkey-unknown:(\S+)/.exec(String(e));
+    if (u && o.cfg) {
+      const where = `${o.cfg.user ? o.cfg.user + "@" : ""}${o.cfg.host}:${o.cfg.port ?? 22}`;
+      const ok = await confirmPair(
+        t("hk_new_h"),
+        t("hk_new_msg", { where, fp: u[1] }),
+        t("hk_new_go"),
+      );
+      if (ok) {
+        o.cfg.host_keys = [u[1]];
+        await invoke("save_connection", { cfg: o.cfg }).catch(() => {});
+        await daemonViaScript(o, host);
+        return;
+      }
+    }
+    notify("error", codedErrorMsg(e, "update"));
   }
+}
+
+/// Config sauvegardée correspondant à la clé conn — nécessaire au repli
+/// ssh d'ensure_daemon (credentials, host_keys, port…). Partagée entre
+/// le panneau settings et le dialogue « À propos ».
+export async function daemonCfgFor(ck: string): Promise<SavedConn | null> {
+  const list = await invoke<SavedConn[]>("saved_connections")
+    .catch(() => [] as SavedConn[]);
+  return list.find((c) => connKeyOf(c, isAndroid()) === ck) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Dialogue « À propos » : versions du client, du démon de la connexion
+// active et de la dernière release — informatif. Les mises à jour vivent
+// dans la fenêtre dédiée (./updates-panel.ts, bouton « Mises à jour… »).
+// showModal() part AVANT tout fetch (ouverture <100 ms) ; une ligne en
+// échec est masquée, jamais d'état d'erreur.
+// ---------------------------------------------------------------------------
+
+/// Ouvre le dialogue « À propos » : reset des lignes dynamiques, modal
+/// immédiate, puis remplissage async (version locale, release distante,
+/// daemon_status de la conn active). `connKey` est résolu à l'ouverture.
+export function openAbout(connKey: () => string | null) {
+  const dlg = $("dlg-about") as HTMLDialogElement;
+  if (dlg.open) return;
+  $("about-client-row").hidden = isWeb;
+  $("about-release-row").hidden = true;
+  $("about-daemon-row").hidden = true;
+  dlg.showModal();
+  void (async () => {
+    const ck = connKey();
+    const [lv, remote, dst] = await Promise.all([
+      // Web : la « version client » est celle du démon — ligne masquée.
+      isWeb ? Promise.resolve("") : getVersion().catch(() => ""),
+      remoteVersion().catch(() => ""),
+      ck
+        ? call<Record<string, unknown>>("daemon_status", { conn: ck })
+            .catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    if (!dlg.open) return;
+    if (!isWeb && lv) $("about-version").textContent = `v${lv}`;
+    if (remote) {
+      $("about-remote-ver").textContent = `v${remote}`;
+      $("about-release-row").hidden = false;
+    }
+    if (ck) {
+      const dv = typeof dst?.version === "string" ? dst.version : "";
+      $("about-daemon-row").hidden = false;
+      $("about-daemon-ver").textContent = dv ? `v${dv}` : "—";
+      // "web" = le démon qui sert la SPA — pas de label d'hôte à montrer.
+      $("about-daemon-host").textContent =
+        ck !== "web" ? ` — ${connLabel(ck)}` : "";
+    }
+  })();
 }
 
 /** Client plus vieux que le démon (minor) : le démon n'est PAS touché —
@@ -300,7 +501,9 @@ async function reportLastUpdateStatus() {
   const st = await invoke<string | null>("update_last_status").catch(() => null);
   if (!st) return;
   if (st.startsWith("FAIL")) {
-    notify("error", t("update_failed_reason", { reason: st.slice(4).trim() }));
+    notify("error", t("update_failed_reason", {
+      reason: codedErrorMsg(st.slice(4), "update"),
+    }));
   } else if (st.startsWith("WARN")) {
     // "WARN <ver> <cause>" : install réussie mais relance impossible —
     // le prochain boot doit pouvoir le dire (spec item #195).
@@ -308,7 +511,7 @@ async function reportLastUpdateStatus() {
     const sp = rest.indexOf(" ");
     notify("warn", t("update_partial", {
       v: sp < 0 ? rest : rest.slice(0, sp),
-      reason: sp < 0 ? "" : rest.slice(sp + 1),
+      reason: sp < 0 ? "" : codedErrorMsg(rest.slice(sp + 1), "update"),
     }));
   } else if (st.startsWith("OK")) {
     notify("success", t("update_done", { v: st.slice(2).trim() }));
@@ -316,12 +519,16 @@ async function reportLastUpdateStatus() {
 }
 
 // Check update au boot : version distante (gh release ou package.json sur
-// main) > locale → chip "⬆ vX" dans la titlebar → clic = update (deb+dpkg)
-// ou ouverture de la page releases si aucun asset.
-export function checkBootUpdate() {
+// main) > locale → chip "⬆ vX" dans la titlebar → clic = fenêtre Mises à
+// jour (versions app + démon, bouton d'install — `openPanel`).
+export function checkBootUpdate(openPanel: (chip: HTMLElement) => void) {
   // Pas de client à mettre à jour en mode web : la SPA est livrée par le
   // démon — sa « version » suit celle du binaire qui la sert.
   if (isWeb) return;
+  // Android : les events `update_install_state` (install annulée,
+  // bloquée, permission) doivent être écoutés même sans clic update —
+  // le plugin les émet au onResume après retour de l'installeur.
+  if (isAndroid()) ensureAndroidUpdateListeners();
   void (async () => {
     await reportLastUpdateStatus();
     try {
@@ -332,14 +539,8 @@ export function checkBootUpdate() {
       b.className = "tb-update";
       b.innerHTML = `${icon("up")} v${esc(remote)}`;
       b.title = t("update_badge_title", { v: remote });
-      b.onclick = () => {
-        b.disabled = true;
-        b.textContent = t("update_installing", { v: remote });
-        performClientUpdate(remote).finally(() => {
-          b.disabled = false;
-          b.innerHTML = `${icon("up")} v${esc(remote)}`;
-        });
-      };
+      b.setAttribute("aria-haspopup", "dialog");
+      b.onclick = () => openPanel(b);
       $("titlebar").insertBefore(b, document.querySelector(".tb-btns"));
     } catch {
       /* pas de gh/réseau → tant pis */

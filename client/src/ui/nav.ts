@@ -1,14 +1,17 @@
 // ---------------------------------------------------------------------------
 // Navigation Android : pile d'overlays adossée à l'historique → le bouton
 // "retour" ferme le panneau/menu/dialog ouvert au lieu de quitter l'app.
-// Scrim (drawer/sheet) et bottom-sheet ⋮ sont créés ici aussi.
+// Scrim (sheets) et bottom-sheet ⋮ sont créés ici aussi. Phase 3 : plus de
+// drawer — l'accueil « Agents » est l'écran racine, dérivé de la pile via
+// homeSync (m-home / m-map).
 // ---------------------------------------------------------------------------
 
 import { $, esc } from "../core/dom";
 import { isAndroid } from "../core/chrome";
+import { closeSettingsSection } from "../mobile/settings-mobile";
 import { icon, type IconName } from "./icons";
 
-type ScrimOwner = "drawer" | "sheet";
+type ScrimOwner = "sheet" | "queue";
 
 export interface SheetItem {
   label: string;
@@ -18,29 +21,54 @@ export interface SheetItem {
 }
 
 export class OverlayNav {
-  private stack: string[] = [];
-  private suppressPops = 0; // back() déclenchés par close → autant de popstate à ignorer
+  /** Pile par jetons : chaque entrée history porte un n unique → popstate
+   *  compare les positions au lieu de dépiler à l'aveugle. Les entrées
+   *  « mortes » (overlay refermé sans back) restent dans l'historique
+   *  comme waypoints transparents : atterrir dessus ferme les overlays
+   *  plus récents — aucun back() programmatique, aucune suppression à
+   *  faire fuiter (Chrome fusionne les back() rapprochés). */
+  private stack: { id: string; n: number }[] = [];
+  private seq = 0;
   private scrimOwner: ScrimOwner | null = null;
   private scrim: HTMLElement;
   private omenu: HTMLElement;
   /** Véto sur la fermeture par back système — `false` = l'overlay reste
    *  (l'état history est re-poussé). Posé par FileExplorer (buffer sale). */
   backGuard?: (id: string) => boolean;
+  /** Vétos supplémentaires (Paramètres : modifications en attente) —
+   *  cumulés avec `backGuard`, chacun peut retenir la fermeture. */
+  private guards: ((id: string) => boolean)[] = [];
+  addBackGuard(g: (id: string) => boolean) {
+    this.guards.push(g);
+  }
+  private allowBack(id: string): boolean {
+    if (this.backGuard && !this.backGuard(id)) return false;
+    return this.guards.every((g) => g(id));
+  }
+  /** Bascule d'écran (m-home/m-map posées par homeSync) — posé par
+   *  mobile/shell.ts pour resynchroniser le chrome d'accueil. */
+  onHomeChange?: () => void;
+
+  /** Écrans qui vivent dans #chat : leur présence dans la pile masque
+   *  l'accueil. Feuilles, menus contextuels et dialogues (`dlg:*`) restent
+   *  « par-dessus » l'écran courant — ils ne changent pas la vue. */
+  private static readonly CHAT_OVERLAYS = new Set([
+    "session", "settings", "connview", "map", "components", "logs", "plugin",
+  ]);
 
   constructor() {
-    // Drawer mobile : ☰ ouvre la sidebar, tap dehors/selection ferme.
+    // Scrim des bottom-sheets : tap dehors ferme.
     this.scrim = document.createElement("div");
     this.scrim.id = "scrim";
     this.scrim.hidden = true;
     this.scrim.onclick = () => {
-      if (this.scrimOwner === "drawer") {
-        this.close("drawer");
-        $("sidebar").classList.remove("open");
-        this.scrimOff("drawer");
-      } else if (this.scrimOwner === "sheet") {
+      if (this.scrimOwner === "sheet") {
         this.close("sheet");
         this.omenu.hidden = true;
         this.scrimOff("sheet");
+      } else if (this.scrimOwner === "queue") {
+        // Même motif que rawCloseOverlay : le ✕ porte le close complet.
+        $("qp-close").click();
       }
     };
     // NB : dans #app-body (pas body) — #app a z-index:1 (contexte d'empilement),
@@ -54,17 +82,22 @@ export class OverlayNav {
 
     window.addEventListener("popstate", () => {
       if (!isAndroid()) return;
-      if (this.suppressPops > 0) { this.suppressPops--; return; }
-      const top = this.stack[this.stack.length - 1];
-      if (!top) return;
-      // Véto : l'overlay refuse la fermeture (ex. éditeur avec buffer sale)
-      // → on ré-empile l'état pour annuler le back sans toucher à la vue.
-      if (this.backGuard && !this.backGuard(top)) {
-        try { history.pushState({ ac: top }, ""); } catch { /* noop */ }
-        return;
+      const n = (history.state as { n?: number } | null)?.n;
+      // Ferme tous les overlays plus récents que l'entrée atteinte (nul =
+      // entrée racine hors nav → tout ferme). Idempotent : un waypoint
+      // mort laisse la pile alignée quelles que soient les séquences.
+      while (true) {
+        const top = this.stack[this.stack.length - 1];
+        if (!top || (n != null && top.n <= n)) break;
+        if (!this.allowBack(top.id)) {
+          try { history.pushState({ ac: top.id, n: top.n }, ""); } catch { /* noop */ }
+          this.homeSync();
+          return;
+        }
+        this.stack.pop();
+        this.rawCloseOverlay(top.id);
       }
-      this.stack.pop();
-      this.rawCloseOverlay(top);
+      this.homeSync();
     });
     // Dialogs trackés automatiquement dans la pile (Cancel = back propre).
     if (isAndroid()) {
@@ -80,29 +113,55 @@ export class OverlayNav {
       }, true);
     }
     this.bindSwipe();
+    // Pile vide au boot → accueil : les classes sont posées d'emblée pour
+    // que le premier rendu ne repose pas sur un état CSS transitoire.
+    this.homeSync();
   }
 
   push(id: string) {
     if (!isAndroid()) return;
-    this.stack.push(id);
-    try { history.pushState({ ac: id }, ""); } catch { /* noop */ }
+    const n = ++this.seq;
+    this.stack.push({ id, n });
+    try { history.pushState({ ac: id, n }, ""); } catch { /* noop */ }
+    this.homeSync();
   }
 
+  /** Retire l'overlay de la pile — l'entrée history devient un waypoint
+   *  mort (le popstate qui l'atteindra fermera ce qu'il y a au-dessus).
+   *  Pas de back() : la fermeture visuelle est déjà faite par l'appelant. */
   close(id: string) {
     if (!isAndroid()) return;
-    const i = this.stack.lastIndexOf(id);
-    if (i < 0) return;
-    this.stack.splice(i, 1);
-    if ((history.state as { ac?: string } | null)?.ac === id) {
-      this.suppressPops++;
-      history.back();
+    for (let i = this.stack.length - 1; i >= 0; i--) {
+      if (this.stack[i].id === id) { this.stack.splice(i, 1); break; }
     }
+    this.homeSync();
+  }
+
+  /** Écran affiché = fonction de la pile : `m-home` quand aucun overlay
+   *  de #chat n'est empilé (accueil visible), `m-map` quand le diagramme
+   *  est le sommet (barre basse visible par-dessus #chat). */
+  private homeSync() {
+    if (!isAndroid()) return;
+    const inChat = this.stack.some((e) => OverlayNav.CHAT_OVERLAYS.has(e.id));
+    document.body.classList.toggle("m-home", !inChat);
+    document.body.classList.toggle(
+      "m-map", this.stack[this.stack.length - 1]?.id === "map");
+    this.onHomeChange?.();
+  }
+
+  /** Ouvrir une session pousse « session » : l'écran glisse depuis la
+   *  droite, le retour système ramène à l'accueil. Idempotent — déjà en
+   *  sommet = no-op (re-tap sur la session affichée). */
+  enterSession() {
+    if (!isAndroid()) return;
+    if (this.stack[this.stack.length - 1]?.id === "session") return;
+    this.push("session");
   }
 
   private rawCloseOverlay(id: string) {
-    if (id === "drawer") {
-      $("sidebar").classList.remove("open");
-      this.scrimOff("drawer");
+    if (id === "session") {
+      // Rien à fermer : homeSync() a déjà fait revenir l'accueil — la
+      // conversation reste montée en mémoire pour une réouverture.
     } else if (id === "sheet" || id === "fctx" || id === "sctx" || id === "evctx") {
       this.omenu.hidden = true;
       $("fctx").hidden = true;
@@ -125,6 +184,10 @@ export class OverlayNav {
     } else if (id === "settings") {
       // Passe par le handler de ✕ : hidden + levée de l'inert + nav.close.
       $("settings-close").click();
+    } else if (id === "settings-sec") {
+      // Sous-écran Paramètres (Y4) : referme la section ouverte — son
+      // « toggle » retire m-sub et restaure le titre (settings-mobile).
+      closeSettingsSection();
     } else if (id === "connview") {
       // Même motif : le ✕ de la vue connexion porte le close complet.
       $("connview-close").click();
@@ -140,6 +203,9 @@ export class OverlayNav {
     } else if (id === "plugin") {
       // Idem : le ✕ de la vue plugin démonte l'iframe (token éphémère).
       $("pv-close")?.click();
+    } else if (id === "updates") {
+      // Fenêtre Mises à jour (feuille sous Android) : son ✕ la referme.
+      $("upd-close").click();
     } else if (id.startsWith("dlg:")) {
       (document.getElementById(id.slice(4)) as HTMLDialogElement | null)?.close();
     }
@@ -153,6 +219,12 @@ export class OverlayNav {
   private scrimOff(owner: ScrimOwner) {
     if (this.scrimOwner === owner) { this.scrimOwner = null; this.scrim.hidden = true; }
   }
+
+  /** Voile modal pour un overlay hors nav (file d'attente en bottom-sheet) —
+   *  le tap dehors ferme via le ✕ de l'overlay (scrim.onclick). */
+  showScrim(owner: ScrimOwner) { this.scrimOn(owner); }
+  /** No-op si le voile appartient à un autre overlay. */
+  hideScrim(owner: ScrimOwner) { this.scrimOff(owner); }
 
   sheet(items: SheetItem[]) {
     this.omenu.innerHTML = "";
@@ -174,20 +246,18 @@ export class OverlayNav {
     this.scrimOff("sheet");
   }
 
-  openDrawer() {
-    $("sidebar").classList.add("open");
-    this.scrimOn("drawer");
-    this.push("drawer");
-  }
-
+  /** Conservé pour les anciens appelants (empty-state…) — le drawer a
+   *  disparu en phase 3 : la classe « open » ne fait plus rien sortir. */
   closeDrawer() {
     this.close("drawer");
     $("sidebar").classList.remove("open");
-    this.scrimOff("drawer");
   }
 
-  /** ☰ toggle + swipe bord gauche → drawer. */
+  /** Le swipe bord gauche n'ouvre plus rien sur Android (drawer
+   *  supprimé en phase 3 — retour = ← / geste système). Conservé hors
+   *  Android : #tb-menu peut un jour servir un desktop étroit. */
   private bindSwipe() {
+    if (isAndroid()) return;
     $("tb-menu").onclick = () =>
       $("sidebar").classList.contains("open") ? this.closeDrawer() : this.openDrawer();
     // Swipe depuis le bord gauche → ouvre le drawer ; swipe gauche dessus → ferme.
@@ -208,6 +278,11 @@ export class OverlayNav {
       if (dx > 56) { this.openDrawer(); swiping = false; }
       else if (dx < -56 && $("sidebar").classList.contains("open")) { this.closeDrawer(); swiping = false; }
     }, { passive: true });
+  }
+
+  private openDrawer() {
+    $("sidebar").classList.add("open");
+    this.push("drawer");
   }
 }
 

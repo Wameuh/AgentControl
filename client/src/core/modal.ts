@@ -32,7 +32,7 @@ function invisible(d: HTMLDialogElement): boolean {
 function watch() {
   for (const d of document.querySelectorAll<HTMLDialogElement>("dialog[open]")) {
     if (!invisible(d)) continue;
-    logUi("warn", `modal-watchdog: #${d.id} ouvert mais invisible → fermé`);
+    logUi("warn", `modal-watchdog: #${d.id} open but invisible → closed`);
     d.close();
   }
   // `inert` n'a de raison d'être que sous un overlay ouvert de #chat
@@ -50,7 +50,7 @@ function watch() {
   if (!overlayUp) {
     for (const el of document.querySelectorAll<HTMLElement>("#chat > [inert]")) {
       el.inert = false;
-      logUi("warn", `modal-watchdog: inert résiduel retiré de #${el.id || el.tagName}`);
+      logUi("warn", `modal-watchdog: residual inert removed from #${el.id || el.tagName}`);
     }
   }
   // Même filet pour la classe map-open (vue diagramme à fond transparent :
@@ -59,7 +59,7 @@ function watch() {
   if (($("map-view") as HTMLElement | null)?.hidden !== false &&
       $("chat")?.classList.contains("map-open")) {
     $("chat").classList.remove("map-open");
-    logUi("warn", "modal-watchdog: classe map-open résiduelle retirée de #chat");
+    logUi("warn", "modal-watchdog: residual map-open class removed from #chat");
   }
 }
 
@@ -86,7 +86,7 @@ export function initModalGuard() {
       openedAt.delete(d.id);
       logUi(
         "info",
-        `modal -#${d.id}` + (t0 ? ` (ouvert ${Math.round((Date.now() - t0) / 1000)}s)` : ""),
+        `modal -#${d.id}` + (t0 ? ` (open ${Math.round((Date.now() - t0) / 1000)}s)` : ""),
       );
     },
     true,

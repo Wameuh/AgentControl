@@ -22,6 +22,7 @@ import { invoke } from "../core/bridge";
 import { $, esc } from "../core/dom";
 import { accentOf, isAndroid } from "../core/chrome";
 import { t } from "../i18n";
+import { codeLabel, codedErrorMsg } from "../core/errcode";
 import { parsePair } from "./pair-payload";
 import type { SavedConn } from "../core/types";
 
@@ -245,7 +246,7 @@ export async function renderAccesses(
         .then(() => void renderAccesses(cfg, els, onErr))
         .catch((e) => {
           btn.disabled = false;
-          report(String(e));
+          report(codedErrorMsg(e, "pair"));
         });
     };
     ul.appendChild(li);
@@ -287,7 +288,8 @@ async function beginPair(s: PairSession) {
     // prochain appairage (hint — l'expiry-time sshd borne déjà la clé).
     const sweepHint = r.sweep === "inline-only" ? t("qr_sweep_hint") : "";
     if (r.warn || sweepHint) {
-      warnEl.textContent = [r.warn, sweepHint].filter(Boolean).join(" ");
+      warnEl.textContent =
+        [r.warn && codeLabel(r.warn, "qr_warn"), sweepHint].filter(Boolean).join(" ");
       warnEl.hidden = false;
     } else {
       warnEl.hidden = true;
@@ -296,7 +298,28 @@ async function beginPair(s: PairSession) {
     startCountdown(s);
     startPolling(s);
   } catch (e) {
-    qrStatus(String(e), true);
+    // Hôte encore inconnu du profil (première connexion native — hôte
+    // frais absent du known_hosts) : même TOFU que le flux de connexion —
+    // confirmation explicite, épinglage persisté, puis l'install repart
+    // épinglée. Sans ça l'appairage d'un serveur jamais joint échouerait.
+    const u = /hostkey-unknown:(\S+)/.exec(String(e));
+    if (u) {
+      const c = s.cfg;
+      const where =
+        `${c.user ? c.user + "@" : ""}${c.host ?? host}:${c.port ?? 22}`;
+      const ok = await confirmPair(
+        t("hk_new_h"),
+        t("hk_new_msg", { where, fp: u[1] }),
+        t("hk_new_go"),
+      );
+      if (ok) {
+        c.host_keys = [u[1]];
+        await invoke("save_connection", { cfg: c }).catch(() => {});
+        await beginPair(s);
+        return;
+      }
+    }
+    qrStatus(codedErrorMsg(e, "pair"), true);
   } finally {
     ($("qr-gen") as HTMLButtonElement).disabled = false;
   }
@@ -396,10 +419,10 @@ export function initPairing() {
     if (session) void beginPair(session);
   };
   ($("qr-alt-creds") as HTMLButtonElement).onclick = () => {
-    if (session) void credQr(session).catch((e) => qrStatus(String(e), true));
+    if (session) void credQr(session).catch((e) => qrStatus(codedErrorMsg(e, "pair"), true));
   };
   ($("qr-alt-ep") as HTMLButtonElement).onclick = () => {
-    if (session) void endpointQr(session).catch((e) => qrStatus(String(e), true));
+    if (session) void endpointQr(session).catch((e) => qrStatus(codedErrorMsg(e, "pair"), true));
   };
 }
 
@@ -500,6 +523,7 @@ export async function scanPair(): Promise<Record<string, unknown> | null> {
     if (!ok) return null;
     // K jetable + pinning hk : pair-ok:<fp> vérifié côté Rust —
     // l'empreinte rendue est celle de NOTRE clé app, preuve réelle.
+    // Erreur `pair-failed:*` → libellé i18n (scanAndGo l'affiche brut).
     await invoke<string>("pair_attempt", {
       host: p.host,
       port: p.port,
@@ -507,6 +531,8 @@ export async function scanPair(): Promise<Record<string, unknown> | null> {
       kPem: p.k,
       hk: p.hk,
       label: deviceLabel(),
+    }).catch((e) => {
+      throw new Error(codedErrorMsg(e, "pair"));
     });
     return {
       kind: "ssh",
@@ -559,6 +585,8 @@ export async function scanPair(): Promise<Record<string, unknown> | null> {
     cfg.key = await invoke<string>("pair_import_key", {
       pem: p.secret,
       name: `${p.host}_${p.port}`,
+    }).catch((e) => {
+      throw new Error(codedErrorMsg(e, "pair"));
     });
     if (p.pw != null) cfg.password = p.pw;
   } else {

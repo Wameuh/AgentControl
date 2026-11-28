@@ -19,6 +19,7 @@ import { invoke as tauriInvoke, addPluginListener } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { wsClient, WEB_CONN } from "./wsclient";
 import { clientLog } from "./clientlog";
+import { perfProbes } from "./probe";
 
 export const isWeb = !(window as { __TAURI_INTERNALS__?: unknown })
   .__TAURI_INTERNALS__;
@@ -46,7 +47,14 @@ export function listen<T>(
   event: string,
   cb: (e: { payload: T }) => void,
 ): Promise<() => void> {
-  if (!isWeb) return tauriListen<T>(event, cb) as Promise<() => void>;
+  if (!isWeb) {
+    // Sonde télémétrie (#297) : chaque livraison d'event Tauri compte
+    // comme un message reçu (l'équivalent desktop des frames WS).
+    return tauriListen<T>(event, (e) => {
+      perfProbes.push?.();
+      cb(e);
+    }) as Promise<() => void>;
+  }
   return Promise.resolve(wsClient.on(event, (p) => cb({ payload: p as T })));
 }
 
@@ -136,6 +144,7 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
     case "set_app_icon":
       return undefined as T;
     case "plugin:opener|open_url":
+    case "open_url_ext":
       window.open(String(a.url), "_blank", "noopener");
       return undefined as T;
     case "plugin:ac-stt|stt_ping":
@@ -173,6 +182,9 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
     case "app_signing":
       // Pas d'APK en web — verdict neutre, jamais bloquant.
       return { platform: "web", update_in_place: "unknown" } as T;
+    case "plugin:ac-device|set_system_bars":
+      // Barres système = chrome natif de l'APK — rien à régler en web.
+      return undefined as T;
     default:
       // check_update / update_client / ensure_daemon / write_download :
       // absents du monde navigateur — la surface UI qui les invoque est

@@ -1,7 +1,8 @@
 // Captures du README : Chromium headless, mock __TAURI_INTERNALS__
 // (tests/tauri-mock.js — sessions/groupes/events/PRs/pins/backlog/PDF).
 // Produit docs/screenshots/*.png : desktop-chat, desktop-files,
-// desktop-pair, desktop-settings, desktop-backlog + android-* .
+// desktop-pair, desktop-settings, desktop-orchestrator, desktop-backlog
+// + android-chat, android-home, android-files.
 // Usage : npm run build && node tests/readme-shots.mjs [outdir]
 //   CHROME=/path/chrome   — sinon chrome-headless-shell du cache
 //   puppeteer, sinon /usr/bin/chromium.
@@ -26,8 +27,12 @@ const CHROME = process.env.CHROME ?? (() => {
 
 const PORT = Number(process.env.SHOTS_PORT || 4183);
 const server = spawn("npx", ["vite", "preview", "--port", String(PORT), "--strictPort"], {
-  cwd: new URL("..", import.meta.url).pathname, stdio: "ignore",
+  cwd: new URL("..", import.meta.url).pathname, stdio: "ignore", detached: true,
 });
+// Groupe de process entier (npx → sh → vite) : sinon vite survit au
+// script, y compris sur une erreur de capture, et garde le port.
+const stopServer = () => { try { process.kill(-server.pid); } catch {} };
+process.on("exit", stopServer);
 await new Promise((r) => setTimeout(r, 1800));
 
 const browser = await puppeteer.launch({
@@ -37,6 +42,42 @@ const browser = await puppeteer.launch({
          "--force-device-scale-factor=1"],
 });
 const mock = readFileSync(new URL("./tauri-mock.js", import.meta.url), "utf8");
+
+// Surcouche posée APRÈS le mock, propre aux captures (le mock partagé par
+// les tests reste inchangé) : version réelle de l'app et du démon (le mock
+// fige 0.10.0 pour les tests d'update) et schéma complet des params de
+// l'orchestrateur, qui alimente la vue « Configurer ».
+const VERSION = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+const ORCH = readFileSync(new URL("./fixtures/orch-params.json", import.meta.url), "utf8");
+const overlay = `(() => {
+  const ORCH = ${ORCH};
+  const V = ${JSON.stringify(VERSION)};
+  const ti = window.__TAURI_INTERNALS__;
+  if (!ti) return;
+  const inv = ti.invoke.bind(ti);
+  ti.invoke = (cmd, args, opts) => {
+    if (cmd === "app_version") return Promise.resolve(V);
+    const r = inv(cmd, args, opts);
+    // Les RPC démon passent par invoke("call", { method, params }).
+    const name = cmd === "call" ? args?.method : cmd;
+    if (name === "daemon_status" || name === "connect") {
+      return r.then((s) => {
+        for (const c of [s, s?.local]) if (c?.version) c.version = V;
+        return s;
+      });
+    }
+    if (name !== "list_components") return r;
+    return r.then((list) => {
+      for (const c of list ?? []) {
+        if (c.name !== "backlog-orchestrator" || c.spec.params_schema) continue;
+        c.spec.params_schema = ORCH.params_schema;
+        c.spec.params = { ...ORCH.params, ...c.spec.params };
+      }
+      return list;
+    });
+  };
+})();`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clickText = (p, sel, re) =>
@@ -74,6 +115,7 @@ async function openSession(p, frag = "Refactor") {
   const p = await browser.newPage();
   await p.setViewport({ width: 1568, height: 1054, deviceScaleFactor: 1 });
   await p.evaluateOnNewDocument(mock);
+  await p.evaluateOnNewDocument(overlay);
   p.on("pageerror", (e) => console.log("[pageerror]", e.message));
   const shot = async (n, ms = 400) => {
     await sleep(ms);
@@ -102,15 +144,28 @@ async function openSession(p, frag = "Refactor") {
   await shot("desktop-backlog");
   await p.click("#sv-agents"); await sleep(400);
 
-  // Paramètres (thème/accents, sons, notifications, maj, appairage…).
-  await p.click("#tb-settings");
+  // Paramètres, catégorie Apparence (vignettes de thème, accents).
+  // #tb-settings est masqué sur desktop (menu « Options ») : clic scripté.
+  await p.evaluate(() => document.getElementById("tb-settings").click());
   await p.waitForSelector("#settings-view:not([hidden])", { timeout: 8000 })
     .catch(() => {});
+  await p.evaluate(() =>
+    document.querySelector('.s-rail-item[data-sec="s-sec-appearance"]')?.click());
   await shot("desktop-settings", 700);
   await p.click("#settings-close");
   await p.waitForSelector("#settings-view[hidden]", { timeout: 5000 })
     .catch(() => {});
   await sleep(250);
+
+  // Menu Options → Orchestrateur : vue « Configurer » pleine page
+  // (onglets par groupe, équipe de workers, récapitulatif des changements).
+  await p.click("#tb-options"); await sleep(250);
+  await clickText(p, "#tb-menu-pop button", "orchestrat");
+  await p.waitForSelector("#comp-params .pv-row", { visible: true, timeout: 8000 })
+    .catch(() => {});
+  await shot("desktop-orchestrator", 900);
+  await p.click("#comp-close").catch(() => {});
+  await sleep(400);
 
   // Appairage : connexion enregistrée → bouton QR → dialogue + QR v2.
   await p.click("#sv-agents").catch(() => {});
@@ -134,6 +189,13 @@ async function openSession(p, frag = "Refactor") {
   await p.setViewport({ width: 412, height: 915, deviceScaleFactor: 2.625,
                       isMobile: true, hasTouch: true });
   await p.evaluateOnNewDocument(mock);
+  await p.evaluateOnNewDocument(overlay);
+  // Astuce « appui long » (mobile/hints.ts) déjà vue : sinon son toast
+  // couvre le haut de l'accueil. try : le script tourne aussi dans les
+  // iframes sandboxées, sans localStorage.
+  await p.evaluateOnNewDocument(() => {
+    try { localStorage.setItem("ac-hint-longpress", "1"); } catch {}
+  });
   p.on("pageerror", (e) => console.log("[pageerror]", e.message));
   const shot = async (n, ms = 400) => {
     await sleep(ms);
@@ -150,27 +212,20 @@ async function openSession(p, frag = "Refactor") {
   await openSession(p);
   await shot("android-chat");
 
-  // Drawer (sessions + groupes + actions).
-  await tap("#tb-menu", 500);
-  await shot("android-drawer");
-  // Retour chat puis fichiers plein écran via le sheet ⋮.
-  await p.evaluate(() => document.getElementById("scrim")?.click());
-  await sleep(350);
-  await tap("#chat-more", 350);
-  await clickText(p, "#omenu .om-item", "fichier|files");
+  // Accueil Agents plein écran (phase 3 — plus de drawer) : ‹ barre
+  // session = retour système.
+  await tap("#m-sbar-nav", 500);
+  await shot("android-home");
+  // Retour en session puis fichiers plein écran via la feuille Session.
+  await openSession(p);
+  await tap("#m-sbar-title", 350);
+  await clickText(p, "#dlg-session .ss-act", "fichier|files");
   await sleep(700);
   await shot("android-files");
 
-  // Paysage : retour au chat, puis rotation (non référencé, gardé à jour).
-  await p.evaluate(() => document.getElementById("file-close")?.click());
-  await sleep(500);
-  await p.setViewport({ width: 915, height: 412, deviceScaleFactor: 2.625,
-                      isMobile: true, hasTouch: true });
-  await sleep(700);
-  await shot("android-landscape", 500);
   await p.close();
 }
 
 await browser.close();
-server.kill();
+stopServer();
 console.log("Terminé →", OUT);

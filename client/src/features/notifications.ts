@@ -14,8 +14,11 @@ import { invoke, isWeb } from "../core/bridge";
 import { isAndroid } from "../core/chrome";
 import { connLabel } from "../core/conn";
 import { logUi } from "../core/dom";
-import type { SessionMeta } from "../core/types";
+import { isConnLost } from "../core/rpc";
+import type { ConnLive, SessionMeta } from "../core/types";
 import { t, type Key } from "../i18n";
+import { findPending, respondPending } from "../mobile/pending";
+import { parseAnswer } from "./event-renderers";
 import type { AlertKind } from "./state-diff";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -23,6 +26,7 @@ import {
   Importance,
   isPermissionGranted,
   onAction,
+  registerActionTypes,
   requestPermission,
   type ActionPerformed,
   type Options,
@@ -33,6 +37,20 @@ const CHANNEL_ID = "agent-status";
 /** Anti-empilement : une session ne produit pas deux alertes du même type
  *  en moins de 10 s (boucle working↔idle, restart — le shade se remplirait). */
 const COOLDOWN_MS = 10_000;
+/** Types d'actions Android (Y3) : ac-perm = Autoriser/Refuser/Ouvrir
+ *  d'une permission, ac-question = Répondre (saisie)/Ouvrir d'une
+ *  question. Enregistrés au setup — un type inconnu à l'envoi rend
+ *  les boutons muets, d'où le flag actionsOk. */
+const ACT_PERM = "ac-perm";
+const ACT_QUESTION = "ac-question";
+/** Réponse depuis une action : si l'app a été réveillée à froid la
+ *  connexion n'est pas encore « ok » — la réponse attend le prochain
+ *  passage ok (nouvel essai à chaque retour), au plus 30 s. */
+const REPLY_WAIT_MS = 30_000;
+const REPLY_POLL_MS = 500;
+/** Lecture de la demande en attente avant un envoi « question » —
+ *  bornée pour ne pas retarder l'alerte au-delà de ~3 s. */
+const PENDING_READ_MS = 3_000;
 
 // --- Réglages (localStorage) ------------------------------------------------
 
@@ -54,10 +72,16 @@ class OsNotifications {
     openSession: (_id: string, _conn: string) => {},
     /** Plus d'une connexion bound → le nom de la conn complète le corps. */
     connCount: () => 1,
+    /** État live d'une connexion — la réponse à une action de notif
+     *  attend le prochain passage « ok » (app réveillée à froid). */
+    connState: (_k: string) => "ok" as ConnLive | undefined,
   };
   /** onAction armé : sans listener vivant, le plugin affiche les notifs
    *  desktop sans leurs actions (le tap n'est jamais rapporté). */
   private ready = false;
+  /** Types d'action enregistrés (Android) — sans eux les envois
+   *  « question » restent des notifs classiques sans boutons. */
+  private actionsOk = false;
   /** Canal Android créé (sinon les envois passent sans channelId). */
   private channelOk = false;
   /** État de permission connu : undefined = pas encore sondé. */
@@ -99,7 +123,7 @@ class OsNotifications {
     try {
       await onAction((e) => void this.clicked(e));
     } catch (e) {
-      logUi("warn", `notif: listener d'actions indisponible: ${e}`);
+      logUi("warn", `notif: action listener unavailable: ${e}`);
       return; // pas de listener = notifs non cliquables → canal coupé
     }
     if (isAndroid()) {
@@ -114,7 +138,34 @@ class OsNotifications {
       } catch (e) {
         // Canal absent → les envois retombent sur le canal « default »
         // du plugin (importance moindre, mais livré).
-        logUi("warn", `notif: création du canal Android: ${e}`);
+        logUi("warn", `notif: Android channel creation: ${e}`);
+      }
+      // Boutons des notifs « question » (Y3) — persistés par le plugin
+      // (NotificationStorage) et relus à chaque envoi. Sur Android les
+      // actions relancent toujours l'activité (PendingIntent.getActivity
+      // natif) : répondre « sans ouvrir l'app » n'existe pas, mais la
+      // réponse part sans navigation. Échec → notifs sans boutons.
+      try {
+        await registerActionTypes([
+          {
+            id: ACT_PERM,
+            actions: [
+              { id: "allow", title: t("notif_act_allow") },
+              { id: "reject", title: t("notif_act_reject"), destructive: true },
+              { id: "open", title: t("notif_act_open"), foreground: true },
+            ],
+          },
+          {
+            id: ACT_QUESTION,
+            actions: [
+              { id: "reply", title: t("notif_act_reply"), input: true },
+              { id: "open", title: t("notif_act_open"), foreground: true },
+            ],
+          },
+        ]);
+        this.actionsOk = true;
+      } catch (e) {
+        logUi("warn", `notif: action types registration: ${e}`);
       }
     }
     this.ready = true;
@@ -170,7 +221,7 @@ class OsNotifications {
       if (!force && this.granted === false) return false;
       this.granted = (await requestPermission()) === "granted";
     } catch (e) {
-      logUi("warn", `notif: permission illisible: ${e}`);
+      logUi("warn", `notif: permission unreadable: ${e}`);
       this.granted = false;
     }
     return this.granted;
@@ -214,6 +265,13 @@ class OsNotifications {
       group: `agentcontrol:${conn || "default"}`,
       ...(isAndroid() && this.channelOk ? { channelId: CHANNEL_ID } : {}),
     };
+    // Android (Y3) : une alerte « question » porte des boutons quand la
+    // demande en attente est retrouvée — permission → Autoriser/Refuser/
+    // Ouvrir + ids d'options en extra (réponse directe au tap) ;
+    // question → Répondre (saisie)/Ouvrir.
+    if (isAndroid() && this.actionsOk && kind === "question") {
+      await this.decorateActions(options, s);
+    }
     // invoke direct plutôt que sendNotification() (fire-and-forget via le
     // shim window.Notification) : un échec de livraison remonte ici.
     try {
@@ -221,9 +279,41 @@ class OsNotifications {
       this.ids.set(key, { id, conn: conn || "default", sid: s.id, kind });
       return true;
     } catch (e) {
-      logUi("error", `notif: envoi impossible: ${e}`);
+      logUi("error", `notif: send impossible: ${e}`);
       return false;
     }
+  }
+
+  /** Lit la demande en attente de la session et pose le bon type
+   *  d'actions sur la notif (Y3). Permission : « X attend une réponse »
+   *  monte en titre, le libellé de la demande devient le corps, et les
+   *  option_id allow/reject partent en extra pour la réponse directe.
+   *  Timeout ou échec de lecture → options inchangées (notif classique). */
+  private async decorateActions(options: Options, s: SessionMeta) {
+    const reqs = await Promise.race([
+      findPending(s),
+      new Promise<null>((r) => setTimeout(() => r(null), PENDING_READ_MS)),
+    ]).catch(() => null);
+    const req = reqs?.[0];
+    if (!req) return;
+    const extra = options.extra as Record<string, unknown>;
+    if (req.type === "permission_request") {
+      const allow =
+        req.options.find((o) => o.kind === "allow_once")?.option_id ??
+        req.options.find((o) => o.kind.startsWith("allow"))?.option_id;
+      const reject = req.options.find((o) =>
+        o.kind.startsWith("reject"))?.option_id;
+      if (!allow || !reject) return; // permission sans issue utile
+      extra.allow = allow;
+      extra.reject = reject;
+      options.actionTypeId = ACT_PERM;
+      const head = options.body ?? options.title ?? "";
+      options.title = head;
+      options.body = req.title || head;
+    } else {
+      options.actionTypeId = ACT_QUESTION;
+    }
+    extra.req = req.request_id;
   }
 
   // --- Annulation à la résolution de la condition (#184) ---------------
@@ -334,8 +424,33 @@ class OsNotifications {
   }
 
   /** Tap sur la notif : la fenêtre reprend le focus (dé-minimisée si
-   *  besoin) puis la session s'ouvre quand la payload a survécu. */
+   *  besoin) puis la session s'ouvre quand la payload a survécu.
+   *  Android (Y3) : les actions allow/reject/reply répondent à la demande
+   *  en attente SANS ouvrir la session — l'intent natif a déjà rappelé
+   *  l'app au premier plan, la navigation resterait une surprise. */
   private async clicked(e: ActionPerformed) {
+    const extra = e.notification?.extra as
+      | {
+          sid?: unknown;
+          conn?: unknown;
+          req?: unknown;
+          allow?: unknown;
+          reject?: unknown;
+        }
+      | null
+      | undefined;
+    const sid = typeof extra?.sid === "string" ? extra.sid : "";
+    const conn = typeof extra?.conn === "string" ? extra.conn : "";
+    const req = typeof extra?.req === "string" ? extra.req : "";
+    const respondable =
+      e.actionId === "reply" ||
+      (e.actionId === "allow" && typeof extra?.allow === "string") ||
+      (e.actionId === "reject" && typeof extra?.reject === "string");
+    if (sid && req && respondable) {
+      await this.respondFromAction(e, { sid, conn, req,
+        allow: extra?.allow, reject: extra?.reject });
+      return;
+    }
     try {
       const win = getCurrentWindow();
       if (await win.isMinimized()) await win.unminimize();
@@ -343,12 +458,77 @@ class OsNotifications {
     } catch {
       /* Android / plateforme sans fenêtrage — l'OS a déjà rappelé l'app */
     }
-    const extra = e.notification?.extra as
-      | { sid?: unknown; conn?: unknown }
-      | null
-      | undefined;
-    if (typeof extra?.sid === "string" && extra.sid) {
-      this.deps.openSession(extra.sid, typeof extra.conn === "string" ? extra.conn : "");
+    if (sid) {
+      this.deps.openSession(sid, conn);
+    }
+  }
+
+  /** Réponse à une demande depuis une action de notif (Y3) — jamais de
+   *  navigation. Succès ou « déjà résolue » (autre appareil, dock) →
+   *  retrait de la notif. Connexion pas encore « ok » (app réveillée à
+   *  froid par l'action) → réponse tenue jusqu'au prochain passage ok,
+   *  au plus 30 s ; au-delà ou échec applicatif → notif de repli qui
+   *  ouvre la session au tap. */
+  private async respondFromAction(
+    e: ActionPerformed,
+    x: { sid: string; conn: string; req: string; allow?: unknown; reject?: unknown },
+  ) {
+    const key = `${x.conn || "default"}:${x.sid}:question`;
+    const reply =
+      e.actionId === "reply"
+        ? { answer: parseAnswer(e.inputValue || null) }
+        : { option_id: String(e.actionId === "allow" ? x.allow : x.reject) };
+    const t0 = Date.now();
+    for (;;) {
+      if (x.conn && (this.deps.connState(x.conn) ?? "ok") !== "ok") {
+        if (Date.now() - t0 > REPLY_WAIT_MS) break;
+        await new Promise((r) => setTimeout(r, REPLY_POLL_MS));
+        continue;
+      }
+      try {
+        await respondPending({ id: x.sid, conn: x.conn }, x.req, reply);
+        this.cancelKey(key);
+        return;
+      } catch (err) {
+        // « no pending request » = déjà résolue ailleurs → ranger, rien
+        // à signaler.
+        if (/no pending request/i.test(String(err))) {
+          this.cancelKey(key);
+          return;
+        }
+        if (isConnLost(err, x.conn) && Date.now() - t0 <= REPLY_WAIT_MS) {
+          await new Promise((r) => setTimeout(r, REPLY_POLL_MS));
+          continue;
+        }
+        logUi("warn", `notif: action reply failed (${e.actionId}): ${err}`);
+        break;
+      }
+    }
+    const title =
+      e.notification?.body || e.notification?.title || x.sid;
+    void this.sendReplyFailed(x.sid, x.conn, title);
+  }
+
+  /** Notif de repli quand la réponse d'une action n'a pas pu partir —
+   *  même emplacement que l'alerte « question » d'origine : le tap
+   *  reprend le chemin historique (focus + ouverture de la session). */
+  private async sendReplyFailed(sid: string, conn: string, title: string) {
+    const key = `${conn || "default"}:${sid}:question`;
+    const id = this.ids.get(key)?.id ?? this.nextId++;
+    const options: Options = {
+      id,
+      title: "AgentControl",
+      body: t("notif_act_failed", { title }),
+      extra: { sid, conn, kind: "question" },
+      autoCancel: true,
+      group: `agentcontrol:${conn || "default"}`,
+      ...(isAndroid() && this.channelOk ? { channelId: CHANNEL_ID } : {}),
+    };
+    try {
+      await invoke("plugin:notification|notify", { options });
+      this.ids.set(key, { id, conn: conn || "default", sid, kind: "question" });
+    } catch (e) {
+      logUi("warn", `notif: reply-failed send: ${e}`);
     }
   }
 }

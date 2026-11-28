@@ -5,7 +5,7 @@
 // les attribue au trigger qui les a provoquées.
 // Usage : npm run build && node tests/hist-loss-e2e.mjs
 import puppeteer from "puppeteer-core";
-import { spawn } from "node:child_process";
+import { startVitePreview } from "./lib/vite-preview.mjs";
 
 const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
 
@@ -84,6 +84,7 @@ const MOCK = `(function () {
         case "call": return p.then(() => rpc(args.method, args.params ?? {}));
         case "subscribe": return p.then(() => null);
         case "saved_connections": case "ssh_hosts": return p.then(() => []);
+        case "other_instances": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAA x");
         case "check_update": return p.then(() => { throw new Error("offline"); });
         default: return p.then(() => null);
@@ -92,9 +93,7 @@ const MOCK = `(function () {
   };
 })();`;
 
-const server = spawn("npx", ["vite", "preview", "--port", "4193", "--strictPort"], { stdio: "ignore" });
-process.on("exit", () => server.kill());
-await new Promise((r) => setTimeout(r, 1800));
+const { server, base: BASE } = await startVitePreview();
 const b = await puppeteer.launch({ executablePath: CHROMIUM, headless: true, args: ["--no-sandbox"] });
 const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 860 });
@@ -158,7 +157,7 @@ const push = (session, e) => p.evaluate((s, e) =>
   window.__push(s, e), session, e);
 const trig = (t) => p.evaluate((t) => { window.__trigger = t; }, t);
 
-await p.goto("http://localhost:4193/", { waitUntil: "networkidle0" });
+await p.goto(BASE + "/", { waitUntil: "networkidle0" });
 await p.waitForSelector("#btn-connect", { timeout: 15000 });
 await p.evaluate(() => window.__arm());
 await p.evaluate(() => document.querySelector("#btn-connect")?.click());
