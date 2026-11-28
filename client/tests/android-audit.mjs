@@ -714,8 +714,14 @@ if (await ev(() => !document.querySelector("#file-view")?.textContent.trim() &&
 }
 
 // ── Mode édition + dirty guard au back ───────────────────────────────────────
+// Le fichier texte non-md s'ouvre DÉJÀ dans l'éditeur (édition directe,
+// sans focus → pas de clavier virtuel au tap du nœud). fv-edit = retour
+// lecture, pas prérequis pour taper.
 await step("a16-fileedit", async () => {
-  await tap("#fv-edit", 350);
+  if (!(await ev(() => !document.getElementById("file-edwrap")?.hidden &&
+                    document.getElementById("fv-edit")?.classList.contains("on")))) {
+    V("a16-fileedit", "direct-edit", "fichier texte non-md non ouvert en édition directe");
+  }
   await shot("a16-fileedit");
   await collect("a16-fileedit");
   await ev(() => {

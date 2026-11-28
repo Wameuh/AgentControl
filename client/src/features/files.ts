@@ -114,6 +114,7 @@ interface CurFile {
   binary: boolean;          // sniffé binaire → vue seule, pas d'édition
   fetching: boolean;        // tranche réseau en vol
   done: boolean;            // loaded >= size
+  failed: boolean;          // erreur de lecture → pas d'auto-édition
   gen: number;              // ++ à chaque save → tranches en vol invalidées
 }
 
@@ -278,14 +279,25 @@ export class FileExplorer {
         enc: opts?.enc ?? defaultEncoding(),
         bom: false, crlf: false, size: 0, mtimeMs: 0, loaded: 0,
         decoder: null, chunks: [], binary: false,
-        fetching: false, done: false, gen: 0,
+        fetching: false, done: false, failed: false, gen: 0,
       };
       this.cur = cur;
       this.mdView.attach(path, ext);
       this.syncEncSelect();
       this.updateStatus();
       await this.fetchChunk(cur);
-      if (opts?.edit && this.cur === cur && this.editable()) this.enterEdit();
+      // Édition directe : tout fichier texte non-markdown éditable
+      // s'ouvre dans l'éditeur (le contenu affiché EST le textarea) —
+      // fini le bouton « Éditer » à chercher. Le md garde son flux
+      // explicite (split source/aperçu live). Sans focus forcé : un
+      // clic dans la zone pose le caret, la sélection/copier reste
+      // libre et aucun caractère ne part à l'ouverture (clavier
+      // virtuel Android épargné aussi).
+      const direct =
+        this.cur === cur && !cur.failed && !this.mdView.isMd;
+      if (this.cur === cur && this.editable() && (opts?.edit || direct)) {
+        this.enterEdit(!!opts?.edit);
+      }
     } catch (e) {
       this.mdView.detach();
       $("file-view").textContent = String(e);
@@ -375,6 +387,7 @@ export class FileExplorer {
       this.updateStatus();
     } catch (e) {
       cur.done = true;
+      cur.failed = true;
       if (this.cur === cur) {
         // En mode rendu, #file-view est masqué → l'erreur serait invisible
         // (« … » éternel ou document tronqué en silence) : retomber en vue
@@ -467,11 +480,14 @@ export class FileExplorer {
   // Éditeur : textarea transparente sur overlay coloré + gouttière
   // ------------------------------------------------------------------
 
-  private enterEdit() {
+  /** `focus` : l'entrée explicite (bouton, menu ctx, nouveau fichier)
+   *  place le caret ; l'auto-édition à l'ouverture laisse la zone
+   *  cliquable — le premier clic/tap y pose le curseur. */
+  private enterEdit(focus = true) {
     const cur = this.cur;
     // `abs` vide = première tranche pas encore arrivée → on attend
     // (éditer un buffer vide sur un fichier existant = insertion en tête).
-    if (!cur || !this.editable() || !cur.abs) return;
+    if (!cur || this.editOn || !this.editable() || !cur.abs) return;
     this.editOn = true;
     const ta = $("file-edit") as HTMLTextAreaElement;
     ta.value = cur.chunks.join("");
@@ -492,7 +508,7 @@ export class FileExplorer {
     this.updateSplitLayout();
     // Aperçu md live : force le re-rendu sur le buffer courant.
     this.mdView.changed();
-    ta.focus();
+    if (focus) ta.focus();
   }
 
   private exitEdit() {

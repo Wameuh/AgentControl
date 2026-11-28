@@ -86,6 +86,11 @@ export class MdView {
     this.sync();
   }
 
+  /** Le fichier courant est un markdown (rendu/split source-aperçu). */
+  get isMd() {
+    return this.md;
+  }
+
   /** Le div rendu est la vue active — ou l'aperçu live en édition
    *  splittée (son scroll alimente maybeMore dans les deux cas). */
   get rendered() {
