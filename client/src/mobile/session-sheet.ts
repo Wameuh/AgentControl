@@ -186,7 +186,7 @@ function optLabel(labelText: string, refresh = false): HTMLElement {
     r.className = "ss-refresh";
     r.title = caps.title;
     r.setAttribute("aria-label", caps.title);
-    r.innerHTML = icon("refresh");
+    r.innerHTML = icon("sync");
     r.onclick = () => caps.click();
     lab.appendChild(r);
   }
