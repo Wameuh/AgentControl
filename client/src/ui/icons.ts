@@ -50,6 +50,10 @@ const SHAPES: Record<string, string> = {
     '<path d="m5.5 8.5 2.6 2.3-2.6 2.3"/><path d="M9.6 13h2.9"/>' +
     '<path d="M19.5 2.5v5M17 5h5"/>',
   panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9.5 4v16"/>',
+  // Raccrocher une fenêtre flottante au panneau (flèche rentrante)
+  dock:
+    '<rect x="3" y="4" width="18" height="16" rx="2"/>' +
+    '<path d="M17.5 12H8"/><path d="m11.5 8.5-3.5 3.5 3.5 3.5"/>',
   down: '<path d="M12 4v12"/><path d="m6 12 6 6 6-6"/><path d="M5 21h14"/>',
   steer: '<path d="m15 10 5 5-5 5"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/>',
   pin:

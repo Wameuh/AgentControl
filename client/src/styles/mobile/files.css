@@ -26,6 +26,8 @@ body.android #file-title-path {
   font-family: Mono, ui-monospace, monospace; font-size: 12px; color: var(--dim);
 }
 body.android #btn-tree { display: none !important; }
+/* Pas de pop-out sur mobile : la colonne est déjà la page entière. */
+body.android #btn-tree-pop, body.android #ft-float { display: none !important; }
 /* Raccourcis « fichiers récents » : rangée à défilement horizontal au
    sommet de l'arbre (une puce par ouverture récente de la session). */
 body.android #ft-recent:not([hidden]) {

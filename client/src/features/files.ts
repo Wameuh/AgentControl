@@ -35,6 +35,7 @@ import { MdView } from "./md-view";
 import { PdfView } from "./pdf-view";
 import { bindCtx, hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
+import { TreeFloat } from "./tree-float";
 
 /** URL du schéma custom acvideo — forme imposée par plateforme :
  *  http://acvideo.localhost sous Windows/Android, acvideo:// ailleurs.
@@ -162,6 +163,12 @@ export class FileExplorer {
   });
   private cleanRes: ((ok: boolean) => void) | null = null;
   private saving = false;
+  /** Colonne arborescence détachable en fenêtre flottante (#ft-float) —
+   *  desktop seulement ; géométrie et mode persistés par TreeFloat. */
+  private float = new TreeFloat({
+    dock: () => this.setTreeFloat(false),
+    hide: () => this.setTreeVisible(false),
+  });
   private hlTimer: ReturnType<typeof setTimeout> | undefined;
   private numsTimer: ReturnType<typeof setTimeout> | undefined;
   private deps = {
@@ -204,7 +211,12 @@ export class FileExplorer {
       nav.push("files");
       // Ré-ouverture : les watches ont été lâchés à la fermeture et
       // l'arbre affiché peut être périmé — reload si la colonne est on.
-      if (this.treeOpen) this.treeReady = this.loadTreeRoot();
+      // Exception : arbre dans le flottant détaché — ses watches sont
+      // restées actives à la fermeture du panneau → pas périmé, et un
+      // reload détruirait les dossiers dépliés à chaque fichier ouvert.
+      if (this.treeOpen && $("ft-float").hidden) {
+        this.treeReady = this.loadTreeRoot();
+      }
     }
     // Android : le viewer glisse par-dessus la liste (navigation plein écran).
     if (isAndroid()) {
@@ -852,8 +864,10 @@ export class FileExplorer {
       nav.close("files");
       $("file-panel").hidden = true;
       this.clearSearch();
-      // Panneau fermé : aucun dossier affiché → zéro watch.
-      this.unwatchAll();
+      // Panneau fermé : aucun dossier affiché → zéro watch — sauf si
+      // l'arbre vit dans le flottant détaché, toujours visible (ses
+      // watches FS doivent continuer de le rafraîchir).
+      if ($("ft-float").hidden) this.unwatchAll();
     })();
   }
 
@@ -962,7 +976,10 @@ export class FileExplorer {
    *  à l'affichage couvre la staleness (dirty sans travail pour rien). */
   private onDirChanged(m: { session?: string; path?: string }) {
     if (!app.current || m.session !== app.current.id) return;
-    if (!this.treeOpen || $("file-panel").hidden) return;
+    if (!this.treeOpen) return;
+    // Arbre visible : panneau fichiers ouvert (mode docké) ou flottant
+    // affiché (mode détaché — le panneau peut être fermé).
+    if ($("file-panel").hidden && $("ft-float").hidden) return;
     const rel = m.path ?? "";
     const box = rel === "" ? $("file-tree") : this.expandedBox(rel);
     if (!box) return;
@@ -1145,13 +1162,53 @@ export class FileExplorer {
     this.treeOpen = v;
     $("ft-side").hidden = !v;
     $("btn-tree-refresh").hidden = !v;
+    this.syncFloat();
     this.clearSearch();
-    if (v && !$("file-panel").hidden) this.treeReady = this.loadTreeRoot();
+    // Le chargement ne dépend plus du panneau : en mode détaché l'arbre
+    // vit dans le flottant, visible même panneau fichiers fermé.
+    if (v && (!$("file-panel").hidden || this.float.isDetached())) {
+      this.treeReady = this.loadTreeRoot();
+    }
     // Arbre masqué : plus aucun dossier affiché → zéro watch (dirty
     // sans travail ; le re-affichage recharge de toute façon).
     if (!v) this.unwatchAll();
     // La colonne arborescence prend/restitue de la largeur → le split
     // md (côte-à-côte ↔ empilé) se ré-évalue.
+    this.updateSplitLayout();
+  }
+
+  /** Visibilité du flottant = arbre affiché ET mode détaché. Le bouton
+   *  pop-out reflète le mode (état actif). */
+  private syncFloat() {
+    $("ft-float").hidden = !(this.treeOpen && this.float.isDetached());
+    $("btn-tree-pop").classList.toggle("on", this.float.isDetached());
+  }
+
+  /** Bascule colonne dockée ↔ fenêtre flottante. Activer implique
+   *  l'arbre visible ; le contenu déjà chargé n'est pas re-fetché. */
+  private setTreeFloat(on: boolean) {
+    if (isAndroid()) return;
+    if (on === this.float.isDetached()) {
+      // Déjà dans le mode demandé : n'agir que si l'arbre est masqué
+      // (setTreeVisible(true) sur un arbre déjà ouvert rechargerait
+      // l'arbre et perdrait les dossiers dépliés).
+      if (on && !this.treeOpen) this.setTreeVisible(true);
+      return;
+    }
+    if (on) {
+      const wasOpen = this.treeOpen;
+      const panelHidden = $("file-panel").hidden;
+      if (!wasOpen) this.setTreeVisible(true);
+      this.float.attach();
+      // Arbre affiché pour la première fois panneau fermé : le
+      // setTreeVisible ci-dessus n'a pas pu charger (ni panneau ni
+      // flottant visible à ce moment) → chargement maintenant.
+      if (!wasOpen && panelHidden) this.treeReady = this.loadTreeRoot();
+    } else {
+      this.float.dock();
+    }
+    this.syncFloat();
+    // La colonne change de place → le split md se ré-évalue.
     this.updateSplitLayout();
   }
 
@@ -1849,13 +1906,23 @@ export class FileExplorer {
           const w = Math.max(Number(p.style.width.replace("px", "")) || 0, 620);
           p.style.width = `${Math.min(w, window.innerWidth - 120)}px`;
         }
-        this.setTreeVisible(true);
+        // Arbre déjà affiché dans le flottant détaché : setTreeVisible
+        // rechargerait l'arbre (watches actives → pas périmé) et
+        // viderait la recherche — on saute.
+        if ($("ft-float").hidden || !this.treeOpen) this.setTreeVisible(true);
       } else {
         this.closeFilePanel();
       }
     };
     // 🗂 dans le panneau : bascule juste la colonne arborescence
     $("btn-tree").onclick = () => this.setTreeVisible($("ft-side").hidden);
+    // ⇱ pop-out : la colonne vit dans une fenêtre flottante (desktop ;
+    // bouton masqué sur Android, setTreeFloat gardé aussi).
+    $("btn-tree-pop").onclick = () => this.setTreeFloat(!this.float.isDetached());
+    this.float.init();
+    // Mode détaché restauré au boot : synchronise visibilité/bouton
+    // (l'arbre reste masqué tant que l'utilisateur ne l'ouvre pas).
+    this.syncFloat();
     $("btn-tree-refresh").onclick = () => {
       this.treeReady = this.loadTreeRoot();
     };
