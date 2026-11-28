@@ -5,12 +5,14 @@
 //!   prompt.rs  — envois user/peer, file d'attente, réponses perm./questions
 //!   compact.rs — retenue des prompts pendant un /compact agent-side
 //!   config.rs  — mode/modèle/groupe/titre/options de config dynamiques
+//!   cwd.rs     — cwd « effectif » déclaré par l'agent (reported_cwd → term_open)
 //!   pins.rs    — messages épinglés persistés (pinned.json)
 //!   watch.rs   — watchdog « tour silencieux » (events agent, nudge)
 
 mod agent;
 mod compact;
 mod config;
+mod cwd;
 mod pins;
 mod prompt;
 mod steps;

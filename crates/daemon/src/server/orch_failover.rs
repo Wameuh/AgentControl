@@ -178,7 +178,7 @@ Start by reading {RULES} — the repo's branch, PR, review, CI and merge rules l
 {PRS}
 
 ## MISSION
-1. For each item above: check its state (`agentbacklog --list --json`), find or create the dedicated worktree under {WORKTREE_DIR} (e.g. `git worktree add {WORKTREE_DIR}/<feat> -b <branch> origin/{BASE}` — NEVER in the main checkout {WS}; the exact convention is the repo rules' one), continue the work and drive the PR through the repo rules' full cycle (merge: {MERGE_RULE}).
+1. For each item above: check its state (`agentbacklog --list --json`), find or create the dedicated worktree under {WORKTREE_DIR} (e.g. `git worktree add {WORKTREE_DIR}/<feat> -b <branch> origin/{BASE}` — NEVER in the main checkout {WS}; the exact convention is the repo rules' one), continue the work and drive the PR through the repo rules' full cycle (merge: {MERGE_RULE}); once the worktree exists, run `acctl cwd <its absolute path>` — the session terminal then opens there (re-declare if you move).
 2. Continue until your items are `--done` and your PRs settled (merged or closed), then STOP outright. You NEVER run `agentbacklog --pop` yourself: the orchestrator dispatches the next work (one worker = one item; a pop would bypass the plan review in plan_review mode and the "fresh context per item" invariant).
 3. `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` per each item's done_when (`agentbacklog --list --json`: 'pr_merged' = your item's PR MERGED, 'deliverable' = its own criteria met, never waiting for a merge); unrecoverable blocker: `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explain the reason, then stop.
 
@@ -684,6 +684,7 @@ mod tests {
             agent: agent.into(),
             title: title.into(),
             cwd: String::new(),
+            reported_cwd: None,
             created_at: String::new(),
             native_session_id: None,
             mode: None,

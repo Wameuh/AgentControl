@@ -171,7 +171,9 @@ impl Daemon {
         rows: u16,
     ) -> Result<(Term, mpsc::Receiver<TermMsg>, String)> {
         let s = self.get_session(&session).await?;
-        let cwd = s.meta_snapshot().cwd;
+        // Workspace effectif déclaré par l'agent (worktree…) quand il
+        // existe, sinon cwd de session — cf. session/cwd.rs.
+        let cwd = s.term_cwd();
         // Comme les agents : acctl/pont A2A utilisables dans le shell.
         let envs: Vec<(String, String)> = if self.a2a.enabled {
             vec![

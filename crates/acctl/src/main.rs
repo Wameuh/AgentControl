@@ -33,6 +33,9 @@
 //!   acctl steps set [--session S] "a:todo,b:wip,…" | steps get [--session S]
 //!                                     — étapes de la tâche (skill ac-steps ;
 //!                                     session = $AGENTCONTROL_SESSION sinon)
+//!   acctl cwd [--session S] <path|->   — cwd « effectif » déclaré par
+//!                                     l'agent (ex. worktree) : le terminal
+//!                                     PTY s'y ouvre ; « - »/« clear » efface
 //!   acctl comp [ls] [--json] | info <n> | start|stop|restart <n>
 //!       | logs <n> [--tail N] | catalog [--json] [--refresh]
 //!       | install <n> | add <n> [--kind K] [--cmd "<argv>"] [--hc S]
@@ -396,6 +399,7 @@ const COMMANDS: &[&str] = &[
     "model",
     "setcfg",
     "steps",
+    "cwd",
     "respond",
     "blob",
     "download",
@@ -448,7 +452,7 @@ fn suggest_command(input: &str) -> Option<&'static str> {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|pr|comp|orch|steps|token|daemon-update");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|pr|comp|orch|steps|cwd|token|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -1068,6 +1072,46 @@ async fn main() -> Result<()> {
                 }
                 other => bail!("steps: unknown sub-command \"{other}\" (set|get)"),
             }
+        }
+        "cwd" => {
+            // acctl cwd [--session S] <path|-> — cwd « effectif »
+            // déclaré par l'agent (worktree…) : term_open l'utilise
+            // en priorité sur le cwd de session ; « - »/« clear »
+            // efface la déclaration. Session = --session ou
+            // $AGENTCONTROL_SESSION.
+            let mut session = None;
+            let mut path: Option<String> = None;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--session" => {
+                        session = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "-" | "clear" => {
+                        path = Some(String::new());
+                        i += 1;
+                    }
+                    p => {
+                        if path.is_some() {
+                            bail!("cwd: unexpected argument \"{p}\"");
+                        }
+                        path = Some(p.to_string());
+                        i += 1;
+                    }
+                }
+            }
+            let session = session
+                .or_else(|| std::env::var("AGENTCONTROL_SESSION").ok())
+                .context("no session: --session S or AGENTCONTROL_SESSION")?;
+            let Some(p) = path else {
+                bail!("cwd <path|-> [--session S]");
+            };
+            let cwd = if p.is_empty() { None } else { Some(p) };
+            let v = c
+                .call(proto::ReqKind::SessionSetCwd { session, cwd })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
         }
         "respond" => {
             // respond <session> <request_id> [option_id | --answer JSON]

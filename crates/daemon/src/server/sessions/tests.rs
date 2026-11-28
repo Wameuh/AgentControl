@@ -7,6 +7,7 @@ fn meta(state: &str) -> SessionMeta {
         agent: "devin".into(),
         title: "t".into(),
         cwd: "/w".into(),
+        reported_cwd: None,
         created_at: "2026-01-01T00:00:00Z".into(),
         native_session_id: None,
         mode: None,

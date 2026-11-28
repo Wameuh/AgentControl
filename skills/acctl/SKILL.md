@@ -52,6 +52,7 @@ the PR registry.
 | `acctl clear <session>` | clears the journal (`/clear`) |
 | `acctl rm <session>` | **deletes the session permanently** |
 | `acctl mode <session> <mode>` / `acctl model <s> <m>` / `acctl setcfg <s> <id> <val>` | agent runtime settings |
+| `acctl cwd [--session S] <path\|->` | declares the session's effective cwd (e.g. your worktree) — the PTY terminal opens there; `-`/`clear` resets to the session cwd |
 | `acctl respond <session> <request_id> [option_id | --answer JSON]` | answers a pending question/permission |
 | `acctl daemon-update [version]` | daemon self-update (default: acctl's own version) |
 | `acctl pr ls|add|note|rm|sync` | PR ↔ session registry (see the global PR-registry rule) |
@@ -95,6 +96,7 @@ Useful requests outside acctl:
 | `list_dir {session, path}` / `delete_path {session, path}` | files |
 | `list_native_sessions {session}` | resumable native sessions of the agent |
 | `term_open/term_input/term_resize/term_close` | PTY terminal (client usage) |
+| `session_set_cwd {session, cwd}` | effective cwd for term_open (`cwd: null` clears) |
 
 Full reference: `ReqKind` in `crates/proto/src/lib.rs` (~l. 430).
 

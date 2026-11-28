@@ -626,7 +626,7 @@ You are the IMPLEMENTER of the backlog item below (session $AGENTCONTROL_SESSION
 
 ## MISSION
 
-Implement the plan following the contribution workflow of {RULES} to the letter: dedicated worktree under {WORKTREE_DIR} based on {BASE} (NEVER in the main checkout {WS}) -> branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> iterations -> review settled -> PR ready -> required GREEN checks -> merge: {MERGE_RULE}. Any wait > ~1 min (verdict, checks, merge) goes through an ac-wait waiter — never a blocking --watch or a poll loop inside a tool call.
+Implement the plan following the contribution workflow of {RULES} to the letter: dedicated worktree under {WORKTREE_DIR} based on {BASE} (NEVER in the main checkout {WS}) -> branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> iterations -> review settled -> PR ready -> required GREEN checks -> merge: {MERGE_RULE}. Any wait > ~1 min (verdict, checks, merge) goes through an ac-wait waiter — never a blocking --watch or a poll loop inside a tool call. Once the worktree exists, run `acctl cwd <its absolute path>` — the session terminal then opens there (re-declare if you move).
 
 {DOD} Unrecoverable blocker: agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explain why, then stop.
 
@@ -641,7 +641,7 @@ You are an autonomous worker on the repo (cwd {WS}). Read {RULES} — the repo's
 ## MISSION — a single task, already assigned (backlog item)
 {ITEM}
 
-1. Implement following the description to the letter: dedicated worktree under {WORKTREE_DIR} based on {BASE} (NEVER in the main checkout {WS}), spec, requested checks.
+1. Implement following the description to the letter: dedicated worktree under {WORKTREE_DIR} based on {BASE} (NEVER in the main checkout {WS}), spec, requested checks. Once the worktree exists, run `acctl cwd <its absolute path>` — the session terminal then opens there (re-declare if you move).
 2. Contribution cycle (per the repo's rules): branch -> push -> draft PR -> request review ({REVIEW_TRIGGER}) -> iterations -> review settled -> PR ready -> required GREEN checks on the head -> merge: {MERGE_RULE}. Any wait > ~1 min (verdict, checks, merge) goes through an ac-wait waiter — never a blocking --watch or a poll loop inside a tool call.
 3. {DOD}
 

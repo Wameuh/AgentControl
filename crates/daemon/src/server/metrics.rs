@@ -420,6 +420,7 @@ mod tests {
             agent: "devin".into(),
             title: "Backlog-W1".into(),
             cwd: "/workspace".into(),
+            reported_cwd: None,
             created_at: "2026-01-01T00:00:00Z".into(),
             native_session_id: None,
             mode: None,

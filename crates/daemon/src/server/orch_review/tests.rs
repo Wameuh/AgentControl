@@ -636,6 +636,7 @@ fn rev_meta(state: &str, kind: Option<&str>) -> SessionMeta {
         agent: "claude".into(),
         title: "PRReview-1".into(),
         cwd: String::new(),
+        reported_cwd: None,
         created_at: String::new(),
         native_session_id: None,
         mode: None,
